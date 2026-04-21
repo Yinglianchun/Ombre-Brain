@@ -254,6 +254,54 @@ Ombre Brain gives it persistent memory — not cold key-value storage, but a sys
 - **历史对话导入 / Conversation history import**: 将过去与 Claude / ChatGPT / DeepSeek 等的对话批量导入为记忆桶。支持 Claude JSON 导出、ChatGPT 导出、Markdown、纯文本等格式，分块处理带断点续传，通过 Dashboard「导入」Tab 操作。
   Batch-import past conversations (Claude / ChatGPT / DeepSeek etc.) as memory buckets. Supports Claude JSON export, ChatGPT export, Markdown, and plain text. Chunked processing with resume support, via the Dashboard "Import" tab.
 
+## 网关注入模式 / Gateway Injection Mode
+
+除了 MCP 服务器，现在还可以单独启动一个 OpenAI 兼容网关：
+
+```bash
+python gateway.py
+```
+
+它暴露两个接口：
+- `GET /health`
+- `POST /v1/chat/completions`
+
+这个网关会在转发到上游模型前自动注入四段上下文：
+- `Current Inner State`：人格、情绪、关系状态和回复姿态
+- `Core Memory`：`pinned / protected` 桶
+- `Recent Context`：最近 `72h` 内的普通记忆摘要
+- `Recalled Memory`：从关键词 + embedding 候选里挑出的 `0~2` 条动态记忆
+
+v1 已实现的召回约束：
+- 同一 `session` 最近 `5` 轮注入过的桶优先跳过
+- 同一桶在 `48h` 内应用冷却折扣，倍率从 `0.3` 线性恢复到 `1.0`
+- 如果最近 `5` 轮过滤后一个候选都不剩，会放宽轮次过滤，只保留冷却折扣
+
+请求要求：
+- 认证头：`Authorization: Bearer <OMBRE_GATEWAY_TOKEN>`
+- 会话头：`X-Ombre-Session-Id`
+- 当前只支持非流式请求，`stream=true` 会返回 `400`
+
+需要额外设置的环境变量：
+- `OMBRE_GATEWAY_TOKEN`
+- `OMBRE_GATEWAY_UPSTREAM_API_KEY`
+- `OMBRE_PERSONA_API_KEY`（可选，缺省回退 `OMBRE_API_KEY`）
+
+上游模型地址和默认模型写在 `config.yaml` 的 `gateway` 段里。
+
+### 人格状态引擎 / Persona State Engine
+
+网关会维护一份独立的 `persona_state.db`：
+- `persona_global_state`：长期人格和关系状态
+- `persona_session_state`：按 `X-Ombre-Session-Id` 保存的短期心情
+- `persona_events`：每轮事件评估、状态增量和原始响应
+
+默认用便宜的 DeepSeek 做事件评估：
+- `persona.base_url`: `https://api.deepseek.com/v1`
+- `persona.model`: `deepseek-chat`
+
+DeepSeek 每轮只看最后一条 user message，输出固定 JSON。系统会裁剪每次变化幅度：人格慢慢变，关系中速变，当前心情最快变，并按半衰期回落到默认状态。
+
 ## 边界说明 / Design boundaries
 
 官方记忆功能已经在做身份层的事了——你是谁，你有什么偏好，你们的关系是什么。那一层交给它，Ombre Brain不打算造重复的轮子。
@@ -426,6 +474,13 @@ All parameters in `config.yaml` (copy from `config.example.yaml`). Key ones:
 | `dehydration.base_url` | API 地址 / API endpoint | `https://api.deepseek.com/v1` |
 | `embedding.enabled` | 启用向量语义检索 / Enable embedding search | `true` |
 | `embedding.model` | Embedding 模型 / Embedding model | `gemini-embedding-001` |
+| `gateway.upstream_base_url` | 网关上游 OpenAI 兼容地址 / Gateway upstream base URL | `""` |
+| `gateway.upstream_default_model` | 网关默认模型 / Gateway default model | `""` |
+| `gateway.skip_recent_rounds` | 最近几轮跳过注入 / Skip recently injected rounds | `5` |
+| `gateway.cooldown_hours` | 召回冷却时长 / Recall cooldown hours | `48` |
+| `persona.enabled` | 启用人格状态注入 / Enable persona state injection | `true` |
+| `persona.model` | 人格事件评估模型 / Persona event evaluator model | `deepseek-chat` |
+| `persona.session_mood_half_life_minutes` | 短期心情半衰期 / Session mood half-life | `90` |
 | `decay.lambda` | 衰减速率，越大越快忘 / Decay rate | `0.05` |
 | `decay.threshold` | 归档阈值 / Archive threshold | `0.3` |
 | `merge_threshold` | 合并相似度阈值 (0-100) / Merge similarity | `75` |
@@ -435,6 +490,16 @@ Sensitive config via env vars:
 - `OMBRE_API_KEY` — LLM API 密钥
 - `OMBRE_TRANSPORT` — 覆盖传输方式
 - `OMBRE_BUCKETS_DIR` — 覆盖存储路径
+- `OMBRE_CONFIG_PATH` — 指向自定义 `config.yaml`
+- `OMBRE_GATEWAY_HOST` — 覆盖网关监听地址
+- `OMBRE_GATEWAY_PORT` — 覆盖网关监听端口
+- `OMBRE_GATEWAY_UPSTREAM_BASE_URL` — 覆盖网关上游地址
+- `OMBRE_GATEWAY_UPSTREAM_MODEL` — 覆盖网关默认模型
+- `OMBRE_GATEWAY_TOKEN` — 网关鉴权 token
+- `OMBRE_GATEWAY_UPSTREAM_API_KEY` — 网关转发上游时使用的 API key
+- `OMBRE_PERSONA_API_KEY` — 人格事件评估 API key，缺省回退 `OMBRE_API_KEY`
+- `OMBRE_PERSONA_BASE_URL` — 覆盖人格事件评估 API 地址
+- `OMBRE_PERSONA_MODEL` — 覆盖人格事件评估模型
 
 ## 衰减公式 / Decay Formula
 

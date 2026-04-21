@@ -53,13 +53,71 @@ def load_config(config_path: str = None) -> dict:
             "fuzzy_threshold": 50,
             "max_results": 5,
         },
+        "gateway": {
+            "host": "0.0.0.0",
+            "port": 8010,
+            "upstream_base_url": "",
+            "upstream_default_model": "",
+            "head_recent_hours": 72,
+            "dynamic_top_k": 10,
+            "inject_max_cards": 2,
+            "skip_recent_rounds": 5,
+            "cooldown_hours": 48,
+            "cooldown_floor": 0.3,
+            "inject_total_budget": 1200,
+            "core_memory_budget": 500,
+            "recent_context_budget": 300,
+            "recalled_memory_budget": 400,
+            "semantic_weight": 0.45,
+            "keyword_weight": 0.35,
+            "importance_weight": 0.1,
+            "freshness_weight": 0.1,
+            "first_card_min_score": 0.55,
+            "second_card_min_score": 0.50,
+            "second_card_relative_score": 0.85,
+        },
+        "persona": {
+            "enabled": True,
+            "profile_id": "haven_xiaoyu",
+            "mode": "llm",
+            "base_url": "https://api.deepseek.com/v1",
+            "model": "deepseek-chat",
+            "api_key": "",
+            "temperature": 0.1,
+            "max_tokens": 500,
+            "global_decay_hours": 168,
+            "session_mood_half_life_minutes": 90,
+            "max_personality_delta": 0.01,
+            "max_relationship_delta": 0.03,
+            "max_affect_delta": 0.18,
+            "initial_personality": {
+                "openness": 0.56,
+                "conscientiousness": 0.50,
+                "extraversion": 0.44,
+                "agreeableness": 0.66,
+                "neuroticism": 0.36,
+            },
+            "initial_relationship": {
+                "affinity": 0.86,
+                "dominance": 0.38,
+                "defensiveness": 0.12,
+                "trust": 0.82,
+            },
+            "initial_affect": {
+                "valence": 0.56,
+                "arousal": 0.34,
+                "mood_label": "warm_neutral",
+                "session_defensiveness": 0.12,
+            },
+        },
     }
 
     # --- Load user config from YAML file ---
     # --- 从 YAML 文件加载用户自定义配置 ---
     if config_path is None:
-        config_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "config.yaml"
+        config_path = os.environ.get(
+            "OMBRE_CONFIG_PATH",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml"),
         )
 
     config = defaults.copy()
@@ -98,10 +156,43 @@ def load_config(config_path: str = None) -> dict:
     if env_buckets_dir:
         config["buckets_dir"] = env_buckets_dir
 
+    env_gateway_host = os.environ.get("OMBRE_GATEWAY_HOST", "")
+    if env_gateway_host:
+        config.setdefault("gateway", {})["host"] = env_gateway_host
+
+    env_gateway_port = os.environ.get("OMBRE_GATEWAY_PORT", "")
+    if env_gateway_port:
+        try:
+            config.setdefault("gateway", {})["port"] = int(env_gateway_port)
+        except ValueError:
+            logging.warning(
+                f"Invalid OMBRE_GATEWAY_PORT / 无效的 OMBRE_GATEWAY_PORT: {env_gateway_port}"
+            )
+
+    env_gateway_base_url = os.environ.get("OMBRE_GATEWAY_UPSTREAM_BASE_URL", "")
+    if env_gateway_base_url:
+        config.setdefault("gateway", {})["upstream_base_url"] = env_gateway_base_url
+
+    env_gateway_model = os.environ.get("OMBRE_GATEWAY_UPSTREAM_MODEL", "")
+    if env_gateway_model:
+        config.setdefault("gateway", {})["upstream_default_model"] = env_gateway_model
+
+    env_persona_api_key = os.environ.get("OMBRE_PERSONA_API_KEY", "")
+    if env_persona_api_key:
+        config.setdefault("persona", {})["api_key"] = env_persona_api_key
+
+    env_persona_base_url = os.environ.get("OMBRE_PERSONA_BASE_URL", "")
+    if env_persona_base_url:
+        config.setdefault("persona", {})["base_url"] = env_persona_base_url
+
+    env_persona_model = os.environ.get("OMBRE_PERSONA_MODEL", "")
+    if env_persona_model:
+        config.setdefault("persona", {})["model"] = env_persona_model
+
     # --- Ensure bucket storage directories exist ---
     # --- 确保记忆桶存储目录存在 ---
     buckets_dir = config["buckets_dir"]
-    for subdir in ["permanent", "dynamic", "archive"]:
+    for subdir in ["permanent", "dynamic", "archive", "feel"]:
         os.makedirs(os.path.join(buckets_dir, subdir), exist_ok=True)
 
     return config

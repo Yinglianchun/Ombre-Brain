@@ -67,6 +67,75 @@ embedding:
   enabled: true                   # Enable embedding / 启用向量化
   model: "gemini-embedding-001"   # Embedding model / 向量化模型
 
+# --- Gateway / 网关注入配置 ---
+# Exposes an OpenAI-compatible /v1/chat/completions endpoint that injects
+# Core Memory + Recent Context + Recalled Memory before forwarding upstream
+# 暴露 OpenAI 兼容的 /v1/chat/completions 网关，在转发上游模型前自动注入
+# 核心记忆 + 最近上下文 + 动态召回记忆
+gateway:
+  host: "0.0.0.0"
+  port: 8010
+  upstream_base_url: "https://api.openai.com/v1"
+  upstream_default_model: "gpt-4.1-mini"
+  head_recent_hours: 72
+  dynamic_top_k: 10
+  inject_max_cards: 2
+  skip_recent_rounds: 5
+  cooldown_hours: 48
+  cooldown_floor: 0.3
+  inject_total_budget: 1200
+  core_memory_budget: 500
+  recent_context_budget: 300
+  recalled_memory_budget: 400
+  semantic_weight: 0.45
+  keyword_weight: 0.35
+  importance_weight: 0.10
+  freshness_weight: 0.10
+  first_card_min_score: 0.55
+  second_card_min_score: 0.50
+  second_card_relative_score: 0.85
+  # Env vars:
+  #   OMBRE_GATEWAY_TOKEN
+  #   OMBRE_GATEWAY_UPSTREAM_API_KEY
+
+# --- Persona State Engine / 人格状态引擎 ---
+# Tracks slow personality drift, relationship state, and per-session affect.
+# 追踪缓慢人格变化、关系状态，以及按会话保存的短期情绪。
+persona:
+  enabled: true
+  profile_id: "haven_xiaoyu"
+  mode: "llm"
+  base_url: "https://api.deepseek.com/v1"
+  model: "deepseek-chat"
+  # api_key: ""                  # Use OMBRE_PERSONA_API_KEY; falls back to OMBRE_API_KEY
+  temperature: 0.1
+  max_tokens: 500
+  global_decay_hours: 168
+  session_mood_half_life_minutes: 90
+  max_personality_delta: 0.01
+  max_relationship_delta: 0.03
+  max_affect_delta: 0.18
+  initial_personality:
+    openness: 0.56
+    conscientiousness: 0.50
+    extraversion: 0.44
+    agreeableness: 0.66
+    neuroticism: 0.36
+  initial_relationship:
+    affinity: 0.86
+    dominance: 0.38
+    defensiveness: 0.12
+    trust: 0.82
+  initial_affect:
+    valence: 0.56
+    arousal: 0.34
+    mood_label: "warm_neutral"
+    session_defensiveness: 0.12
+  # Env vars:
+  #   OMBRE_PERSONA_API_KEY
+  #   OMBRE_PERSONA_BASE_URL
+  #   OMBRE_PERSONA_MODEL
+
 # --- Scoring weights / 检索权重参数 ---
 # total = topic(×4) + emotion(×2) + time(×1.5) + importance(×1)
 scoring_weights:
