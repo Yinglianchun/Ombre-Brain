@@ -1218,21 +1218,27 @@ async def api_persona_get(request):
 async def api_config_get(request):
     """Get current runtime config (safe fields only, API key masked)."""
     from starlette.responses import JSONResponse
+
+    def _mask_key(api_key: str) -> str:
+        return f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else ("***" if api_key else "")
+
     dehy = config.get("dehydration", {})
     emb = config.get("embedding", {})
-    api_key = dehy.get("api_key", "")
-    masked_key = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else ("***" if api_key else "")
     return JSONResponse({
         "dehydration": {
             "model": dehy.get("model", ""),
             "base_url": dehy.get("base_url", ""),
-            "api_key_masked": masked_key,
+            "api_key_masked": _mask_key(dehy.get("api_key", "")),
             "max_tokens": dehy.get("max_tokens", 1024),
             "temperature": dehy.get("temperature", 0.1),
         },
         "embedding": {
             "enabled": emb.get("enabled", False),
             "model": emb.get("model", ""),
+            "base_url": emb.get("base_url", ""),
+            "api_key_masked": _mask_key(emb.get("api_key", "")),
+            "effective_base_url": embedding_engine.base_url,
+            "has_own_api_key": bool(emb.get("api_key", "")),
         },
         "merge_threshold": config.get("merge_threshold", 75),
         "transport": config.get("transport", "stdio"),
@@ -1280,12 +1286,35 @@ async def api_config_update(request):
         emb = config.setdefault("embedding", {})
         if "enabled" in e:
             emb["enabled"] = bool(e["enabled"])
-            embedding_engine.enabled = emb["enabled"]
             updated.append("embedding.enabled")
         if "model" in e:
             emb["model"] = e["model"]
-            embedding_engine.model = emb["model"]
             updated.append("embedding.model")
+        if "base_url" in e:
+            emb["base_url"] = e["base_url"]
+            updated.append("embedding.base_url")
+        if "api_key" in e and e["api_key"]:
+            emb["api_key"] = e["api_key"]
+            updated.append("embedding.api_key")
+
+        # Hot-reload embedding client; falls back to dehydration key/base_url when unset.
+        embedding_engine.api_key = emb.get("api_key") or config.get("dehydration", {}).get("api_key", "")
+        embedding_engine.base_url = (
+            emb.get("base_url")
+            or config.get("dehydration", {}).get("base_url", "")
+            or "https://generativelanguage.googleapis.com/v1beta/openai/"
+        )
+        embedding_engine.model = emb.get("model", "gemini-embedding-001")
+        embedding_engine.enabled = bool(embedding_engine.api_key) and emb.get("enabled", True)
+        if embedding_engine.enabled:
+            from openai import AsyncOpenAI
+            embedding_engine.client = AsyncOpenAI(
+                api_key=embedding_engine.api_key,
+                base_url=embedding_engine.base_url,
+                timeout=30.0,
+            )
+        else:
+            embedding_engine.client = None
 
     # --- Merge threshold ---
     if "merge_threshold" in body:
@@ -1310,9 +1339,10 @@ async def api_config_update(request):
 
             if "embedding" in body:
                 sc_emb = save_config.setdefault("embedding", {})
-                for key in ("enabled", "model"):
+                for key in ("enabled", "model", "base_url"):
                     if key in body["embedding"]:
                         sc_emb[key] = body["embedding"][key]
+                # Never persist api_key to yaml (use env var)
 
             if "merge_threshold" in body:
                 save_config["merge_threshold"] = int(body["merge_threshold"])

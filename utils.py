@@ -40,6 +40,12 @@ def load_config(config_path: str = None) -> dict:
             "max_tokens": 1024,
             "temperature": 0.1,
         },
+        "embedding": {
+            "enabled": True,
+            "model": "gemini-embedding-001",
+            "base_url": "",
+            "api_key": "",
+        },
         "decay": {
             "lambda": 0.05,
             "threshold": 0.3,
@@ -147,6 +153,27 @@ def load_config(config_path: str = None) -> dict:
     env_base_url = os.environ.get("OMBRE_BASE_URL", "")
     if env_base_url:
         config.setdefault("dehydration", {})["base_url"] = env_base_url
+
+    env_embedding_api_key = os.environ.get("OMBRE_EMBEDDING_API_KEY", "")
+    if env_embedding_api_key:
+        config.setdefault("embedding", {})["api_key"] = env_embedding_api_key
+
+    env_embedding_base_url = os.environ.get("OMBRE_EMBEDDING_BASE_URL", "")
+    if env_embedding_base_url:
+        config.setdefault("embedding", {})["base_url"] = env_embedding_base_url
+
+    env_embedding_model = os.environ.get("OMBRE_EMBEDDING_MODEL", "")
+    if env_embedding_model:
+        config.setdefault("embedding", {})["model"] = env_embedding_model
+
+    env_embedding_enabled = os.environ.get("OMBRE_EMBEDDING_ENABLED", "")
+    if env_embedding_enabled:
+        config.setdefault("embedding", {})["enabled"] = env_embedding_enabled.lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
 
     env_transport = os.environ.get("OMBRE_TRANSPORT", "")
     if env_transport:

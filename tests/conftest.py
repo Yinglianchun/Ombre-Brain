@@ -54,6 +54,7 @@ def test_config(tmp_path):
             "api_key": os.environ.get("OMBRE_API_KEY", ""),
             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
             "model": "gemini-embedding-001",
+            "enabled": True,
         },
         "gateway": {
             "host": "127.0.0.1",

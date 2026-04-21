@@ -233,8 +233,8 @@ Ombre Brain gives it persistent memory — not cold key-value storage, but a sys
 - **情感坐标打标 / Emotional tagging**: 每条记忆用 Russell 环形情感模型的 valence（效价）和 arousal（唤醒度）两个连续维度标记。不是"开心/难过"这种离散标签。
   Each memory is tagged with two continuous dimensions from Russell's circumplex model: valence and arousal. Not discrete labels like "happy/sad".
 
-- **双通道检索 / Dual-channel search**: 关键词模糊匹配 + 向量语义相似度并联检索。关键词通道用 rapidfuzz 做模糊匹配；语义通道用 embedding（默认 `gemini-embedding-001`，3072 维）计算 cosine similarity，能在"今天很累"这种没有精确关键词的查询里找到"身体不适"、"睡眠问题"等语义相关记忆。两个通道去重合并，token 预算截断。
-  Keyword fuzzy matching + vector semantic similarity in parallel. Keyword channel uses rapidfuzz; semantic channel uses embeddings (default `gemini-embedding-001`, 3072 dims) with cosine similarity — finds semantically related memories even without exact keyword matches (e.g. "feeling tired" → "health issues", "sleep problems"). Results are deduplicated and truncated by token budget.
+- **双通道检索 / Dual-channel search**: 关键词模糊匹配 + 向量语义相似度并联检索。关键词通道用 rapidfuzz 做模糊匹配；语义通道用独立配置的 embedding 模型计算 cosine similarity，能在"今天很累"这种没有精确关键词的查询里找到"身体不适"、"睡眠问题"等语义相关记忆。两个通道去重合并，token 预算截断。
+  Keyword fuzzy matching + vector semantic similarity in parallel. Keyword channel uses rapidfuzz; semantic channel uses independently configured embeddings with cosine similarity — finds semantically related memories even without exact keyword matches (e.g. "feeling tired" → "health issues", "sleep problems"). Results are deduplicated and truncated by token budget.
 
 - **自然遗忘 / Natural forgetting**: 改进版艾宾浩斯遗忘曲线。不活跃的记忆自动衰减归档，高情绪强度的记忆衰减更慢。
   Modified Ebbinghaus forgetting curve. Inactive memories naturally decay and archive. High-arousal memories decay slower.
@@ -405,16 +405,16 @@ Supports any OpenAI-compatible API. Just change `base_url` and `model` in `confi
 
 > **💡 向量化检索（Embedding）**
 > Ombre Brain 内置双通道检索：关键词匹配 + 向量语义搜索。每次 `hold`/`grow` 存入记忆时自动生成 embedding 并存入 `embeddings.db`（SQLite）。
-> 推荐：**Google AI Studio 的 `gemini-embedding-001`**（免费，1500 次/天，3072 维向量）。在 `config.yaml` 的 `embedding` 部分配置。
+> 推荐：把 `embedding.base_url` / `embedding.model` / `OMBRE_EMBEDDING_API_KEY` 单独配置给 embedding 服务，例如硅基流动 `Qwen/Qwen3-Embedding-0.6B`。不配置 `embedding.api_key/base_url` 时会回退复用脱水 API。
 > 不配置 embedding 也能用，系统会降级到纯 fuzzy matching 模式。
 >
 > **已有存量桶需要补生成 embedding**：运行 `backfill_embeddings.py`：
 > ```bash
-> OMBRE_API_KEY="your-key" python backfill_embeddings.py --batch-size 20
+> OMBRE_EMBEDDING_API_KEY="your-key" python backfill_embeddings.py --batch-size 20
 > ```
-> Docker 用户：`docker exec -e OMBRE_BUCKETS_DIR=/data ombre-brain python3 backfill_embeddings.py --batch-size 20`
+> Docker 用户：`docker exec -e OMBRE_BUCKETS_DIR=/data -e OMBRE_EMBEDDING_API_KEY="your-key" ombre-brain python3 backfill_embeddings.py --batch-size 20`
 >
-> **Embedding support**: Built-in dual-channel search: keyword + vector semantic. Embeddings are auto-generated on each `hold`/`grow` and stored in `embeddings.db` (SQLite). Recommended: **Google AI Studio `gemini-embedding-001`** (free, 1500 req/day, 3072-dim). Configure in `config.yaml` under `embedding`. Without it, falls back to fuzzy matching. For existing buckets, run `backfill_embeddings.py`.
+> **Embedding support**: Built-in dual-channel search: keyword + vector semantic. Embeddings are auto-generated on each `hold`/`grow` and stored in `embeddings.db` (SQLite). Configure `embedding.base_url`, `embedding.model`, and `OMBRE_EMBEDDING_API_KEY` separately when using a dedicated embedding provider. Without it, falls back to fuzzy matching. For existing buckets, run `backfill_embeddings.py`.
 
 ### 接入 Claude Desktop / Connect to Claude Desktop
 
@@ -473,7 +473,8 @@ All parameters in `config.yaml` (copy from `config.example.yaml`). Key ones:
 | `dehydration.model` | 脱水用的 LLM 模型 / LLM model for dehydration | `deepseek-chat` |
 | `dehydration.base_url` | API 地址 / API endpoint | `https://api.deepseek.com/v1` |
 | `embedding.enabled` | 启用向量语义检索 / Enable embedding search | `true` |
-| `embedding.model` | Embedding 模型 / Embedding model | `gemini-embedding-001` |
+| `embedding.model` | Embedding 模型 / Embedding model | `Qwen/Qwen3-Embedding-0.6B` |
+| `embedding.base_url` | Embedding API 地址 / Embedding API endpoint | `https://api.siliconflow.cn/v1` |
 | `gateway.upstream_base_url` | 网关上游 OpenAI 兼容地址 / Gateway upstream base URL | `""` |
 | `gateway.upstream_default_model` | 网关默认模型 / Gateway default model | `""` |
 | `gateway.skip_recent_rounds` | 最近几轮跳过注入 / Skip recently injected rounds | `5` |
@@ -491,6 +492,10 @@ Sensitive config via env vars:
 - `OMBRE_TRANSPORT` — 覆盖传输方式
 - `OMBRE_BUCKETS_DIR` — 覆盖存储路径
 - `OMBRE_CONFIG_PATH` — 指向自定义 `config.yaml`
+- `OMBRE_EMBEDDING_API_KEY` — 独立 embedding API key，缺省回退 `OMBRE_API_KEY`
+- `OMBRE_EMBEDDING_BASE_URL` — 覆盖 embedding API 地址
+- `OMBRE_EMBEDDING_MODEL` — 覆盖 embedding 模型
+- `OMBRE_EMBEDDING_ENABLED` — 覆盖是否启用 embedding
 - `OMBRE_GATEWAY_HOST` — 覆盖网关监听地址
 - `OMBRE_GATEWAY_PORT` — 覆盖网关监听端口
 - `OMBRE_GATEWAY_UPSTREAM_BASE_URL` — 覆盖网关上游地址

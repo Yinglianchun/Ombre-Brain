@@ -1018,8 +1018,17 @@
       </div>
       <div class="config-row">
         <label>Model</label>
-        <input type="text" id="cfg-emb-model" placeholder="gemini-embedding-001" />
+        <input type="text" id="cfg-emb-model" placeholder="Qwen/Qwen3-Embedding-0.6B" />
       </div>
+      <div class="config-row">
+        <label>Base URL</label>
+        <input type="text" id="cfg-emb-url" placeholder="https://api.siliconflow.cn/v1" />
+      </div>
+      <div class="config-row">
+        <label>API Key</label>
+        <input type="password" id="cfg-emb-key" placeholder="当前: 加载中…" />
+      </div>
+      <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">留空时复用脱水 API。API Key 不会持久化到 yaml（请用环境变量）</div>
     </div>
 
     <div class="config-section">
@@ -1630,9 +1639,14 @@ async function loadConfig() {
     document.getElementById('cfg-dehy-temp').value = cfg.dehydration.temperature || 0.1;
     document.getElementById('cfg-emb-enabled').value = cfg.embedding.enabled ? 'true' : 'false';
     document.getElementById('cfg-emb-model').value = cfg.embedding.model || '';
+    document.getElementById('cfg-emb-url').value = cfg.embedding.base_url || '';
+    document.getElementById('cfg-emb-key').placeholder = '当前: ' + (cfg.embedding.api_key_masked || (cfg.embedding.has_own_api_key ? '***' : '复用脱水 API'));
+    document.getElementById('cfg-emb-key').value = '';
     document.getElementById('cfg-merge').value = cfg.merge_threshold || 75;
     document.getElementById('config-readonly').innerHTML =
-      'Transport: <strong>' + cfg.transport + '</strong><br>Buckets dir: <strong>' + cfg.buckets_dir + '</strong>';
+      'Transport: <strong>' + cfg.transport + '</strong><br>' +
+      'Buckets dir: <strong>' + cfg.buckets_dir + '</strong><br>' +
+      'Embedding effective URL: <strong>' + (cfg.embedding.effective_base_url || '未设置') + '</strong>';
   } catch (e) {
     document.getElementById('config-status').innerHTML =
       '<span style="color:var(--negative)">加载失败: ' + e.message + '</span>';
@@ -1650,12 +1664,15 @@ async function saveConfig(persist) {
     embedding: {
       enabled: document.getElementById('cfg-emb-enabled').value === 'true',
       model: document.getElementById('cfg-emb-model').value,
+      base_url: document.getElementById('cfg-emb-url').value,
     },
     merge_threshold: parseInt(document.getElementById('cfg-merge').value) || 75,
     persist: persist,
   };
   var keyVal = document.getElementById('cfg-dehy-key').value;
   if (keyVal) body.dehydration.api_key = keyVal;
+  var embKeyVal = document.getElementById('cfg-emb-key').value;
+  if (embKeyVal) body.embedding.api_key = embKeyVal;
 
   var status = document.getElementById('config-status');
   try {

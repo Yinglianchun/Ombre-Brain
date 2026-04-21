@@ -61,11 +61,21 @@ decay:
 # --- Embedding / 向量化配置 ---
 # Uses embedding API for semantic similarity search
 # 通过 embedding API 实现语义相似度搜索
-# Reuses the same API key (OMBRE_API_KEY) and base_url from dehydration config
-# 复用脱水配置的 API key 和 base_url
+# Uses embedding.api_key/base_url first; falls back to dehydration API when unset
+# 优先使用 embedding 独立 API；未配置时回退复用脱水 API
 embedding:
   enabled: true                   # Enable embedding / 启用向量化
-  model: "gemini-embedding-001"   # Embedding model / 向量化模型
+  model: "Qwen/Qwen3-Embedding-0.6B"  # Embedding model / 向量化模型
+  base_url: "https://api.siliconflow.cn/v1"
+  # api_key: ""                   # Use env var OMBRE_EMBEDDING_API_KEY / 请使用环境变量
+  # Common embedding model examples / 常见向量模型示例：
+  #   SiliconFlow Qwen: Qwen/Qwen3-Embedding-0.6B
+  #   Gemini:           gemini-embedding-001
+  # Env vars / 环境变量:
+  #   OMBRE_EMBEDDING_API_KEY
+  #   OMBRE_EMBEDDING_BASE_URL
+  #   OMBRE_EMBEDDING_MODEL
+  #   OMBRE_EMBEDDING_ENABLED
 
 # --- Gateway / 网关注入配置 ---
 # Exposes an OpenAI-compatible /v1/chat/completions endpoint that injects
