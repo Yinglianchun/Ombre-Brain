@@ -1050,7 +1050,8 @@
 </div>
 
 <script>
-const BASE = location.origin;
+const PATH_PREFIX = location.pathname.replace(/\/dashboard\/?$/, '');
+const BASE = location.origin + PATH_PREFIX;
 let allBuckets = [];
 let currentFilter = 'all';
 
