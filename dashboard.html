@@ -425,6 +425,254 @@
     box-shadow: 0 1px 3px var(--shadow-dark-subtle);
   }
 
+  .persona-shell {
+    max-width: 1120px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+  .persona-toolbar {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 20px;
+  }
+  .persona-toolbar h2 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 28px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.3px;
+  }
+  .persona-toolbar p {
+    color: var(--text-dim);
+    font-size: 13px;
+    max-width: 58ch;
+    margin-top: 4px;
+  }
+  .persona-session-control {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .persona-session-control select {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 14px;
+    border-radius: 14px;
+    font-family: inherit;
+    font-size: 12px;
+    min-width: 220px;
+    box-shadow: inset 2px 2px 4px var(--shadow-dark-subtle), inset -2px -2px 4px var(--shadow-light);
+  }
+  .persona-grid {
+    display: grid;
+    grid-template-columns: minmax(280px, 0.9fr) minmax(320px, 1.1fr);
+    gap: 24px;
+    align-items: stretch;
+  }
+  .persona-orb-card,
+  .persona-card,
+  .persona-events {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    box-shadow: 8px 8px 18px var(--shadow-dark-subtle), -8px -8px 18px var(--shadow-light);
+  }
+  .persona-orb-card {
+    min-height: 360px;
+    padding: 28px;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .persona-orb-card::before {
+    content: '';
+    position: absolute;
+    width: 280px;
+    height: 280px;
+    right: -80px;
+    top: -80px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(47,79,79,0.16), transparent 68%);
+    pointer-events: none;
+  }
+  .persona-orb {
+    width: 176px;
+    height: 176px;
+    border-radius: 50%;
+    align-self: center;
+    margin-top: 10px;
+    background:
+      radial-gradient(circle at 38% 32%, rgba(255,252,240,0.95), rgba(255,252,240,0.18) 24%, transparent 38%),
+      radial-gradient(circle at 52% 54%, rgba(47,79,79,0.64), rgba(154,123,79,0.42) 55%, rgba(139,74,74,0.26) 78%);
+    box-shadow:
+      18px 18px 34px rgba(163,148,120,0.28),
+      -16px -16px 30px rgba(255,252,240,0.75),
+      inset 18px 18px 30px rgba(255,252,240,0.28),
+      inset -18px -18px 28px rgba(47,79,79,0.22);
+    animation: persona-breathe 5.5s ease-in-out infinite;
+  }
+  .persona-mood {
+    text-align: center;
+    margin-top: 18px;
+  }
+  .persona-mood strong {
+    display: block;
+    color: var(--accent);
+    font-size: 18px;
+    letter-spacing: 0.2px;
+  }
+  .persona-mood span {
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .persona-guidance {
+    margin-top: 24px;
+    padding: 16px 18px;
+    border-radius: 18px;
+    background: rgba(253, 252, 240, 0.52);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.8;
+  }
+  .persona-status-line {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 14px;
+  }
+  .persona-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: var(--accent-glow);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .persona-card {
+    padding: 24px;
+  }
+  .persona-card h3,
+  .persona-events h3 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 18px;
+    color: var(--accent);
+    margin-bottom: 16px;
+    letter-spacing: 0.2px;
+  }
+  .persona-meter-list {
+    display: grid;
+    gap: 14px;
+  }
+  .persona-meter-row {
+    display: grid;
+    grid-template-columns: 132px 1fr 44px;
+    gap: 12px;
+    align-items: center;
+    font-size: 12px;
+  }
+  .persona-meter-row label {
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+  .persona-meter-track {
+    height: 9px;
+    border-radius: 999px;
+    background: rgba(180,165,140,0.26);
+    overflow: hidden;
+    box-shadow: inset 2px 2px 4px var(--shadow-dark-subtle), inset -2px -2px 4px var(--shadow-light);
+  }
+  .persona-meter-fill {
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, rgba(47,79,79,0.72), rgba(74,124,89,0.78));
+    transition: width 0.35s ease;
+  }
+  .persona-meter-fill.warm { background: linear-gradient(90deg, rgba(154,123,79,0.76), rgba(74,124,89,0.82)); }
+  .persona-meter-fill.guard { background: linear-gradient(90deg, rgba(176,165,144,0.74), rgba(139,74,74,0.72)); }
+  .persona-meter-row span {
+    color: var(--accent);
+    font-weight: 600;
+    text-align: right;
+  }
+  .persona-stack {
+    display: grid;
+    gap: 24px;
+  }
+  .persona-events {
+    padding: 24px;
+  }
+  .persona-event-list {
+    display: grid;
+    gap: 10px;
+  }
+  .persona-event {
+    display: grid;
+    grid-template-columns: 92px 1fr auto;
+    gap: 14px;
+    align-items: start;
+    padding: 14px 16px;
+    border-radius: 16px;
+    background: rgba(253, 252, 240, 0.46);
+    border: 1px solid rgba(180,165,140,0.22);
+  }
+  .persona-event-type {
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .persona-event-main {
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.7;
+  }
+  .persona-event-main small {
+    display: block;
+    color: var(--text-light);
+    margin-top: 4px;
+  }
+  .persona-event-time {
+    color: var(--text-light);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .persona-deltas {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .persona-delta {
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(47,79,79,0.08);
+    color: var(--text-dim);
+    font-size: 10px;
+  }
+  .persona-empty {
+    padding: 34px;
+    color: var(--text-dim);
+    text-align: center;
+    font-size: 13px;
+    border-radius: 18px;
+    background: rgba(253, 252, 240, 0.42);
+  }
+  @keyframes persona-breathe {
+    0%, 100% { transform: scale(0.98); filter: saturate(0.95); }
+    50% { transform: scale(1.04); filter: saturate(1.08); }
+  }
+
   .loading {
     text-align: center;
     color: var(--text-dim);
@@ -596,6 +844,13 @@
     .config-row { flex-wrap: wrap; }
     .config-row label { width: 100%; }
     .breath-flow { display: none; }
+    .persona-toolbar { align-items: flex-start; flex-direction: column; }
+    .persona-session-control { justify-content: flex-start; width: 100%; }
+    .persona-session-control select { width: 100%; min-width: 0; }
+    .persona-grid { grid-template-columns: 1fr; }
+    .persona-meter-row { grid-template-columns: 108px 1fr 38px; }
+    .persona-event { grid-template-columns: 1fr; }
+    .persona-event-time { white-space: normal; }
   }
 </style>
 </head>
@@ -612,6 +867,7 @@
 <div class="tabs">
   <div class="tab active" data-tab="list">记忆桶</div>
   <div class="tab" data-tab="breath">Breath 模拟</div>
+  <div class="tab" data-tab="persona">Persona</div>
   <div class="tab" data-tab="network">记忆网络</div>
   <div class="tab" data-tab="config">配置</div>
   <div class="tab" data-tab="import">导入</div>
@@ -650,6 +906,21 @@
   <div class="breath-info" id="breath-info" style="display:none"></div>
   <div id="breath-results">
     <div class="loading">输入 query 后点击「模拟 Breath」查看评分链路</div>
+  </div>
+</div>
+
+<div class="content" id="persona-view" style="display:none">
+  <div class="persona-shell">
+    <div class="persona-toolbar">
+      <div>
+        <h2>Persona State</h2>
+        <p>查看网关注入链路里的当前内在状态：人格慢变，关系中速变化，session 情绪按半衰期回落。</p>
+      </div>
+      <div class="persona-session-control" id="persona-session-control"></div>
+    </div>
+    <div id="persona-content">
+      <div class="loading">加载 Persona 状态…</div>
+    </div>
   </div>
 </div>
 
@@ -790,9 +1061,11 @@ document.querySelectorAll('.tab').forEach(tab => {
     const target = tab.dataset.tab;
     document.getElementById('list-view').style.display = target === 'list' ? '' : 'none';
     document.getElementById('breath-view').style.display = target === 'breath' ? '' : 'none';
+    document.getElementById('persona-view').style.display = target === 'persona' ? '' : 'none';
     document.getElementById('network-view').style.display = target === 'network' ? '' : 'none';
     document.getElementById('config-view').style.display = target === 'config' ? '' : 'none';
     document.getElementById('import-view').style.display = target === 'import' ? '' : 'none';
+    if (target === 'persona') loadPersona();
     if (target === 'network') loadNetwork();
     if (target === 'config') loadConfig();
     if (target === 'import') { pollImportStatus(); loadImportResults(); }
@@ -1089,6 +1362,171 @@ function formatTimeAgo(iso) {
   var days = Math.floor(hours / 24);
   if (days < 30) return days + 'd前';
   return Math.floor(days/30) + 'mo前';
+}
+
+var personaSelectedSession = '';
+
+async function loadPersona(sessionId) {
+  if (sessionId) personaSelectedSession = sessionId;
+  var content = document.getElementById('persona-content');
+  var selected = personaSelectedSession;
+  content.innerHTML = '<div class="loading">读取 Persona 状态…</div>';
+
+  var url = BASE + '/api/persona?events_limit=20&sessions_limit=30';
+  if (selected) url += '&session_id=' + encodeURIComponent(selected);
+
+  try {
+    var res = await fetch(url);
+    var data = await res.json();
+    if (data.error) throw new Error(data.error);
+    personaSelectedSession = data.active_session_id || selected;
+    renderPersona(data);
+  } catch (e) {
+    content.innerHTML = '<div class="loading">加载失败: ' + e.message + '</div>';
+  }
+}
+
+function renderPersona(data) {
+  var state = data.state || {};
+  var personality = state.personality || {};
+  var affect = state.affect || {};
+  var relationship = state.relationship || {};
+  var cfg = data.config || {};
+  var sessions = data.sessions || [];
+  var events = data.events || [];
+  var activeSession = data.active_session_id || personaSelectedSession || 'dashboard-preview';
+
+  renderPersonaSessionControl(sessions, activeSession);
+
+  document.getElementById('persona-content').innerHTML =
+    '<div class="persona-grid">' +
+      '<div class="persona-orb-card">' +
+        '<div>' +
+          '<div class="persona-orb" style="opacity:' + personaOrbOpacity(affect.arousal) + '"></div>' +
+          '<div class="persona-mood">' +
+            '<strong>' + esc(affect.mood_label || 'warm_neutral') + '</strong>' +
+            '<span>V' + personaNumber(affect.valence) + ' · A' + personaNumber(affect.arousal) + ' · session ' + esc(activeSession) + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div>' +
+          '<div class="persona-guidance">' + esc(state.reply_guidance || '保持稳定、温和、低压，不主动放大情绪。') + '</div>' +
+          '<div class="persona-status-line">' +
+            '<span class="persona-pill">' + (cfg.enabled ? 'engine on' : 'engine paused') + '</span>' +
+            '<span class="persona-pill">' + (cfg.api_ready ? 'LLM ready' : 'fallback state') + '</span>' +
+            '<span class="persona-pill">' + esc(cfg.model || 'model unset') + '</span>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="persona-stack">' +
+        '<div class="persona-card">' +
+          '<h3>Affect / Relationship</h3>' +
+          '<div class="persona-meter-list">' +
+            personaMeter('情绪效价 valence', affect.valence, 'warm') +
+            personaMeter('唤醒度 arousal', affect.arousal, '') +
+            personaMeter('亲和 affinity', relationship.affinity, 'warm') +
+            personaMeter('主导 dominance', relationship.dominance, '') +
+            personaMeter('防御 defensiveness', relationship.defensiveness, 'guard') +
+            personaMeter('信任 trust', relationship.trust, 'warm') +
+          '</div>' +
+        '</div>' +
+        '<div class="persona-card">' +
+          '<h3>Personality</h3>' +
+          '<div class="persona-meter-list">' +
+            personaMeter('开放 openness', personality.openness, '') +
+            personaMeter('自律 conscientiousness', personality.conscientiousness, '') +
+            personaMeter('外向 extraversion', personality.extraversion, '') +
+            personaMeter('温柔 agreeableness', personality.agreeableness, 'warm') +
+            personaMeter('敏感 neuroticism', personality.neuroticism, 'guard') +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="persona-events">' +
+      '<h3>Recent Persona Events</h3>' +
+      renderPersonaEvents(events) +
+    '</div>';
+}
+
+function renderPersonaSessionControl(sessions, activeSession) {
+  var control = document.getElementById('persona-session-control');
+  var known = sessions.some(function(s) { return s.session_id === activeSession; });
+  var sessionOptions = sessions.slice();
+  if (!known && activeSession) {
+    sessionOptions.unshift({ session_id: activeSession, mood_label: 'current', updated_at: '' });
+  }
+  control.innerHTML =
+    '<select id="persona-session-select" onchange="loadPersona(this.value)">' +
+      sessionOptions.map(function(s) {
+        var selected = s.session_id === activeSession ? ' selected' : '';
+        var label = s.session_id + (s.mood_label ? ' · ' + s.mood_label : '');
+        return '<option value="' + escAttr(s.session_id) + '"' + selected + '>' + esc(label) + '</option>';
+      }).join('') +
+    '</select>' +
+    '<button class="btn-secondary" onclick="loadPersona()">刷新</button>';
+}
+
+function renderPersonaEvents(events) {
+  if (!events.length) {
+    return '<div class="persona-empty">还没有 Persona 事件。通过 gateway 聊一轮后，这里会出现评估结果和状态增量。</div>';
+  }
+  return '<div class="persona-event-list">' + events.map(function(ev) {
+    var intent = ev.perceived_intent || ev.error || 'no intent recorded';
+    return '<div class="persona-event">' +
+      '<div class="persona-event-type">' + esc(ev.event_type || 'unknown') + '</div>' +
+      '<div class="persona-event-main">' +
+        esc(intent) +
+        '<small>' + esc(ev.mood_label || 'mood unset') + ' · confidence ' + personaNumber(ev.confidence) + ' · #' + esc(ev.message_hash || '') + '</small>' +
+        renderPersonaDeltas(ev) +
+      '</div>' +
+      '<div class="persona-event-time">' + formatTimeAgo(ev.created_at) + '</div>' +
+    '</div>';
+  }).join('') + '</div>';
+}
+
+function renderPersonaDeltas(ev) {
+  var parts = [];
+  collectPersonaDeltas(parts, 'affect', ev.affect_delta || {});
+  collectPersonaDeltas(parts, 'rel', ev.relationship_delta || {});
+  collectPersonaDeltas(parts, 'trait', ev.personality_delta || {});
+  if (!parts.length) return '';
+  return '<div class="persona-deltas">' + parts.join('') + '</div>';
+}
+
+function collectPersonaDeltas(parts, prefix, values) {
+  Object.keys(values).forEach(function(key) {
+    var value = Number(values[key] || 0);
+    if (Math.abs(value) < 0.0001) return;
+    parts.push('<span class="persona-delta">' + prefix + '.' + esc(key) + ' ' + signedNumber(value) + '</span>');
+  });
+}
+
+function personaMeter(label, value, tone) {
+  var number = Math.max(0, Math.min(1, Number(value || 0)));
+  var pct = Math.round(number * 100);
+  return '<div class="persona-meter-row">' +
+    '<label>' + esc(label) + '</label>' +
+    '<div class="persona-meter-track"><div class="persona-meter-fill ' + (tone || '') + '" style="width:' + pct + '%"></div></div>' +
+    '<span>' + pct + '</span>' +
+  '</div>';
+}
+
+function personaNumber(value) {
+  var number = Number(value || 0);
+  return number.toFixed(2);
+}
+
+function signedNumber(value) {
+  var number = Number(value || 0);
+  return (number > 0 ? '+' : '') + number.toFixed(3);
+}
+
+function personaOrbOpacity(arousal) {
+  var number = Math.max(0, Math.min(1, Number(arousal || 0.34)));
+  return (0.72 + number * 0.28).toFixed(2);
+}
+
+function escAttr(s) {
+  return esc(String(s || '')).replace(/"/g, '&quot;');
 }
 
 document.addEventListener('keydown', function(e) {

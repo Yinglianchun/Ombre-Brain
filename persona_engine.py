@@ -189,6 +189,61 @@ class PersonaStateEngine:
         session_state = self._apply_session_decay(session_id, session_state, now)
         return self._snapshot(global_state, session_state, FALLBACK_GUIDANCE)
 
+    def get_dashboard_payload(
+        self,
+        session_id: str | None = None,
+        events_limit: int = 20,
+        sessions_limit: int = 20,
+    ) -> dict:
+        now = datetime.now()
+        global_state = self._ensure_global_state(now)
+        sessions = self._list_sessions(sessions_limit)
+        active_session_id = (
+            session_id
+            or (sessions[0]["session_id"] if sessions else "")
+            or "dashboard-preview"
+        )
+        if session_id or sessions:
+            session_state = self._ensure_session_state(active_session_id, now)
+            session_state = self._apply_session_decay(active_session_id, session_state, now)
+            sessions = self._list_sessions(sessions_limit)
+        else:
+            session_state = {
+                "profile_id": self.profile_id,
+                "session_id": active_session_id,
+                "valence": self.default_affect["valence"],
+                "arousal": self.default_affect["arousal"],
+                "mood_label": self.default_affect["mood_label"],
+                "session_defensiveness": self.default_affect["session_defensiveness"],
+                "updated_at": now.isoformat(timespec="seconds"),
+            }
+        events = self._list_events(events_limit, active_session_id)
+        guidance = (
+            events[0].get("reply_guidance")
+            if events and events[0].get("reply_guidance")
+            else FALLBACK_GUIDANCE
+        )
+
+        return {
+            "profile_id": self.profile_id,
+            "active_session_id": active_session_id,
+            "state": self._snapshot(global_state, session_state, guidance),
+            "sessions": sessions,
+            "events": events,
+            "config": {
+                "enabled": self.enabled,
+                "mode": self.mode,
+                "model": self.model,
+                "base_url": self.base_url,
+                "api_ready": bool(self.api_key),
+                "db_path": self.db_path,
+                "session_mood_half_life_minutes": self.session_mood_half_life_minutes,
+                "max_personality_delta": self.max_personality_delta,
+                "max_relationship_delta": self.max_relationship_delta,
+                "max_affect_delta": self.max_affect_delta,
+            },
+        }
+
     async def _evaluate_message(
         self,
         user_message: str,
@@ -477,6 +532,75 @@ class PersonaStateEngine:
         conn.commit()
         conn.close()
 
+    def _list_sessions(self, limit: int) -> list[dict]:
+        safe_limit = max(1, min(100, int(limit or 20)))
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT session_id, valence, arousal, mood_label, session_defensiveness, updated_at
+            FROM persona_session_state
+            WHERE profile_id = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (self.profile_id, safe_limit),
+        ).fetchall()
+        conn.close()
+        return [
+            {
+                "session_id": row["session_id"],
+                "valence": round(self._clamp_float(row["valence"]), 3),
+                "arousal": round(self._clamp_float(row["arousal"]), 3),
+                "mood_label": row["mood_label"],
+                "session_defensiveness": round(self._clamp_float(row["session_defensiveness"]), 3),
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def _list_events(self, limit: int, session_id: str | None = None) -> list[dict]:
+        safe_limit = max(1, min(100, int(limit or 20)))
+        params: list[Any] = [self.profile_id]
+        session_clause = ""
+        if session_id:
+            session_clause = "AND session_id = ?"
+            params.append(session_id)
+        params.append(safe_limit)
+
+        conn = self._connect()
+        rows = conn.execute(
+            f"""
+            SELECT id, session_id, message_hash, event_type, perceived_intent,
+                   affect_delta, relationship_delta, personality_delta, mood_label,
+                   reply_guidance, confidence, error, created_at
+            FROM persona_events
+            WHERE profile_id = ?
+            {session_clause}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        conn.close()
+        return [
+            {
+                "id": row["id"],
+                "session_id": row["session_id"],
+                "message_hash": str(row["message_hash"])[:12],
+                "event_type": row["event_type"] or "unknown",
+                "perceived_intent": row["perceived_intent"] or "",
+                "affect_delta": self._json_dict(row["affect_delta"]),
+                "relationship_delta": self._json_dict(row["relationship_delta"]),
+                "personality_delta": self._json_dict(row["personality_delta"]),
+                "mood_label": row["mood_label"] or "",
+                "reply_guidance": row["reply_guidance"] or "",
+                "confidence": round(self._clamp_float(row["confidence"]), 3),
+                "error": row["error"] or "",
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
     def _snapshot(self, global_state: dict, session_state: dict, reply_guidance: str) -> dict:
         return {
             "profile_id": self.profile_id,
@@ -555,6 +679,13 @@ class PersonaStateEngine:
             return datetime.fromisoformat(str(value))
         except (TypeError, ValueError):
             return None
+
+    def _json_dict(self, raw: Any) -> dict:
+        try:
+            parsed = json.loads(raw or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
 
     def _clamp_float(self, value: Any, lower: float = 0.0, upper: float = 1.0) -> float:
         try:

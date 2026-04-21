@@ -49,6 +49,7 @@ from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
 from import_memory import ImportEngine
+from persona_engine import PersonaStateEngine
 from utils import load_config, setup_logging, strip_wikilinks, count_tokens_approx
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
@@ -62,6 +63,7 @@ dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 embedding_engine = EmbeddingEngine(config)            # Embedding engine / 向量化引擎
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
+persona_engine = PersonaStateEngine(config)           # Persona state engine / 人格状态引擎
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -1183,6 +1185,33 @@ async def dashboard(request):
             return HTMLResponse(f.read())
     except FileNotFoundError:
         return HTMLResponse("<h1>dashboard.html not found</h1>", status_code=404)
+
+
+@mcp.custom_route("/api/persona", methods=["GET"])
+async def api_persona_get(request):
+    """Return Persona State Engine data for the local dashboard."""
+    from starlette.responses import JSONResponse
+
+    def _bounded_int(value, default, lower, upper):
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = default
+        return max(lower, min(upper, number))
+
+    try:
+        session_id = (request.query_params.get("session_id") or "").strip() or None
+        events_limit = _bounded_int(request.query_params.get("events_limit"), 20, 1, 100)
+        sessions_limit = _bounded_int(request.query_params.get("sessions_limit"), 20, 1, 100)
+        return JSONResponse(
+            persona_engine.get_dashboard_payload(
+                session_id=session_id,
+                events_limit=events_limit,
+                sessions_limit=sessions_limit,
+            )
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @mcp.custom_route("/api/config", methods=["GET"])

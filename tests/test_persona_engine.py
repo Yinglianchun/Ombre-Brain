@@ -154,3 +154,21 @@ async def test_persona_missing_key_uses_existing_state_fallback(test_config):
     assert state["reply_guidance"] == FALLBACK_GUIDANCE
     assert state["affect"]["mood_label"] == "warm_neutral"
     assert _event_count(engine.db_path) == 1
+
+
+@pytest.mark.asyncio
+async def test_persona_dashboard_payload_lists_state_sessions_and_events(test_config):
+    engine = PersonaStateEngine(_persona_config(test_config))
+    engine.client = FakePersonaClient(_event_payload())
+
+    await engine.update_from_user_message("session-dashboard", "爱你，今天状态很好")
+    payload = engine.get_dashboard_payload(session_id="session-dashboard")
+
+    assert payload["profile_id"] == "haven_xiaoyu"
+    assert payload["active_session_id"] == "session-dashboard"
+    assert payload["state"]["reply_guidance"] == "Respond warmly and gently."
+    assert payload["state"]["affect"]["mood_label"] == "warm_touched"
+    assert payload["sessions"][0]["session_id"] == "session-dashboard"
+    assert payload["events"][0]["event_type"] == "affection"
+    assert payload["events"][0]["affect_delta"]["valence"] == pytest.approx(0.05)
+    assert payload["config"]["model"] == "deepseek-chat"
