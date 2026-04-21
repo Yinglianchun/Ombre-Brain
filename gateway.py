@@ -11,7 +11,7 @@ import uvicorn
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from bucket_manager import BucketManager
@@ -135,12 +135,6 @@ class GatewayService:
                 status_code=400,
             )
 
-        if payload.get("stream") is True:
-            return JSONResponse(
-                {"error": {"message": "stream=true is not supported in gateway v1", "type": "invalid_request_error"}},
-                status_code=400,
-            )
-
         try:
             forward_payload, recalled_ids = await self.prepare_payload(payload, session_id)
         except ValueError as exc:
@@ -154,17 +148,18 @@ class GatewayService:
                 status_code=503,
             )
 
+        if forward_payload.get("stream") is True:
+            try:
+                return await self._stream_upstream(forward_payload, session_id, recalled_ids)
+            except RuntimeError as exc:
+                return JSONResponse(
+                    {"error": {"message": str(exc), "type": "server_error"}},
+                    status_code=503,
+                )
+
         upstream_response = await self._forward_upstream(forward_payload)
         if 200 <= upstream_response.status_code < 300:
-            round_id = self.state_store.record_success(session_id, recalled_ids)
-            for bucket_id in recalled_ids:
-                await self.bucket_mgr.touch(bucket_id)
-            logger.info(
-                "Gateway round completed | session=%s round=%s recalled=%s",
-                session_id,
-                round_id,
-                recalled_ids,
-            )
+            await self._record_successful_round(session_id, recalled_ids)
 
         return self._proxy_response(upstream_response)
 
@@ -195,7 +190,7 @@ class GatewayService:
         forward_payload = deepcopy(payload)
         forward_payload["model"] = model
         forward_payload["messages"] = self._inject_system_message(messages, injected_message)
-        forward_payload["stream"] = False
+        forward_payload["stream"] = payload.get("stream") is True
         return forward_payload, [bucket["id"] for bucket in recalled_buckets]
 
     def _authorize(self, auth_header: str) -> JSONResponse | None:
@@ -233,6 +228,72 @@ class GatewayService:
                 "Content-Type": "application/json",
             },
             json=payload,
+        )
+
+    async def _stream_upstream(
+        self,
+        payload: dict,
+        session_id: str,
+        recalled_ids: list[str],
+    ) -> Response:
+        if not self.upstream_base_url:
+            raise RuntimeError("gateway.upstream_base_url is not configured")
+        if not self.upstream_api_key:
+            raise RuntimeError("OMBRE_GATEWAY_UPSTREAM_API_KEY is not configured")
+
+        url = f"{self.upstream_base_url}/chat/completions"
+        request = self.http_client.build_request(
+            "POST",
+            url,
+            headers={
+                "Authorization": f"Bearer {self.upstream_api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        upstream_response = await self.http_client.send(request, stream=True)
+        content_type = upstream_response.headers.get("content-type", "text/event-stream")
+
+        if not 200 <= upstream_response.status_code < 300:
+            body = await upstream_response.aread()
+            await upstream_response.aclose()
+            return Response(
+                content=body,
+                status_code=upstream_response.status_code,
+                media_type=content_type,
+            )
+
+        async def stream_body():
+            completed = False
+            try:
+                async for chunk in upstream_response.aiter_bytes():
+                    if chunk:
+                        yield chunk
+                completed = True
+            finally:
+                await upstream_response.aclose()
+                if completed:
+                    await self._record_successful_round(session_id, recalled_ids)
+
+        return StreamingResponse(
+            stream_body(),
+            status_code=upstream_response.status_code,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    async def _record_successful_round(self, session_id: str, recalled_ids: list[str]) -> None:
+        round_id = self.state_store.record_success(session_id, recalled_ids)
+        for bucket_id in recalled_ids:
+            await self.bucket_mgr.touch(bucket_id)
+        logger.info(
+            "Gateway round completed | session=%s round=%s recalled=%s",
+            session_id,
+            round_id,
+            recalled_ids,
         )
 
     def _proxy_response(self, upstream_response: httpx.Response) -> Response:

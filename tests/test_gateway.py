@@ -198,19 +198,51 @@ def test_gateway_requires_session_id(monkeypatch, test_config, bucket_mgr):
     assert "X-Ombre-Session-Id" in response.text
 
 
-def test_gateway_rejects_stream(monkeypatch, test_config, bucket_mgr):
-    app, service, _, _ = _build_service(monkeypatch, _gateway_config(test_config), bucket_mgr)
+def test_gateway_streams_when_client_requires_stream(monkeypatch, test_config, bucket_mgr):
+    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
+    monkeypatch.setenv("OMBRE_GATEWAY_UPSTREAM_API_KEY", "upstream-secret")
+
+    captured = []
+
+    def upstream_handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+        )
+
+    state_store = GatewayStateStore(f"{test_config['buckets_dir']}\\gateway_state.db")
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler), timeout=10.0)
+    service = GatewayService(
+        config=_gateway_config(test_config),
+        bucket_mgr=bucket_mgr,
+        dehydrator=DummyDehydrator(),
+        embedding_engine=DummyEmbeddingEngine(enabled=False),
+        state_store=state_store,
+        persona_engine=DummyPersonaEngine(),
+        http_client=http_client,
+    )
+    app = create_gateway_app(config=test_config, service=service)
+
     with TestClient(app) as client:
-        response = client.post(
+        with client.stream(
+            "POST",
             "/v1/chat/completions",
             headers={
                 "Authorization": "Bearer gateway-secret",
                 "X-Ombre-Session-Id": "sess-stream",
             },
             json={"messages": [{"role": "user", "content": "你好"}], "stream": True},
-        )
-    assert response.status_code == 400
-    assert "stream=true" in response.text
+        ) as response:
+            body = response.read().decode("utf-8")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert 'data: {"choices"' in body
+    assert "data: [DONE]" in body
+    assert captured[0]["stream"] is True
+    assert state_store.get_recent_bucket_ids("sess-stream", 5) == set()
 
 
 def test_gateway_injects_after_existing_system_message(monkeypatch, test_config, bucket_mgr):

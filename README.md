@@ -280,7 +280,7 @@ v1 已实现的召回约束：
 请求要求：
 - 认证头：`Authorization: Bearer <OMBRE_GATEWAY_TOKEN>`
 - 会话头：`X-Ombre-Session-Id`
-- 当前只支持非流式请求，`stream=true` 会返回 `400`
+- 支持非流式和 OpenAI-compatible SSE 流式请求；流式响应会在上游完整结束后写入本轮注入历史
 
 需要额外设置的环境变量：
 - `OMBRE_GATEWAY_TOKEN`
