@@ -53,6 +53,10 @@ class GatewayService:
         self.upstream_api_key = os.environ.get("OMBRE_GATEWAY_UPSTREAM_API_KEY", "")
         self.upstream_base_url = self.gateway_cfg.get("upstream_base_url", "").rstrip("/")
         self.upstream_default_model = self.gateway_cfg.get("upstream_default_model", "")
+        self.upstream_models = self._normalize_model_list(
+            self.gateway_cfg.get("upstream_models", []),
+            self.upstream_default_model,
+        )
 
         self.head_recent_hours = int(self.gateway_cfg.get("head_recent_hours", 72))
         self.dynamic_top_k = int(self.gateway_cfg.get("dynamic_top_k", 10))
@@ -91,6 +95,7 @@ class GatewayService:
                 "upstream_ready": bool(self.upstream_base_url and self.upstream_api_key),
                 "upstream_base_url": self.upstream_base_url,
                 "upstream_default_model": self.upstream_default_model,
+                "upstream_models": self.upstream_models,
             },
             "persona": {
                 "enabled": bool(self.persona_engine.enabled),
@@ -162,6 +167,26 @@ class GatewayService:
             await self._record_successful_round(session_id, recalled_ids)
 
         return self._proxy_response(upstream_response)
+
+    async def handle_models(self, request: Request) -> Response:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+
+        return JSONResponse(
+            {
+                "object": "list",
+                "data": [
+                    {
+                        "id": model,
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "ombre-gateway",
+                    }
+                    for model in self.upstream_models
+                ],
+            }
+        )
 
     async def prepare_payload(self, payload: dict, session_id: str) -> tuple[dict, list[str]]:
         messages = payload.get("messages")
@@ -578,6 +603,23 @@ class GatewayService:
     def _clamp(self, value: float, lower: float = 0.0, upper: float = 1.0) -> float:
         return max(lower, min(upper, float(value)))
 
+    def _normalize_model_list(self, raw_models: Any, default_model: str) -> list[str]:
+        if isinstance(raw_models, str):
+            candidates = [item.strip() for item in raw_models.split(",")]
+        elif isinstance(raw_models, list):
+            candidates = [str(item).strip() for item in raw_models]
+        else:
+            candidates = []
+
+        models = []
+        for model in candidates:
+            if model and model not in models:
+                models.append(model)
+
+        if default_model and default_model not in models:
+            models.insert(0, default_model)
+        return models
+
 
 def create_gateway_app(
     config: dict | None = None,
@@ -598,10 +640,14 @@ def create_gateway_app(
     async def chat_completions(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_chat(request)
 
+    async def models(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_models(request)
+
     app = Starlette(
         debug=False,
         routes=[
             Route("/health", health, methods=["GET"]),
+            Route("/v1/models", models, methods=["GET"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
         ],
         lifespan=lifespan,

@@ -264,6 +264,7 @@ python gateway.py
 
 它暴露两个接口：
 - `GET /health`
+- `GET /v1/models`
 - `POST /v1/chat/completions`
 
 这个网关会在转发到上游模型前自动注入四段上下文：
@@ -281,13 +282,18 @@ v1 已实现的召回约束：
 - 认证头：`Authorization: Bearer <OMBRE_GATEWAY_TOKEN>`
 - 会话头：`X-Ombre-Session-Id`
 - 支持非流式和 OpenAI-compatible SSE 流式请求；流式响应会在上游完整结束后写入本轮注入历史
+- 透传 OpenAI-compatible 工具调用字段，包括 `tools`、`tool_choice`、`parallel_tool_calls`、消息里的 `tool_calls` 和 `tool` 结果消息
+- `GET /v1/models` 会返回 `gateway.upstream_models` 配置的模型列表，方便客户端在同一组上游 key/base URL 下选择不同模型
 
 需要额外设置的环境变量：
 - `OMBRE_GATEWAY_TOKEN`
 - `OMBRE_GATEWAY_UPSTREAM_API_KEY`
+- `OMBRE_GATEWAY_UPSTREAM_BASE_URL`
+- `OMBRE_GATEWAY_UPSTREAM_MODEL`
+- `OMBRE_GATEWAY_UPSTREAM_MODELS`（逗号分隔，用于 `/v1/models`）
 - `OMBRE_PERSONA_API_KEY`（可选，缺省回退 `OMBRE_API_KEY`）
 
-上游模型地址和默认模型写在 `config.yaml` 的 `gateway` 段里。
+上游模型地址、默认模型和模型列表写在 `config.yaml` 的 `gateway` 段里，也可以用上面的环境变量覆盖。
 
 ### 人格状态引擎 / Persona State Engine
 

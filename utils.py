@@ -64,6 +64,7 @@ def load_config(config_path: str = None) -> dict:
             "port": 8010,
             "upstream_base_url": "",
             "upstream_default_model": "",
+            "upstream_models": [],
             "head_recent_hours": 72,
             "dynamic_top_k": 10,
             "inject_max_cards": 2,
@@ -203,6 +204,14 @@ def load_config(config_path: str = None) -> dict:
     env_gateway_model = os.environ.get("OMBRE_GATEWAY_UPSTREAM_MODEL", "")
     if env_gateway_model:
         config.setdefault("gateway", {})["upstream_default_model"] = env_gateway_model
+
+    env_gateway_models = os.environ.get("OMBRE_GATEWAY_UPSTREAM_MODELS", "")
+    if env_gateway_models:
+        config.setdefault("gateway", {})["upstream_models"] = [
+            item.strip()
+            for item in env_gateway_models.split(",")
+            if item.strip()
+        ]
 
     env_persona_api_key = os.environ.get("OMBRE_PERSONA_API_KEY", "")
     if env_persona_api_key:

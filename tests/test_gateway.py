@@ -245,6 +245,143 @@ def test_gateway_streams_when_client_requires_stream(monkeypatch, test_config, b
     assert state_store.get_recent_bucket_ids("sess-stream", 5) == set()
 
 
+def test_gateway_streams_tool_call_deltas(monkeypatch, test_config, bucket_mgr):
+    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
+    monkeypatch.setenv("OMBRE_GATEWAY_UPSTREAM_API_KEY", "upstream-secret")
+
+    def upstream_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",'
+                b'"type":"function","function":{"name":"read_diary","arguments":"{}"}}]}}]}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+        )
+
+    state_store = GatewayStateStore(f"{test_config['buckets_dir']}\\gateway_state.db")
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler), timeout=10.0)
+    service = GatewayService(
+        config=_gateway_config(test_config),
+        bucket_mgr=bucket_mgr,
+        dehydrator=DummyDehydrator(),
+        embedding_engine=DummyEmbeddingEngine(enabled=False),
+        state_store=state_store,
+        persona_engine=DummyPersonaEngine(),
+        http_client=http_client,
+    )
+    app = create_gateway_app(config=test_config, service=service)
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-stream-tools",
+            },
+            json={"messages": [{"role": "user", "content": "查今天的日记"}], "stream": True},
+        ) as response:
+            body = response.read().decode("utf-8")
+
+    assert response.status_code == 200
+    assert '"tool_calls"' in body
+    assert '"read_diary"' in body
+    assert "data: [DONE]" in body
+
+
+def test_gateway_lists_configured_models(monkeypatch, test_config, bucket_mgr):
+    app, _, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            upstream_models=["qwen3.5-plus", "qwen3.5-max"],
+            upstream_default_model="qwen3.5-plus",
+        ),
+        bucket_mgr,
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/models",
+            headers={"Authorization": "Bearer gateway-secret"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object"] == "list"
+    assert [model["id"] for model in body["data"]] == ["qwen3.5-plus", "qwen3.5-max"]
+
+
+def test_gateway_preserves_tool_call_fields(monkeypatch, test_config, bucket_mgr):
+    app, _, _, captured = _build_service(monkeypatch, _gateway_config(test_config), bucket_mgr)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_diary",
+                "description": "Read one diary entry by date.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"date": {"type": "string"}},
+                    "required": ["date"],
+                },
+            },
+        }
+    ]
+    tool_calls = [
+        {
+            "id": "call_read_diary",
+            "type": "function",
+            "function": {"name": "read_diary", "arguments": "{\"date\":\"2026-04-24\"}"},
+        }
+    ]
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-tools",
+            },
+            json={
+                "model": "qwen3.5-max",
+                "messages": [
+                    {"role": "user", "content": "查一下今天的日记"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": tool_calls,
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_read_diary",
+                        "content": "{\"title\":\"今日\"}",
+                    },
+                    {"role": "user", "content": "继续说"},
+                ],
+                "tools": tools,
+                "tool_choice": "auto",
+                "parallel_tool_calls": False,
+            },
+        )
+
+    assert response.status_code == 200
+    forwarded = captured[0]["json"]
+    assert forwarded["model"] == "qwen3.5-max"
+    assert forwarded["tools"] == tools
+    assert forwarded["tool_choice"] == "auto"
+    assert forwarded["parallel_tool_calls"] is False
+
+    assistant_message = next(
+        message for message in forwarded["messages"] if message.get("role") == "assistant"
+    )
+    tool_message = next(message for message in forwarded["messages"] if message.get("role") == "tool")
+    assert assistant_message["tool_calls"] == tool_calls
+    assert tool_message["tool_call_id"] == "call_read_diary"
+
+
 def test_gateway_injects_after_existing_system_message(monkeypatch, test_config, bucket_mgr):
     pinned_id = _create_bucket(
         bucket_mgr,

@@ -87,6 +87,9 @@ gateway:
   port: 8010
   upstream_base_url: "https://api.openai.com/v1"
   upstream_default_model: "gpt-4.1-mini"
+  upstream_models:
+    - "gpt-4.1-mini"
+    - "gpt-4.1"
   head_recent_hours: 72
   dynamic_top_k: 10
   inject_max_cards: 2
@@ -107,6 +110,9 @@ gateway:
   # Env vars:
   #   OMBRE_GATEWAY_TOKEN
   #   OMBRE_GATEWAY_UPSTREAM_API_KEY
+  #   OMBRE_GATEWAY_UPSTREAM_BASE_URL
+  #   OMBRE_GATEWAY_UPSTREAM_MODEL
+  #   OMBRE_GATEWAY_UPSTREAM_MODELS   # comma-separated model list for /v1/models
 
 # --- Persona State Engine / 人格状态引擎 ---
 # Tracks slow personality drift, relationship state, and per-session affect.
