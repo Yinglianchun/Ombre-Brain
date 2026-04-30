@@ -90,6 +90,24 @@ gateway:
   upstream_models:
     - "gpt-4.1-mini"
     - "gpt-4.1"
+  # Optional multi-upstream mode / 可选多上游模式
+  # When upstreams is set, the gateway aggregates all listed models and routes
+  # each request by model name to the matching upstream.
+  # 配置 upstreams 后，网关会聚合所有模型，并按模型名路由到对应上游。
+  # upstreams:
+  #   - name: "deepseek"
+  #     base_url: "https://api.deepseek.com/v1"
+  #     api_key_env: "OMBRE_GATEWAY_DEEPSEEK_API_KEY"
+  #     default_model: "deepseek-chat"
+  #     models:
+  #       - "deepseek-chat"
+  #       - "deepseek-reasoner"
+  #   - name: "siliconflow"
+  #     base_url: "https://api.siliconflow.cn/v1"
+  #     api_key_env: "OMBRE_GATEWAY_SILICONFLOW_API_KEY"
+  #     models:
+  #       - "Qwen/Qwen3-32B"
+  #       - "THUDM/GLM-4-32B"
   head_recent_hours: 72
   dynamic_top_k: 10
   inject_max_cards: 2
@@ -113,6 +131,8 @@ gateway:
   #   OMBRE_GATEWAY_UPSTREAM_BASE_URL
   #   OMBRE_GATEWAY_UPSTREAM_MODEL
   #   OMBRE_GATEWAY_UPSTREAM_MODELS   # comma-separated model list for /v1/models
+  #   OMBRE_GATEWAY_DEEPSEEK_API_KEY  # example for gateway.upstreams[*].api_key_env
+  #   OMBRE_GATEWAY_SILICONFLOW_API_KEY
 
 # --- Persona State Engine / 人格状态引擎 ---
 # Tracks slow personality drift, relationship state, and per-session affect.

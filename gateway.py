@@ -57,6 +57,14 @@ class GatewayService:
             self.gateway_cfg.get("upstream_models", []),
             self.upstream_default_model,
         )
+        self.upstreams = self._load_upstreams()
+        self.upstream_models = self._aggregate_upstream_models()
+        if not self.upstream_default_model:
+            for upstream in self.upstreams:
+                default_model = upstream.get("default_model") or ""
+                if default_model:
+                    self.upstream_default_model = default_model
+                    break
 
         self.head_recent_hours = int(self.gateway_cfg.get("head_recent_hours", 72))
         self.dynamic_top_k = int(self.gateway_cfg.get("dynamic_top_k", 10))
@@ -92,10 +100,24 @@ class GatewayService:
             "status": "ok",
             "gateway": {
                 "token_configured": bool(self.gateway_token),
-                "upstream_ready": bool(self.upstream_base_url and self.upstream_api_key),
-                "upstream_base_url": self.upstream_base_url,
+                "upstream_ready": bool(self.upstreams) and all(
+                    bool(upstream.get("base_url") and upstream.get("api_key"))
+                    for upstream in self.upstreams
+                ),
+                "upstream_base_url": self.upstream_base_url
+                or (self.upstreams[0]["base_url"] if len(self.upstreams) == 1 else ""),
                 "upstream_default_model": self.upstream_default_model,
                 "upstream_models": self.upstream_models,
+                "upstreams": [
+                    {
+                        "name": upstream["name"],
+                        "base_url": upstream["base_url"],
+                        "default_model": upstream["default_model"],
+                        "models": upstream["models"],
+                        "ready": bool(upstream.get("base_url") and upstream.get("api_key")),
+                    }
+                    for upstream in self.upstreams
+                ],
             },
             "persona": {
                 "enabled": bool(self.persona_engine.enabled),
@@ -196,6 +218,7 @@ class GatewayService:
         model = payload.get("model") or self.upstream_default_model
         if not model:
             raise ValueError("model is required when gateway.upstream_default_model is empty")
+        self._get_upstream_for_model(model)
 
         all_buckets = await self.bucket_mgr.list_all(include_archive=False)
         query = self._extract_last_user_query(messages)
@@ -240,16 +263,13 @@ class GatewayService:
         return None
 
     async def _forward_upstream(self, payload: dict) -> httpx.Response:
-        if not self.upstream_base_url:
-            raise RuntimeError("gateway.upstream_base_url is not configured")
-        if not self.upstream_api_key:
-            raise RuntimeError("OMBRE_GATEWAY_UPSTREAM_API_KEY is not configured")
-
-        url = f"{self.upstream_base_url}/chat/completions"
+        model = str(payload.get("model") or "").strip()
+        upstream = self._get_upstream_for_model(model)
+        url = f"{upstream['base_url']}/chat/completions"
         return await self.http_client.post(
             url,
             headers={
-                "Authorization": f"Bearer {self.upstream_api_key}",
+                "Authorization": f"Bearer {upstream['api_key']}",
                 "Content-Type": "application/json",
             },
             json=payload,
@@ -261,17 +281,14 @@ class GatewayService:
         session_id: str,
         recalled_ids: list[str],
     ) -> Response:
-        if not self.upstream_base_url:
-            raise RuntimeError("gateway.upstream_base_url is not configured")
-        if not self.upstream_api_key:
-            raise RuntimeError("OMBRE_GATEWAY_UPSTREAM_API_KEY is not configured")
-
-        url = f"{self.upstream_base_url}/chat/completions"
+        model = str(payload.get("model") or "").strip()
+        upstream = self._get_upstream_for_model(model)
+        url = f"{upstream['base_url']}/chat/completions"
         request = self.http_client.build_request(
             "POST",
             url,
             headers={
-                "Authorization": f"Bearer {self.upstream_api_key}",
+                "Authorization": f"Bearer {upstream['api_key']}",
                 "Content-Type": "application/json",
             },
             json=payload,
@@ -602,6 +619,88 @@ class GatewayService:
 
     def _clamp(self, value: float, lower: float = 0.0, upper: float = 1.0) -> float:
         return max(lower, min(upper, float(value)))
+
+    def _load_upstreams(self) -> list[dict[str, Any]]:
+        raw_upstreams = self.gateway_cfg.get("upstreams", [])
+        if isinstance(raw_upstreams, list) and raw_upstreams:
+            upstreams = []
+            for index, raw in enumerate(raw_upstreams, start=1):
+                if not isinstance(raw, dict):
+                    continue
+                name = str(raw.get("name") or f"upstream-{index}").strip() or f"upstream-{index}"
+                base_url = str(raw.get("base_url") or "").rstrip("/")
+                default_model = str(raw.get("default_model") or "").strip()
+                api_key = str(raw.get("api_key") or "").strip()
+                api_key_env = str(raw.get("api_key_env") or "").strip()
+                if api_key_env and not api_key:
+                    api_key = os.environ.get(api_key_env, "")
+                upstreams.append(
+                    {
+                        "name": name,
+                        "base_url": base_url,
+                        "api_key": api_key,
+                        "default_model": default_model,
+                        "models": self._normalize_model_list(raw.get("models", []), default_model),
+                    }
+                )
+            if upstreams:
+                return upstreams
+
+        return [
+            {
+                "name": "default",
+                "base_url": self.upstream_base_url,
+                "api_key": self.upstream_api_key,
+                "default_model": self.upstream_default_model,
+                "models": self._normalize_model_list(
+                    self.gateway_cfg.get("upstream_models", []),
+                    self.upstream_default_model,
+                ),
+            }
+        ]
+
+    def _aggregate_upstream_models(self) -> list[str]:
+        models = []
+        for upstream in self.upstreams:
+            for model in upstream.get("models", []):
+                if not model:
+                    continue
+                if model in models:
+                    logger.warning(
+                        'Duplicate gateway model "%s" found in upstream "%s"; first match wins',
+                        model,
+                        upstream.get("name", "unknown"),
+                    )
+                    continue
+                models.append(model)
+        return models
+
+    def _get_upstream_for_model(self, model: str) -> dict[str, Any]:
+        if not self.upstreams:
+            raise RuntimeError("gateway upstream is not configured")
+
+        if len(self.upstreams) == 1:
+            upstream = self.upstreams[0]
+        else:
+            normalized_model = str(model or "").strip()
+            if not normalized_model:
+                raise ValueError("model is required when gateway has multiple upstreams")
+            upstream = next(
+                (
+                    candidate
+                    for candidate in self.upstreams
+                    if normalized_model in candidate.get("models", [])
+                ),
+                None,
+            )
+            if upstream is None:
+                raise ValueError(f'model "{normalized_model}" is not configured in gateway.upstreams')
+
+        if not upstream.get("base_url"):
+            raise RuntimeError(f'gateway upstream "{upstream["name"]}" base_url is not configured')
+        if not upstream.get("api_key"):
+            raise RuntimeError(f'gateway upstream "{upstream["name"]}" api_key is not configured')
+        return upstream
 
     def _normalize_model_list(self, raw_models: Any, default_model: str) -> list[str]:
         if isinstance(raw_models, str):

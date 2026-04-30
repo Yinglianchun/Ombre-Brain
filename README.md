@@ -283,7 +283,7 @@ v1 已实现的召回约束：
 - 会话头：`X-Ombre-Session-Id`
 - 支持非流式和 OpenAI-compatible SSE 流式请求；流式响应会在上游完整结束后写入本轮注入历史
 - 透传 OpenAI-compatible 工具调用字段，包括 `tools`、`tool_choice`、`parallel_tool_calls`、消息里的 `tool_calls` 和 `tool` 结果消息
-- `GET /v1/models` 会返回 `gateway.upstream_models` 配置的模型列表，方便客户端在同一组上游 key/base URL 下选择不同模型
+- `GET /v1/models` 会返回 Gateway 聚合后的模型列表；单上游模式读 `gateway.upstream_models`，多上游模式读 `gateway.upstreams[*].models`
 
 需要额外设置的环境变量：
 - `OMBRE_GATEWAY_TOKEN`
@@ -294,6 +294,29 @@ v1 已实现的召回约束：
 - `OMBRE_PERSONA_API_KEY`（可选，缺省回退 `OMBRE_API_KEY`）
 
 上游模型地址、默认模型和模型列表写在 `config.yaml` 的 `gateway` 段里，也可以用上面的环境变量覆盖。
+
+多上游示例：
+
+```yaml
+gateway:
+  upstream_default_model: "deepseek-chat"
+  upstreams:
+    - name: "deepseek"
+      base_url: "https://api.deepseek.com/v1"
+      api_key_env: "OMBRE_GATEWAY_DEEPSEEK_API_KEY"
+      default_model: "deepseek-chat"
+      models:
+        - "deepseek-chat"
+        - "deepseek-reasoner"
+    - name: "siliconflow"
+      base_url: "https://api.siliconflow.cn/v1"
+      api_key_env: "OMBRE_GATEWAY_SILICONFLOW_API_KEY"
+      models:
+        - "Qwen/Qwen3-32B"
+        - "THUDM/GLM-4-32B"
+```
+
+客户端依然只需要填写一组 Gateway 地址和 token。Gateway 会把 `/v1/models` 展平成一个统一模型列表，再按请求里的 `model` 把聊天请求路由到对应厂商。
 
 ### 人格状态引擎 / Persona State Engine
 
@@ -483,6 +506,7 @@ All parameters in `config.yaml` (copy from `config.example.yaml`). Key ones:
 | `embedding.base_url` | Embedding API 地址 / Embedding API endpoint | `https://api.siliconflow.cn/v1` |
 | `gateway.upstream_base_url` | 网关上游 OpenAI 兼容地址 / Gateway upstream base URL | `""` |
 | `gateway.upstream_default_model` | 网关默认模型 / Gateway default model | `""` |
+| `gateway.upstreams` | 多上游路由配置 / Multi-upstream routing config | `[]` |
 | `gateway.skip_recent_rounds` | 最近几轮跳过注入 / Skip recently injected rounds | `5` |
 | `gateway.cooldown_hours` | 召回冷却时长 / Recall cooldown hours | `48` |
 | `persona.enabled` | 启用人格状态注入 / Enable persona state injection | `true` |
@@ -506,8 +530,10 @@ Sensitive config via env vars:
 - `OMBRE_GATEWAY_PORT` — 覆盖网关监听端口
 - `OMBRE_GATEWAY_UPSTREAM_BASE_URL` — 覆盖网关上游地址
 - `OMBRE_GATEWAY_UPSTREAM_MODEL` — 覆盖网关默认模型
+- `OMBRE_GATEWAY_UPSTREAM_MODELS` — 覆盖单上游模型列表
 - `OMBRE_GATEWAY_TOKEN` — 网关鉴权 token
 - `OMBRE_GATEWAY_UPSTREAM_API_KEY` — 网关转发上游时使用的 API key
+- `gateway.upstreams[*].api_key_env` — 每个多上游节点可单独引用自己的环境变量
 - `OMBRE_PERSONA_API_KEY` — 人格事件评估 API key，缺省回退 `OMBRE_API_KEY`
 - `OMBRE_PERSONA_BASE_URL` — 覆盖人格事件评估 API 地址
 - `OMBRE_PERSONA_MODEL` — 覆盖人格事件评估模型

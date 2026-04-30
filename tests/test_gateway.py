@@ -314,6 +314,112 @@ def test_gateway_lists_configured_models(monkeypatch, test_config, bucket_mgr):
     assert [model["id"] for model in body["data"]] == ["qwen3.5-plus", "qwen3.5-max"]
 
 
+def test_gateway_routes_multi_upstreams_by_model(monkeypatch, test_config, bucket_mgr):
+    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
+    monkeypatch.setenv("OMBRE_GATEWAY_DEEPSEEK_API_KEY", "deepseek-secret")
+    monkeypatch.setenv("OMBRE_GATEWAY_SILICONFLOW_API_KEY", "siliconflow-secret")
+
+    captured = []
+
+    def upstream_handler(request: httpx.Request) -> httpx.Response:
+        captured.append(
+            {
+                "url": str(request.url),
+                "auth": request.headers.get("Authorization"),
+                "json": json.loads(request.content.decode("utf-8")),
+            }
+        )
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    cfg = _gateway_config(
+        test_config,
+        upstream_base_url="",
+        upstream_models=[],
+        upstream_default_model="deepseek-chat",
+        upstreams=[
+            {
+                "name": "deepseek",
+                "base_url": "https://api.deepseek.com/v1",
+                "api_key_env": "OMBRE_GATEWAY_DEEPSEEK_API_KEY",
+                "default_model": "deepseek-chat",
+                "models": ["deepseek-chat", "deepseek-reasoner"],
+            },
+            {
+                "name": "siliconflow",
+                "base_url": "https://api.siliconflow.cn/v1",
+                "api_key_env": "OMBRE_GATEWAY_SILICONFLOW_API_KEY",
+                "models": ["Qwen/Qwen3-32B", "THUDM/GLM-4-32B"],
+            },
+        ],
+    )
+    state_store = GatewayStateStore(f"{cfg['buckets_dir']}\\gateway_state.db")
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler), timeout=10.0)
+    service = GatewayService(
+        config=cfg,
+        bucket_mgr=bucket_mgr,
+        dehydrator=DummyDehydrator(),
+        embedding_engine=DummyEmbeddingEngine(enabled=False),
+        state_store=state_store,
+        persona_engine=DummyPersonaEngine(),
+        http_client=http_client,
+    )
+    app = create_gateway_app(config=cfg, service=service)
+
+    with TestClient(app) as client:
+        models_response = client.get(
+            "/v1/models",
+            headers={"Authorization": "Bearer gateway-secret"},
+        )
+        response_default = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-multi-default",
+            },
+            json={"messages": [{"role": "user", "content": "默认模型走哪边"}]},
+        )
+        response_sf = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-multi-sf",
+            },
+            json={
+                "model": "THUDM/GLM-4-32B",
+                "messages": [{"role": "user", "content": "这条走硅基流动"}],
+            },
+        )
+
+    assert models_response.status_code == 200
+    assert [model["id"] for model in models_response.json()["data"]] == [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "Qwen/Qwen3-32B",
+        "THUDM/GLM-4-32B",
+    ]
+    assert response_default.status_code == 200
+    assert response_sf.status_code == 200
+    assert captured[0]["url"] == "https://api.deepseek.com/v1/chat/completions"
+    assert captured[0]["auth"] == "Bearer deepseek-secret"
+    assert captured[0]["json"]["model"] == "deepseek-chat"
+    assert captured[1]["url"] == "https://api.siliconflow.cn/v1/chat/completions"
+    assert captured[1]["auth"] == "Bearer siliconflow-secret"
+    assert captured[1]["json"]["model"] == "THUDM/GLM-4-32B"
+
+
 def test_gateway_preserves_tool_call_fields(monkeypatch, test_config, bucket_mgr):
     app, _, _, captured = _build_service(monkeypatch, _gateway_config(test_config), bucket_mgr)
     tools = [

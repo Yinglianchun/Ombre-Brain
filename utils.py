@@ -65,6 +65,7 @@ def load_config(config_path: str = None) -> dict:
             "upstream_base_url": "",
             "upstream_default_model": "",
             "upstream_models": [],
+            "upstreams": [],
             "head_recent_hours": 72,
             "dynamic_top_k": 10,
             "inject_max_cards": 2,
