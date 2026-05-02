@@ -165,6 +165,14 @@ class GatewayService:
                 status_code=400,
             )
 
+        logger.info(
+            "Gateway incoming chat | session=%s model=%s stream=%s messages=%s",
+            session_id,
+            payload.get("model") or self.upstream_default_model,
+            payload.get("stream") is True,
+            self._summarize_messages_for_debug(payload.get("messages")),
+        )
+
         try:
             forward_payload, recalled_ids = await self.prepare_payload(payload, session_id)
         except ValueError as exc:
@@ -402,6 +410,50 @@ class GatewayService:
                         chunks.append(str(text))
             return "\n".join(chunks)
         return ""
+
+    def _summarize_messages_for_debug(self, messages: Any) -> list[dict[str, Any]] | str:
+        if not isinstance(messages, list):
+            return "<invalid>"
+
+        summary: list[dict[str, Any]] = []
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict):
+                summary.append({"idx": index, "type": type(message).__name__})
+                continue
+
+            item: dict[str, Any] = {
+                "idx": index,
+                "role": str(message.get("role") or ""),
+            }
+            if self._coerce_message_text(message.get("content")).strip():
+                item["has_text"] = True
+            if isinstance(message.get("reasoning_content"), str) and message.get("reasoning_content"):
+                item["has_reasoning"] = True
+
+            tool_call_id = message.get("tool_call_id")
+            if tool_call_id:
+                item["tool_call_id"] = str(tool_call_id)
+
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                labels = []
+                for tool_index, tool_call in enumerate(tool_calls):
+                    if not isinstance(tool_call, dict):
+                        labels.append(f"idx:{tool_index}")
+                        continue
+                    if tool_call.get("id"):
+                        labels.append(str(tool_call["id"]))
+                        continue
+                    function = tool_call.get("function", {})
+                    if isinstance(function, dict) and function.get("name"):
+                        labels.append(f"idx:{tool_index}:{function['name']}")
+                        continue
+                    labels.append(f"idx:{tool_index}")
+                item["tool_call_ids"] = labels
+
+            summary.append(item)
+
+        return summary
 
     async def _build_core_memory_block(self, all_buckets: list[dict]) -> str:
         core_buckets = [
