@@ -488,6 +488,217 @@ def test_gateway_preserves_tool_call_fields(monkeypatch, test_config, bucket_mgr
     assert tool_message["tool_call_id"] == "call_read_diary"
 
 
+def test_gateway_restores_reasoning_content_for_tool_continuation(monkeypatch, test_config, bucket_mgr):
+    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
+    monkeypatch.setenv("OMBRE_GATEWAY_UPSTREAM_API_KEY", "upstream-secret")
+
+    tool_calls = [
+        {
+            "id": "call_read_diary",
+            "type": "function",
+            "function": {"name": "read_diary", "arguments": "{\"date\":\"2026-05-02\"}"},
+        }
+    ]
+    captured = []
+
+    def upstream_handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        captured.append(payload)
+        if len(captured) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-tool-1",
+                    "object": "chat.completion",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "reasoning_content": "先拿到日记内容，再继续回答。",
+                                "tool_calls": tool_calls,
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-tool-2",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "今天的日记是晴天。"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    cfg = _gateway_config(test_config)
+    state_store = GatewayStateStore(f"{cfg['buckets_dir']}\\gateway_state.db")
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler), timeout=10.0)
+    service = GatewayService(
+        config=cfg,
+        bucket_mgr=bucket_mgr,
+        dehydrator=DummyDehydrator(),
+        embedding_engine=DummyEmbeddingEngine(enabled=False),
+        state_store=state_store,
+        persona_engine=DummyPersonaEngine(),
+        http_client=http_client,
+    )
+    app = create_gateway_app(config=cfg, service=service)
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-reasoning",
+            },
+            json={"messages": [{"role": "user", "content": "查一下今日日记"}]},
+        )
+        second = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-reasoning",
+            },
+            json={
+                "messages": [
+                    {"role": "user", "content": "查一下今日日记"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": tool_calls,
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_read_diary",
+                        "content": "{\"title\":\"今日\",\"content\":\"晴天\"}",
+                    },
+                ]
+            },
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assistant_message = next(
+        message
+        for message in captured[1]["messages"]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    assert assistant_message["reasoning_content"] == "先拿到日记内容，再继续回答。"
+    assert "sess-reasoning" not in service.pending_tool_reasoning
+
+
+def test_gateway_restores_reasoning_content_after_streamed_tool_call(monkeypatch, test_config, bucket_mgr):
+    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
+    monkeypatch.setenv("OMBRE_GATEWAY_UPSTREAM_API_KEY", "upstream-secret")
+
+    tool_calls = [
+        {
+            "id": "call_read_diary",
+            "type": "function",
+            "function": {"name": "read_diary", "arguments": "{\"date\":\"2026-05-02\"}"},
+        }
+    ]
+    captured = []
+
+    def upstream_handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        captured.append(payload)
+        if len(captured) == 1:
+            stream_body = (
+                'data: {"choices":[{"delta":{"role":"assistant","reasoning_content":"'
+                '先拿到日记内容，再继续回答。","tool_calls":[{"index":0,"id":"call_read_diary",'
+                '"type":"function","function":{"name":"read_diary","arguments":"{\\"date\\":\\"2026-05-02\\"}"}}]}}]}\n\n'
+                "data: [DONE]\n\n"
+            ).encode("utf-8")
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=stream_body,
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-tool-stream-2",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "今天的日记是晴天。"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    cfg = _gateway_config(test_config)
+    state_store = GatewayStateStore(f"{cfg['buckets_dir']}\\gateway_state.db")
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler), timeout=10.0)
+    service = GatewayService(
+        config=cfg,
+        bucket_mgr=bucket_mgr,
+        dehydrator=DummyDehydrator(),
+        embedding_engine=DummyEmbeddingEngine(enabled=False),
+        state_store=state_store,
+        persona_engine=DummyPersonaEngine(),
+        http_client=http_client,
+    )
+    app = create_gateway_app(config=cfg, service=service)
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-reasoning-stream",
+            },
+            json={"messages": [{"role": "user", "content": "查一下今日日记"}], "stream": True},
+        ) as response:
+            body = response.read().decode("utf-8")
+
+        second = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-reasoning-stream",
+            },
+            json={
+                "messages": [
+                    {"role": "user", "content": "查一下今日日记"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": tool_calls,
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_read_diary",
+                        "content": "{\"title\":\"今日\",\"content\":\"晴天\"}",
+                    },
+                ]
+            },
+        )
+
+    assert "data: [DONE]" in body
+    assert second.status_code == 200
+    assistant_message = next(
+        message
+        for message in captured[1]["messages"]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    assert assistant_message["reasoning_content"] == "先拿到日记内容，再继续回答。"
+    assert "sess-reasoning-stream" not in service.pending_tool_reasoning
+
+
 def test_gateway_injects_after_existing_system_message(monkeypatch, test_config, bucket_mgr):
     pinned_id = _create_bucket(
         bucket_mgr,

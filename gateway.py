@@ -1,6 +1,8 @@
 import logging
 import os
 import secrets
+import json
+import codecs
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -87,6 +89,7 @@ class GatewayService:
         self.second_card_relative_score = float(
             self.gateway_cfg.get("second_card_relative_score", 0.85)
         )
+        self.pending_tool_reasoning: dict[str, dict[tuple[str, ...], dict[str, Any]]] = {}
 
         self.http_client = http_client or httpx.AsyncClient(timeout=60.0)
 
@@ -186,6 +189,7 @@ class GatewayService:
 
         upstream_response = await self._forward_upstream(forward_payload)
         if 200 <= upstream_response.status_code < 300:
+            self._capture_reasoning_from_response(session_id, upstream_response)
             await self._record_successful_round(session_id, recalled_ids)
 
         return self._proxy_response(upstream_response)
@@ -237,7 +241,11 @@ class GatewayService:
 
         forward_payload = deepcopy(payload)
         forward_payload["model"] = model
-        forward_payload["messages"] = self._inject_system_message(messages, injected_message)
+        self._restore_cached_reasoning_content(session_id, forward_payload.get("messages"))
+        forward_payload["messages"] = self._inject_system_message(
+            forward_payload["messages"],
+            injected_message,
+        )
         forward_payload["stream"] = payload.get("stream") is True
         return forward_payload, [bucket["id"] for bucket in recalled_buckets]
 
@@ -307,14 +315,18 @@ class GatewayService:
 
         async def stream_body():
             completed = False
+            stream_state = self._new_stream_capture_state()
             try:
                 async for chunk in upstream_response.aiter_bytes():
                     if chunk:
+                        self._consume_stream_capture_chunk(stream_state, chunk)
                         yield chunk
+                self._consume_stream_capture_chunk(stream_state, b"", final=True)
                 completed = True
             finally:
                 await upstream_response.aclose()
                 if completed:
+                    self._capture_reasoning_from_stream_state(session_id, stream_state)
                     await self._record_successful_round(session_id, recalled_ids)
 
         return StreamingResponse(
@@ -587,6 +599,246 @@ class GatewayService:
         if new_messages and isinstance(new_messages[0], dict) and new_messages[0].get("role") == "system":
             return [new_messages[0], memory_message, *new_messages[1:]]
         return [memory_message, *new_messages]
+
+    def _restore_cached_reasoning_content(self, session_id: str, messages: Any) -> None:
+        if not isinstance(messages, list) or not any(
+            isinstance(message, dict) and message.get("role") == "tool"
+            for message in messages
+        ):
+            return
+
+        cache = self.pending_tool_reasoning.get(session_id)
+        if not cache:
+            return
+
+        restored = 0
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            if message.get("reasoning_content"):
+                continue
+            signature = self._tool_call_signature(message)
+            if not signature:
+                continue
+            cached_message = cache.get(signature)
+            if not cached_message or not cached_message.get("reasoning_content"):
+                continue
+            message["reasoning_content"] = cached_message["reasoning_content"]
+            restored += 1
+
+        if restored:
+            logger.info(
+                "Gateway restored reasoning_content for %s assistant tool-call message(s) | session=%s",
+                restored,
+                session_id,
+            )
+
+    def _capture_reasoning_from_response(self, session_id: str, upstream_response: httpx.Response) -> None:
+        try:
+            body = upstream_response.json()
+        except ValueError:
+            return
+        self._capture_reasoning_from_response_body(session_id, body)
+
+    def _capture_reasoning_from_response_body(self, session_id: str, body: Any) -> None:
+        message = self._extract_assistant_message_from_response_body(body)
+        if message:
+            self._update_reasoning_cache(session_id, message)
+
+    def _extract_assistant_message_from_response_body(self, body: Any) -> dict[str, Any] | None:
+        if not isinstance(body, dict):
+            return None
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return None
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            return None
+        message = choice.get("message")
+        if isinstance(message, dict) and message.get("role", "assistant") == "assistant":
+            return message
+        return None
+
+    def _update_reasoning_cache(self, session_id: str, assistant_message: dict[str, Any]) -> None:
+        signature = self._tool_call_signature(assistant_message)
+        reasoning_content = assistant_message.get("reasoning_content")
+        if signature and reasoning_content:
+            cache = self.pending_tool_reasoning.setdefault(session_id, {})
+            cache[signature] = {
+                "reasoning_content": reasoning_content,
+                "tool_calls": deepcopy(assistant_message.get("tool_calls", [])),
+            }
+            logger.info(
+                "Gateway cached reasoning_content for tool continuation | session=%s tool_calls=%s",
+                session_id,
+                list(signature),
+            )
+            return
+
+        if not signature:
+            self.pending_tool_reasoning.pop(session_id, None)
+
+    def _tool_call_signature(self, assistant_message: Any) -> tuple[str, ...]:
+        if not isinstance(assistant_message, dict):
+            return ()
+        tool_calls = assistant_message.get("tool_calls")
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return ()
+
+        signature = []
+        for index, tool_call in enumerate(tool_calls):
+            if not isinstance(tool_call, dict):
+                continue
+            tool_id = tool_call.get("id")
+            if tool_id:
+                signature.append(str(tool_id))
+                continue
+            function = tool_call.get("function", {})
+            if isinstance(function, dict):
+                signature.append(
+                    f"idx:{index}:{function.get('name', '')}:{function.get('arguments', '')}"
+                )
+        return tuple(signature)
+
+    def _new_stream_capture_state(self) -> dict[str, Any]:
+        return {
+            "decoder": codecs.getincrementaldecoder("utf-8")(),
+            "buffer": "",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "",
+            },
+            "tool_calls_by_index": {},
+        }
+
+    def _consume_stream_capture_chunk(
+        self,
+        stream_state: dict[str, Any],
+        chunk: bytes,
+        final: bool = False,
+    ) -> None:
+        decoder = stream_state["decoder"]
+        if chunk:
+            stream_state["buffer"] += decoder.decode(chunk)
+        if final:
+            stream_state["buffer"] += decoder.decode(b"", final=True)
+
+        buffer = stream_state["buffer"].replace("\r\n", "\n")
+        while "\n\n" in buffer:
+            event_text, buffer = buffer.split("\n\n", 1)
+            self._consume_sse_event(stream_state, event_text)
+
+        if final and buffer.strip():
+            self._consume_sse_event(stream_state, buffer)
+            buffer = ""
+
+        stream_state["buffer"] = buffer
+
+    def _consume_sse_event(self, stream_state: dict[str, Any], event_text: str) -> None:
+        data_lines = []
+        for raw_line in event_text.split("\n"):
+            line = raw_line.strip()
+            if line.startswith("data:"):
+                data_lines.append(line[5:].strip())
+
+        if not data_lines:
+            return
+        payload = "\n".join(data_lines).strip()
+        if not payload or payload == "[DONE]":
+            return
+
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            return
+
+        if not isinstance(event, dict):
+            return
+        for choice in event.get("choices", []):
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                self._merge_stream_message_delta(stream_state, delta)
+            message = choice.get("message")
+            if isinstance(message, dict):
+                self._merge_complete_message(stream_state, message)
+
+    def _merge_stream_message_delta(self, stream_state: dict[str, Any], delta: dict[str, Any]) -> None:
+        message = stream_state["message"]
+        if delta.get("role"):
+            message["role"] = delta["role"]
+        if isinstance(delta.get("content"), str):
+            message["content"] += delta["content"]
+        if isinstance(delta.get("reasoning_content"), str):
+            message["reasoning_content"] += delta["reasoning_content"]
+
+        tool_calls = delta.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            return
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            index = int(tool_call.get("index", 0))
+            target = stream_state["tool_calls_by_index"].setdefault(
+                index,
+                {"type": "function", "function": {"name": "", "arguments": ""}},
+            )
+            if tool_call.get("id"):
+                target["id"] = tool_call["id"]
+            if tool_call.get("type"):
+                target["type"] = tool_call["type"]
+            function = tool_call.get("function")
+            if isinstance(function, dict):
+                target_function = target.setdefault("function", {"name": "", "arguments": ""})
+                if isinstance(function.get("name"), str):
+                    target_function["name"] += function["name"]
+                if isinstance(function.get("arguments"), str):
+                    target_function["arguments"] += function["arguments"]
+
+    def _merge_complete_message(self, stream_state: dict[str, Any], message: dict[str, Any]) -> None:
+        target = stream_state["message"]
+        if message.get("role"):
+            target["role"] = message["role"]
+        if isinstance(message.get("content"), str):
+            target["content"] = message["content"]
+        if isinstance(message.get("reasoning_content"), str):
+            target["reasoning_content"] = message["reasoning_content"]
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            stream_state["tool_calls_by_index"] = {
+                index: deepcopy(tool_call)
+                for index, tool_call in enumerate(tool_calls)
+                if isinstance(tool_call, dict)
+            }
+
+    def _capture_reasoning_from_stream_state(self, session_id: str, stream_state: dict[str, Any]) -> None:
+        assistant_message = self._build_stream_assistant_message(stream_state)
+        if assistant_message:
+            self._update_reasoning_cache(session_id, assistant_message)
+
+    def _build_stream_assistant_message(self, stream_state: dict[str, Any]) -> dict[str, Any] | None:
+        message = deepcopy(stream_state.get("message", {}))
+        tool_calls_by_index = stream_state.get("tool_calls_by_index", {})
+        tool_calls = [
+            deepcopy(tool_calls_by_index[index])
+            for index in sorted(tool_calls_by_index)
+            if isinstance(tool_calls_by_index[index], dict)
+        ]
+
+        content = message.get("content", "")
+        reasoning_content = message.get("reasoning_content", "")
+        if not (tool_calls or content or reasoning_content):
+            return None
+
+        assistant_message: dict[str, Any] = {"role": message.get("role", "assistant")}
+        assistant_message["content"] = content if content else None
+        if reasoning_content:
+            assistant_message["reasoning_content"] = reasoning_content
+        if tool_calls:
+            assistant_message["tool_calls"] = tool_calls
+        return assistant_message
 
     def _is_dynamic_candidate(self, bucket: dict) -> bool:
         meta = bucket.get("metadata", {})
