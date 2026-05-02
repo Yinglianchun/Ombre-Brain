@@ -65,6 +65,15 @@ class DummyPersonaEngine:
         )
 
 
+class RecordingPersonaEngine(DummyPersonaEngine):
+    def __init__(self):
+        self.calls = []
+
+    async def update_from_user_message(self, session_id: str, user_message: str) -> dict:
+        self.calls.append({"session_id": session_id, "user_message": user_message})
+        return await super().update_from_user_message(session_id, user_message)
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -486,6 +495,83 @@ def test_gateway_preserves_tool_call_fields(monkeypatch, test_config, bucket_mgr
     tool_message = next(message for message in forwarded["messages"] if message.get("role") == "tool")
     assert assistant_message["tool_calls"] == tool_calls
     assert tool_message["tool_call_id"] == "call_read_diary"
+
+
+def test_gateway_skips_persona_reanalysis_on_tool_continuation(monkeypatch, test_config, bucket_mgr):
+    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
+    monkeypatch.setenv("OMBRE_GATEWAY_UPSTREAM_API_KEY", "upstream-secret")
+
+    persona_engine = RecordingPersonaEngine()
+    state_store = GatewayStateStore(f"{test_config['buckets_dir']}\\gateway_state.db")
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+        ),
+        timeout=10.0,
+    )
+    service = GatewayService(
+        config=_gateway_config(test_config),
+        bucket_mgr=bucket_mgr,
+        dehydrator=DummyDehydrator(),
+        embedding_engine=DummyEmbeddingEngine(enabled=False),
+        state_store=state_store,
+        persona_engine=persona_engine,
+        http_client=http_client,
+    )
+    app = create_gateway_app(config=test_config, service=service)
+
+    tool_calls = [
+        {
+            "id": "call_read_diary",
+            "type": "function",
+            "function": {"name": "read_diary", "arguments": "{\"date\":\"2026-05-02\"}"},
+        }
+    ]
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-tool-continuation",
+            },
+            json={
+                "messages": [
+                    {"role": "user", "content": "查一下今日日记"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": tool_calls,
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_read_diary",
+                        "content": "{\"title\":\"今日\",\"content\":\"晴天\"}",
+                    },
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert persona_engine.calls == [
+        {
+            "session_id": "sess-tool-continuation",
+            "user_message": "",
+        }
+    ]
 
 
 def test_gateway_restores_reasoning_content_for_tool_continuation(monkeypatch, test_config, bucket_mgr):

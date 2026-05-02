@@ -226,7 +226,8 @@ class GatewayService:
 
         all_buckets = await self.bucket_mgr.list_all(include_archive=False)
         query = self._extract_last_user_query(messages)
-        persona_state = await self.persona_engine.update_from_user_message(session_id, query)
+        persona_query = self._extract_current_turn_user_query(messages)
+        persona_state = await self.persona_engine.update_from_user_message(session_id, persona_query)
         persona_block = self.persona_engine.format_state_block(persona_state)
         core_memory = await self._build_core_memory_block(all_buckets)
         recent_context = await self._build_recent_context_block(all_buckets)
@@ -371,6 +372,19 @@ class GatewayService:
             content = self._coerce_message_text(message.get("content"))
             if content.strip():
                 return content.strip()
+        return ""
+
+    def _extract_current_turn_user_query(self, messages: list[dict[str, Any]]) -> str:
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if role == "system":
+                continue
+            if role != "user":
+                return ""
+            content = self._coerce_message_text(message.get("content"))
+            return content.strip()
         return ""
 
     def _coerce_message_text(self, content: Any) -> str:
