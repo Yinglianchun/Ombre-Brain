@@ -755,16 +755,30 @@ class GatewayService:
         for index, tool_call in enumerate(tool_calls):
             if not isinstance(tool_call, dict):
                 continue
+            function = tool_call.get("function", {})
+            if isinstance(function, dict) and function.get("name"):
+                signature.append(
+                    f"idx:{index}:{function.get('name', '')}:{self._normalize_tool_arguments(function.get('arguments', ''))}"
+                )
+                continue
             tool_id = tool_call.get("id")
             if tool_id:
-                signature.append(str(tool_id))
-                continue
-            function = tool_call.get("function", {})
-            if isinstance(function, dict):
-                signature.append(
-                    f"idx:{index}:{function.get('name', '')}:{function.get('arguments', '')}"
-                )
+                signature.append(f"id:{tool_id}")
         return tuple(signature)
+
+    def _normalize_tool_arguments(self, arguments: Any) -> str:
+        if isinstance(arguments, (dict, list)):
+            return json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if isinstance(arguments, str):
+            raw = arguments.strip()
+            if not raw:
+                return ""
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                return " ".join(raw.split())
+            return json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return str(arguments)
 
     def _new_stream_capture_state(self) -> dict[str, Any]:
         return {
