@@ -29,6 +29,7 @@ import json
 import hashlib
 import sqlite3
 import logging
+from typing import Any
 
 from openai import AsyncOpenAI
 
@@ -164,6 +165,7 @@ class Dehydrator:
         self.api_key = dehy_cfg.get("api_key", "")
         self.model = dehy_cfg.get("model", "deepseek-chat")
         self.base_url = dehy_cfg.get("base_url", "https://api.deepseek.com/v1")
+        self.thinking_mode = self._normalize_thinking_mode(dehy_cfg.get("thinking_mode", ""))
         self.max_tokens = dehy_cfg.get("max_tokens", 1024)
         self.temperature = dehy_cfg.get("temperature", 0.1)
 
@@ -315,8 +317,10 @@ class Dehydrator:
                 {"role": "system", "content": DEHYDRATE_PROMPT},
                 {"role": "user", "content": content[:3000]},
             ],
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
+            **self._completion_options(
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+            ),
         )
         if not response.choices:
             return ""
@@ -338,8 +342,10 @@ class Dehydrator:
                 {"role": "system", "content": MERGE_PROMPT},
                 {"role": "user", "content": user_msg},
             ],
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
+            **self._completion_options(
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+            ),
         )
         if not response.choices:
             return ""
@@ -429,8 +435,10 @@ class Dehydrator:
                 {"role": "system", "content": ANALYZE_PROMPT},
                 {"role": "user", "content": content[:2000]},
             ],
-            max_tokens=256,
-            temperature=0.1,
+            **self._completion_options(
+                max_tokens=256,
+                temperature=0.1,
+            ),
         )
         if not response.choices:
             return self._default_analysis()
@@ -539,8 +547,10 @@ class Dehydrator:
                 {"role": "system", "content": DIGEST_PROMPT},
                 {"role": "user", "content": content[:5000]},
             ],
-            max_tokens=2048,
-            temperature=0.0,
+            **self._completion_options(
+                max_tokens=2048,
+                temperature=0.0,
+            ),
         )
         if not response.choices:
             return []
@@ -594,3 +604,28 @@ class Dehydrator:
                 "importance": importance,
             })
         return validated
+
+    def _completion_options(self, *, max_tokens: int, temperature: float) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if self.thinking_mode:
+            options["extra_body"] = {"thinking": {"type": self.thinking_mode}}
+        return options
+
+    def _normalize_thinking_mode(self, value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        aliases = {
+            "enabled": "enabled",
+            "enable": "enabled",
+            "on": "enabled",
+            "true": "enabled",
+            "disabled": "disabled",
+            "disable": "disabled",
+            "off": "disabled",
+            "false": "disabled",
+            "non-thinking": "disabled",
+            "non_thinking": "disabled",
+        }
+        return aliases.get(normalized, "")

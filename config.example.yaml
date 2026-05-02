@@ -36,6 +36,11 @@ dehydration:
   # 支持所有 OpenAI 兼容 API：DeepSeek / Ollama / LM Studio / vLLM / Gemini 等
   model: "deepseek-chat"
   base_url: "https://api.deepseek.com/v1"
+  # Optional thinking mode override for DeepSeek v4 models:
+  #   disabled = non-thinking / enabled = thinking / empty = provider default
+  # DeepSeek v4 可选思考模式覆盖：
+  #   disabled = 非思考 / enabled = 思考 / 留空 = 走模型默认行为
+  thinking_mode: ""
   # Common base_url examples / 常见 base_url 示例：
   #   DeepSeek:    https://api.deepseek.com/v1
   #   SiliconFlow: https://api.siliconflow.cn/v1
@@ -143,6 +148,9 @@ persona:
   mode: "llm"
   base_url: "https://api.deepseek.com/v1"
   model: "deepseek-chat"
+  # Optional thinking mode override for DeepSeek v4 models:
+  #   disabled = non-thinking / enabled = thinking / empty = provider default
+  thinking_mode: ""
   # api_key: ""                  # Use OMBRE_PERSONA_API_KEY; falls back to OMBRE_API_KEY
   temperature: 0.1
   max_tokens: 500

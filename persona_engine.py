@@ -54,6 +54,9 @@ class PersonaStateEngine:
         self.mode = self.persona_cfg.get("mode", "llm")
         self.base_url = self.persona_cfg.get("base_url", "https://api.deepseek.com/v1")
         self.model = self.persona_cfg.get("model", "deepseek-chat")
+        self.thinking_mode = self._normalize_thinking_mode(
+            self.persona_cfg.get("thinking_mode", "")
+        )
         self.temperature = float(self.persona_cfg.get("temperature", 0.1))
         self.max_tokens = int(self.persona_cfg.get("max_tokens", 500))
         self.session_mood_half_life_minutes = float(
@@ -234,6 +237,7 @@ class PersonaStateEngine:
                 "enabled": self.enabled,
                 "mode": self.mode,
                 "model": self.model,
+                "thinking_mode": self.thinking_mode,
                 "base_url": self.base_url,
                 "api_ready": bool(self.api_key),
                 "db_path": self.db_path,
@@ -268,8 +272,7 @@ class PersonaStateEngine:
                         ),
                     },
                 ],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
+                **self._completion_options(),
             )
             raw = response.choices[0].message.content if response.choices else ""
             parsed = self._parse_json(raw or "")
@@ -693,3 +696,28 @@ class PersonaStateEngine:
         except (TypeError, ValueError):
             number = lower
         return max(lower, min(upper, number))
+
+    def _completion_options(self) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        if self.thinking_mode:
+            options["extra_body"] = {"thinking": {"type": self.thinking_mode}}
+        return options
+
+    def _normalize_thinking_mode(self, value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        aliases = {
+            "enabled": "enabled",
+            "enable": "enabled",
+            "on": "enabled",
+            "true": "enabled",
+            "disabled": "disabled",
+            "disable": "disabled",
+            "off": "disabled",
+            "false": "disabled",
+            "non-thinking": "disabled",
+            "non_thinking": "disabled",
+        }
+        return aliases.get(normalized, "")
