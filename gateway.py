@@ -722,7 +722,7 @@ class GatewayService:
             "debug": self._portrait_memory_debug_base(),
         }
         self.current_inner_state_interval_rounds = max(
-            0, int(self.gateway_cfg.get("current_inner_state_interval_rounds", 0))
+            0, int(self.gateway_cfg.get("current_inner_state_interval_rounds", 15))
         )
         self.relationship_weather_interval_rounds = max(
             0, int(self.gateway_cfg.get("relationship_weather_interval_rounds", 0))
@@ -1062,6 +1062,9 @@ class GatewayService:
             "base_url": getattr(self.persona_engine, "base_url", ""),
             "event_recording_enabled": bool(
                 getattr(self.persona_engine, "event_recording_enabled", True)
+            ),
+            "conflict_nudge_enabled": bool(
+                getattr(self.persona_engine, "conflict_nudge_enabled", False)
             ),
             "api_ready": bool(getattr(self.persona_engine, "api_key", "")),
         }
@@ -1702,12 +1705,10 @@ class GatewayService:
             return []
         persona_cfg = self.config.setdefault("persona", {})
         updated: list[str] = []
-        if "enabled" in payload:
-            persona_cfg["enabled"] = bool(payload["enabled"])
-            updated.append("persona.enabled")
-        if "event_recording_enabled" in payload:
-            persona_cfg["event_recording_enabled"] = bool(payload["event_recording_enabled"])
-            updated.append("persona.event_recording_enabled")
+        for key in ("enabled", "event_recording_enabled", "conflict_nudge_enabled"):
+            if key in payload:
+                persona_cfg[key] = bool(payload[key])
+                updated.append(f"persona.{key}")
         for key in ("model", "base_url"):
             if key in payload:
                 persona_cfg[key] = str(payload[key] or "").strip()

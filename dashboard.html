@@ -3393,10 +3393,10 @@
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后 Gateway 不自动注入 Recent Context；可靠直命中和扩散不受影响</div>
       <div class="config-row">
-        <label>Persona提示</label>
+        <label>Persona轻提醒</label>
         <select id="cfg-persona-context-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
       </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">控制 Gateway 每隔若干轮注入一次 Persona State 提示；关闭后仍会后台更新 Persona</div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认每 15 轮比较一次最近 15 轮的净变化；无明显变化不提示，关闭后仍会后台更新 Persona</div>
       <div class="config-row">
         <label>Persona轮数</label>
         <input type="number" id="cfg-persona-context-rounds" min="0" max="200" />
@@ -3999,6 +3999,11 @@
         <select id="cfg-persona-event-recording"><option value="true">开启</option><option value="false">关闭</option></select>
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后仍评估数值状态，但不新增 Recent Persona Events</div>
+      <div class="config-row">
+        <label>防撤退提醒</label>
+        <select id="cfg-persona-conflict-nudge"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">只在明确争执或撤退信号出现时给模型一条私密提醒；优先于 Persona 轻提醒，不替模型决定回应</div>
       <div class="config-row">
         <label>Model</label>
         <input type="text" id="cfg-persona-model" placeholder="deepseek-chat" />
@@ -8951,6 +8956,8 @@ async function loadConfig() {
       (cfg.persona && cfg.persona.enabled) === false ? 'false' : 'true';
     document.getElementById('cfg-persona-event-recording').value =
       (cfg.persona && cfg.persona.event_recording_enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-persona-conflict-nudge').value =
+      (cfg.persona && cfg.persona.conflict_nudge_enabled) ? 'true' : 'false';
     document.getElementById('cfg-persona-model').value = (cfg.persona && cfg.persona.model) || '';
     document.getElementById('cfg-persona-url').value = (cfg.persona && cfg.persona.base_url) || '';
     document.getElementById('cfg-persona-key').placeholder =
@@ -9158,6 +9165,7 @@ async function saveConfig(persist, persistEnv) {
     candidate.persona = {
       enabled: document.getElementById('cfg-persona-enabled').value === 'true',
       event_recording_enabled: document.getElementById('cfg-persona-event-recording').value === 'true',
+      conflict_nudge_enabled: document.getElementById('cfg-persona-conflict-nudge').value === 'true',
       model: document.getElementById('cfg-persona-model').value,
       base_url: document.getElementById('cfg-persona-url').value,
     };

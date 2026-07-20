@@ -322,6 +322,7 @@ class PersonaStateEngine:
                 profile_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 exchange_hash TEXT NOT NULL,
+                affect_delta TEXT,
                 created_at TEXT NOT NULL,
                 UNIQUE(profile_id, session_id, exchange_hash)
             )
@@ -346,6 +347,7 @@ class PersonaStateEngine:
         self._ensure_column(conn, "persona_events", "assistant_excerpt", "TEXT")
         self._ensure_column(conn, "persona_events", "recalled_memory_ids", "TEXT")
         self._ensure_column(conn, "persona_events", "tool_summary", "TEXT")
+        self._ensure_column(conn, "persona_exchange_log", "affect_delta", "TEXT")
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_persona_events_exchange_hash
@@ -514,7 +516,11 @@ class PersonaStateEngine:
 
         global_state = self._apply_global_delta(global_state, evaluation, now)
         session_state = self._apply_session_delta(session_id, session_state, evaluation, now)
-        self._mark_exchange_processed(session_id, exchange_hash)
+        self._mark_exchange_processed(
+            session_id,
+            exchange_hash,
+            evaluation.get("affect_delta", {}),
+        )
         if self._should_record_event(session_id, evaluation, now):
             self._record_event(
                 session_id=session_id,
@@ -719,6 +725,7 @@ class PersonaStateEngine:
                 "evaluation_interval_rounds": self.evaluation_interval_rounds,
                 "state_change_window_rounds": self.state_change_window_rounds,
                 "state_change_min_abs": self.state_change_min_abs,
+                "conflict_nudge_enabled": self.conflict_nudge_enabled,
             },
         }
 
@@ -1202,12 +1209,7 @@ class PersonaStateEngine:
             // self.evaluation_interval_rounds,
         )
         totals = {key: 0.0 for key in ("security", "valence", "arousal", "libido")}
-        for event in self._list_events(evaluation_count, session_id):
-            if event.get("error"):
-                continue
-            affect_delta = event.get("affect_delta", {})
-            if not isinstance(affect_delta, dict):
-                continue
+        for affect_delta in self._recent_evaluation_deltas(evaluation_count, session_id):
             for key in totals:
                 try:
                     totals[key] += float(affect_delta.get(key, 0.0) or 0.0)
@@ -1370,18 +1372,50 @@ class PersonaStateEngine:
         conn.close()
         return row is not None
 
-    def _mark_exchange_processed(self, session_id: str, exchange_hash: str) -> None:
+    def _mark_exchange_processed(
+        self,
+        session_id: str,
+        exchange_hash: str,
+        affect_delta: dict[str, Any] | None = None,
+    ) -> None:
+        encoded_delta = (
+            json.dumps(affect_delta, ensure_ascii=False)
+            if isinstance(affect_delta, dict)
+            else None
+        )
         conn = self._connect()
         conn.execute(
             """
             INSERT OR IGNORE INTO persona_exchange_log
-            (profile_id, session_id, exchange_hash, created_at)
-            VALUES (?, ?, ?, ?)
+            (profile_id, session_id, exchange_hash, affect_delta, created_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (self.profile_id, session_id, exchange_hash, self._format_time(self._now())),
+            (
+                self.profile_id,
+                session_id,
+                exchange_hash,
+                encoded_delta,
+                self._format_time(self._now()),
+            ),
         )
         conn.commit()
         conn.close()
+
+    def _recent_evaluation_deltas(self, limit: int, session_id: str) -> list[dict]:
+        safe_limit = max(1, min(100, int(limit or 1)))
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT affect_delta
+            FROM persona_exchange_log
+            WHERE profile_id = ? AND session_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (self.profile_id, session_id, safe_limit),
+        ).fetchall()
+        conn.close()
+        return [self._json_dict(row["affect_delta"]) for row in rows]
 
     def _should_record_event(self, session_id: str, evaluation: dict, now: datetime) -> bool:
         if not self.event_recording_enabled:
