@@ -44,20 +44,14 @@ identity:
 merge_threshold: 90
 
 # --- Import safety / 大文件导入安全 ---
-# Conversation-history import defaults to smaller chunks and no automatic merge.
-# 对话历史导入默认小窗处理，且不自动合并，避免大文件把无关记忆揉成一个桶。
+# Conversation-history import uses smaller chunks and never merges imported memories.
+# 对话历史导入使用小窗处理；不同记忆永不合并，只跳过同文或近同文重复项。
 import:
   chunk_target_tokens: 3500          # smaller than old 10k windows to reduce mixed-topic chunks
   extract_max_input_chars: 0         # 0 = do not hard-truncate; rely on chunking
   max_items_per_chunk: 5
   max_tags: 6
   max_tag_chars: 12
-  auto_merge_enabled: false          # exact/safe duplicate skip still runs
-  merge_threshold: 90
-  merge_min_content_similarity: 99
-  merge_require_domain_overlap: true
-  merge_require_source_match: true
-  merge_block_disjoint_dates: true
   operit_tagging_enabled: true        # raw entries land first; model tagging runs afterward
   operit_tagging_concurrency: 2       # bounded worker count; never fan out the whole backup
   operit_tagging_max_attempts: 3      # total attempts per entry, including the first call

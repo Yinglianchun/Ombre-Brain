@@ -137,12 +137,6 @@ def load_config(config_path: str = None) -> dict:
             "max_items_per_chunk": 5,
             "max_tags": 6,
             "max_tag_chars": 12,
-            "auto_merge_enabled": False,
-            "merge_threshold": 90,
-            "merge_min_content_similarity": 99,
-            "merge_require_domain_overlap": True,
-            "merge_require_source_match": True,
-            "merge_block_disjoint_dates": True,
         },
         "write_path": {
             "semantic_search_timeout_seconds": 3,

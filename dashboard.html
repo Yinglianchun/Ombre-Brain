@@ -3853,7 +3853,6 @@
       <div style="display:flex;gap:16px;margin-top:8px;font-size:13px;color:var(--text-dim);">
         <span>API调用: <b id="import-api-calls">0</b></span>
         <span>新建: <b id="import-created">0</b></span>
-        <span>合并: <b id="import-merged">0</b></span>
         <span>重复跳过: <b id="import-duplicate-skipped">0</b></span>
         <span>原文: <b id="import-raw">0</b></span>
         <span>Embedding: <b id="import-embeddings-created">0</b></span>
@@ -9477,7 +9476,6 @@ function updateImportUI(s) {
   document.getElementById('import-progress-text').textContent = s.processed + '/' + s.total_chunks;
   document.getElementById('import-api-calls').textContent = s.api_calls;
   document.getElementById('import-created').textContent = s.memories_created;
-  document.getElementById('import-merged').textContent = s.memories_merged;
   document.getElementById('import-duplicate-skipped').textContent = s.memories_duplicate_skipped || 0;
   document.getElementById('import-raw').textContent = s.memories_raw;
   document.getElementById('import-embeddings-created').textContent = s.embeddings_created || 0;
