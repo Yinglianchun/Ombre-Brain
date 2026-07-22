@@ -51,6 +51,7 @@ import json as _json_lib
 import re
 import secrets
 import time
+from typing import Literal
 from base64 import b64decode
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -11262,12 +11263,12 @@ async def recall(
 @mcp.tool()
 async def read_memory(
     memory_id: str = "",
-    memory_type: str = "",
+    memory_type: Literal["", "scene", "shadow", "narrative"] = "",
     query: str = "",
     limit: int = 20,
     include_content: bool = True,
 ) -> dict:
-    """统一精确读取 Scene、Window Shadow 或 Narrative Roll。memory_type 可留空并由 id 前缀推断；Scene 传 bucket id，Shadow 传 window_*，叙事卷传 narrative_*。query="叙事卷" 列目录；query 传精确卷名或别名时一次返回完整卷；模糊或冲突查询只返回候选。语义找 Scene 请用 recall。"""
+    """统一精确读取 Scene、Window Shadow 或 Narrative Roll。有 memory_id 时可由 scene id、window_*、narrative_* 推断类型；只有 query 时必须显式传 memory_type，绝不因同名猜测类型。memory_type="narrative" 且 query="叙事卷" 列目录，精确卷名或别名一次返回完整卷，模糊或冲突查询只返回候选。语义找 Scene 请用 recall。"""
     safe_id = _coerce_memory_id(memory_id)
     safe_type = str(memory_type or "").strip().lower()
     if safe_type in {"scene", "memory", "bucket"}:
@@ -11283,9 +11284,12 @@ async def read_memory(
     elif safe_id.startswith("narrative_"):
         safe_type = "narrative"
     elif not safe_id and str(query or "").strip():
-        # Query-only reads belong to the reviewed Narrative Roll collection.
-        # Scene search remains behind recall so this route cannot blur evidence types.
-        safe_type = "narrative"
+        return {
+            "status": "needs_memory_type",
+            "reason": "query_only_read_must_choose_memory_type",
+            "query": str(query or "").strip(),
+            "allowed_memory_types": ["scene", "shadow", "narrative"],
+        }
     else:
         safe_type = "scene"
 
