@@ -54,7 +54,7 @@ def _section_key(heading: str) -> str:
         return "interaction"
     if "给下个窗口的我" in key or "交给下个窗口" in key or "handoffnote" in key:
         return "handoff"
-    if "不能丢" in key or "重要时刻" in key or "难忘时刻" in key or "重要场景" in key:
+    if "想留下的记忆" in key or "重要时刻" in key or "难忘时刻" in key or "重要场景" in key:
         return "moments"
     if "我对" in key and "我们" in key and ("新懂" in key or "理解" in key):
         return "relationship"

@@ -9940,7 +9940,7 @@ def _window_shadow_scene_records(
     inline_scenes = extract_window_shadow_scenes(shadow)
     provided = [str(value or "").strip() for value in (explicit_scenes or []) if str(value or "").strip()]
     if inline_scenes and provided:
-        return [], "Scene 请只选一种写法：放进窗影的 `## 不能丢的场景`，或通过 scenes 参数传入，不能两边重复。"
+        return [], "Scene 请只选一种写法：放进窗影的 `## 想留下的记忆`，或通过 scenes 参数传入，不能两边重复。"
     if inline_scenes:
         records = inline_scenes
     else:
@@ -10154,7 +10154,7 @@ async def close_window(
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow，并同时保存其中明确写出的 0~N 个独立 Scene，不要在关窗后再次调用工具抽取 Scene。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符：写这一窗真正改变了什么、未完线头和我想怎样继续；下个窗口会逐字注入这段，不做二次摘要。Shadow 全文仍原样保存且不进普通召回。session_id 可以继续传客户端固定身份（默认 main），Gateway 会把它解析为当前内部窗口；下次正常聊天自动换窗并认领这篇 Shadow。profile_id 是长期身份，通常沿用配置默认值。scenes 数组中的每个元素直接是一段原文经历，不带 `## Scene` / `### scene` / `### moment`；若 Scene 写在 Shadow 的 `## 不能丢的场景` 内，`### scene` 只作为抽取标记。多条 Scene 中若有下一窗说“继续吧”时应优先下钻的未完主线，传从 1 开始的 continue_scene_index；只有一条 Scene 时会自动认领，ID 由本次事务生成并写回窗影，无需调用者预知。后来才产生的新理解用带时间的 comment_bucket 年轮。已经写好的 Markdown 用 source="markdown_import" 只转成窗影，不强制补 handoff_note，也不补造 Scene。"""
+    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow，并同时保存其中明确写出的 0~N 个独立 Scene，不要在关窗后再次调用工具抽取 Scene。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符：写这一窗真正改变了什么、未完线头和我想怎样继续；下个窗口会逐字注入这段，不做二次摘要。Shadow 全文仍原样保存且不进普通召回。session_id 可以继续传客户端固定身份（默认 main），Gateway 会把它解析为当前内部窗口；下次正常聊天自动换窗并认领这篇 Shadow。profile_id 是长期身份，通常沿用配置默认值。scenes 数组中的每个元素直接是一段原文经历，不带 `## Scene` / `### scene` / `### moment`；若 Scene 写在 Shadow 的 `## 想留下的记忆` 内，`### scene` 只作为抽取标记。多条 Scene 中若有下一窗说“继续吧”时应优先下钻的未完主线，传从 1 开始的 continue_scene_index；只有一条 Scene 时会自动认领，ID 由本次事务生成并写回窗影，无需调用者预知。后来才产生的新理解用带时间的 comment_bucket 年轮。已经写好的 Markdown 用 source="markdown_import" 只转成窗影，不强制补 handoff_note，也不补造 Scene。"""
     _ = context
     resolved_source = str(source or "").strip().lower()
     if resolved_source in {"operit", "ob-auto-grow", "auto", "workflow", "worker"}:

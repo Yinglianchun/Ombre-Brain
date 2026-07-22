@@ -49,7 +49,7 @@ flowchart LR
 每条长期记忆是带 YAML frontmatter 的 Markdown。canonical Scene 的正文就是原文经历：
 
 ```text
-发生了什么、关键原话或动作、转折、结果，以及为什么不能丢。
+忠实写下这件经历本身，使它以后仍能被独立理解。只保留实际发生的细节；不同 Scene 可以有不同写法。
 ```
 
 `Scene` 已经是对象类型，普通 `hold` 不再把 `## Scene`、`### scene` 或 `### moment` 套进 content。当前 AI 写好的那段正文就是场景真源，不是脱水摘要。旧 body / `moment` / `original` / `reflection` 仍兼容读取，但不再作为新写入 section；旧 `affect_anchor` 也只兼容读取。
@@ -84,7 +84,7 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 ### 手动写入
 
-`hold` 只原样保存一件由当前 AI 写好的长期 Scene：content 直接传一段完整原文经历，不带 Markdown section 标题；重要原话和意义自然写在场景里。工具不调用脱水/标签模型，也不合并旧桶。`cues` 可在同一次调用中写入 0～8 个 sidecar 稀疏召回入口；Scene 向量只 embed content 原文。稳定偏好、边界和身份事实先有证据 Scene，再用 `profile_fact` 建立索引。
+`hold` 只原样保存一件由当前 AI 写好的长期 Scene：content 直接传一段完整原文经历，不带 Markdown section 标题；正文忠实保留这件事里实际发生、以后理解它所需的内容，写到能独立理解即可，不套固定段落或字段。工具不调用脱水/标签模型，也不合并旧桶。`cues` 可在同一次调用中写入 0～8 个 sidecar 稀疏召回入口；Scene 向量只 embed content 原文。稳定偏好、边界和身份事实先有证据 Scene，再用 `profile_fact` 建立索引。
 
 `close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”和 0～N 个独立 Scene。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。`grow` 仅保留为兼容别名，旧 `### moment` 不会自动升格成 Scene。
 

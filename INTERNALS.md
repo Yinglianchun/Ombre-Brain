@@ -134,7 +134,7 @@
 
 **`close_window`** — Window Shadow：
 - 整篇第一人称窗影原样写入独立 SQLite，不进普通候选池
-- 可选“不能丢的场景”中的 `### scene` 只作 Shadow 抽取标记，落库时去掉；`scenes[]` 直接传纯正文；不调用 LLM
+- 可选“想留下的记忆”中的 `### scene` 只作 Shadow 抽取标记，落库时去掉；`scenes[]` 直接传纯正文；不调用 LLM
 - 写前完整校验，任一 Scene 失败就补偿删除本次新建 Scene 与 Shadow；成功后才排 embedding
 - `grow` 仅为旧客户端兼容别名，不把旧 `### moment` 提升成 Scene
 
