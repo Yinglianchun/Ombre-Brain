@@ -36,6 +36,10 @@ _EXACT_EVIDENCE_MARKERS = (
     "哪一首",
 )
 
+NARRATIVE_COLLECTION_QUERY_ALIASES = frozenset(
+    {"叙事卷", "narrative", "narrativeroll", "narrativerolls"}
+)
+
 
 def _compact(value: Any) -> str:
     return _COMPACT_RE.sub("", str(value or "").strip().lower())
@@ -234,6 +238,8 @@ class NarrativeRollStore:
     def list(self, query: str = "", limit: int = 20) -> dict[str, Any]:
         safe_limit = max(1, min(int(limit or 20), 100))
         compact_query = _compact(query)
+        if compact_query in NARRATIVE_COLLECTION_QUERY_ALIASES:
+            compact_query = ""
         rows = []
         for item in self._load():
             searchable = _compact(
@@ -258,6 +264,27 @@ class NarrativeRollStore:
             "items": rows[:safe_limit],
             "live_injection_enabled": self.live_injection_enabled,
         }
+
+    def resolve_read_query(self, query: str = "", limit: int = 20) -> dict[str, Any]:
+        """Read one exact roll identity, otherwise return the bounded index."""
+
+        compact_query = _compact(query)
+        if not compact_query or compact_query in NARRATIVE_COLLECTION_QUERY_ALIASES:
+            return self.list(query=query, limit=limit)
+
+        exact_matches = []
+        for item in self._load():
+            identities = (
+                item.get("narrative_id"),
+                item.get("title"),
+                *(item.get("title_aliases", []) or []),
+            )
+            if compact_query in {_compact(value) for value in identities if value}:
+                exact_matches.append(item)
+
+        if len(exact_matches) == 1:
+            return self.read(str(exact_matches[0].get("narrative_id") or ""))
+        return self.list(query=query, limit=limit)
 
     def read(self, narrative_id: str) -> dict[str, Any]:
         safe_id = str(narrative_id or "").strip()

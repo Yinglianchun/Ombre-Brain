@@ -11267,7 +11267,7 @@ async def read_memory(
     limit: int = 20,
     include_content: bool = True,
 ) -> dict:
-    """统一精确读取 Scene、Window Shadow 或 Narrative Roll。memory_type 可留空并由 id 前缀推断；Scene 传 bucket id，Shadow 传 window_*，叙事卷传 narrative_*。没有精确 id 时，只允许列 Shadow 或按 query 搜索叙事卷；语义找 Scene 请用 recall。"""
+    """统一精确读取 Scene、Window Shadow 或 Narrative Roll。memory_type 可留空并由 id 前缀推断；Scene 传 bucket id，Shadow 传 window_*，叙事卷传 narrative_*。query="叙事卷" 列目录；query 传精确卷名或别名时一次返回完整卷；模糊或冲突查询只返回候选。语义找 Scene 请用 recall。"""
     safe_id = _coerce_memory_id(memory_id)
     safe_type = str(memory_type or "").strip().lower()
     if safe_type in {"scene", "memory", "bucket"}:
@@ -11282,13 +11282,17 @@ async def read_memory(
         safe_type = "shadow"
     elif safe_id.startswith("narrative_"):
         safe_type = "narrative"
+    elif not safe_id and str(query or "").strip():
+        # Query-only reads belong to the reviewed Narrative Roll collection.
+        # Scene search remains behind recall so this route cannot blur evidence types.
+        safe_type = "narrative"
     else:
         safe_type = "scene"
 
     if safe_type == "narrative":
         if safe_id:
             return await read_narrative_roll(safe_id)
-        return await narrative_rolls(query=query, limit=limit)
+        return narrative_roll_store.resolve_read_query(query=query, limit=limit)
     if safe_type == "shadow":
         return await window_shadow_read(
             window_id=safe_id,
