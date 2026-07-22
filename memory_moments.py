@@ -5,7 +5,6 @@ import json
 import os
 import re
 import sqlite3
-import unicodedata
 from datetime import datetime, timezone
 from typing import Any
 
@@ -17,7 +16,26 @@ from memory_relevance import (
     facets_for_node,
     memory_relevance_options_from_config,
 )
-from query_terms import GENERIC_LEXICAL_STOPWORDS
+from memory_retrieval_aliases import (
+    DEFAULT_COMPACT_RETRIEVAL_ALIAS_PATTERNS,
+    GENERIC_RETRIEVAL_ALIAS_KEYS,
+    GENERIC_RETRIEVAL_ALIAS_STOP_KEYS,
+    MAX_RETRIEVAL_ALIAS_CHARS,
+    MAX_RETRIEVAL_ALIASES_PER_BUCKET,
+    MAX_RETRIEVAL_ALIASES_PER_MOMENT,
+    RETRIEVAL_ALIAS_SECTIONS,
+    MemoryRetrievalAliasIndex,
+    _build_retrieval_aliases,
+    _clean_retrieval_alias_text,
+    _compact_retrieval_alias_patterns,
+    _retrieval_alias_is_date,
+    _retrieval_alias_is_identifier,
+    _retrieval_alias_key,
+    _retrieval_alias_query_terms,
+    _retrieval_alias_variants,
+    _retrieval_phrase_candidates,
+    _valid_retrieval_alias,
+)
 from utils import strip_wikilinks
 
 
@@ -105,80 +123,6 @@ SHADOW_CHUNKABLE_CONTENT_SECTIONS = frozenset(
     }
 )
 SENTENCE_END_RE = re.compile(r"[\u3002\uff01\uff1f\uff1b!?;]+|[.]+(?=\s|$)")
-RETRIEVAL_ALIAS_SECTIONS = frozenset({"scene", "body", "moment", "fact", "original"})
-MAX_RETRIEVAL_ALIASES_PER_BUCKET = 24
-MAX_RETRIEVAL_ALIASES_PER_MOMENT = 4
-MAX_RETRIEVAL_ALIAS_CHARS = 72
-GENERIC_RETRIEVAL_ALIAS_KEYS = frozenset(
-    {
-        "memory",
-        "memories",
-        "moment",
-        "scene",
-        "moments",
-        "fact",
-        "facts",
-        "original",
-        "record",
-        "records",
-        "conversation",
-        "conversations",
-        "daily",
-        "game",
-        "games",
-        "haven",
-        "note",
-        "notes",
-        "momentbucket",
-        "xiaoyu",
-        "\u4e8b\u60c5",
-        "\u4e8b\u5b9e",
-        "\u54e5\u54e5",
-        "\u4eca\u5929",
-        "\u4ee5\u524d",
-        "\u539f\u6587",
-        "\u5bf9\u8bdd",
-        "\u6211\u4eec",
-        "\u65e5\u5e38",
-        "\u5c0f\u96e8",
-        "\u6e38\u620f",
-        "\u8bb0\u5f55",
-        "\u8bb0\u5fc6",
-        "\u7247\u6bb5",
-    }
-)
-COMPACT_RETRIEVAL_ALIAS_PATTERNS = (
-    re.compile(
-        r"^(?:\u5c0f\u96e8|haven|\u54e5\u54e5|\u6211|\u6211\u4eec)"
-        r"(?:\u548c|\u4e0e)(?:\u5c0f\u96e8|haven|\u54e5\u54e5|\u6211|\u6211\u4eec)"
-        r"(?:\u5173\u4e8e|\u6709\u5173)?(.+?)(?:\u7684)?"
-        r"(?:\u7ea6\u5b9a|\u5bf9\u8bdd|\u8bb0\u5fc6|\u8bb0\u5f55|\u4e8b\u60c5|\u7247\u6bb5)$",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^(?:\u5173\u4e8e|\u6709\u5173)(.+?)(?:\u7684)?"
-        r"(?:\u7ea6\u5b9a|\u5bf9\u8bdd|\u8bb0\u5fc6|\u8bb0\u5f55|\u4e8b\u60c5|\u7247\u6bb5)?$",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^(?:\u5c0f\u96e8|haven|\u54e5\u54e5|\u6211|\u6211\u4eec|\u5979|\u4ed6)"
-        r"(?:\u66fe\u7ecf|\u5f53\u65f6|\u540e\u6765|\u73b0\u5728|\u4e00\u76f4)?"
-        r"(?:\u8bf4\u8fc7|\u8bf4|\u89c9\u5f97|\u8ba4\u4e3a|\u8bb0\u5f97|\u5e0c\u671b|\u60f3\u8981|\u60f3|\u51b3\u5b9a|\u7ea6\u5b9a|\u559c\u6b22|\u63d0\u5230)"
-        r"[\s,\uff0c:\uff1a]*(.+)$",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^(?:xiaoyu|haven|i|we|she|he)\s+"
-        r"(?:said|says|thought|thinks|wanted|wants|remembered|remembers|agreed|decided|mentioned)"
-        r"\s+(?:that\s+)?(.+)$",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^(?:memory|moment|note|record|conversation)\s+(?:about|of)\s+(.+)$",
-        re.IGNORECASE,
-    ),
-    re.compile(r"^(?:about|regarding)\s+(.+)$", re.IGNORECASE),
-)
 
 
 class MemoryMomentStore:
@@ -194,6 +138,14 @@ class MemoryMomentStore:
         )
         self.db_path = os.path.join(state_dir, "memory_moments.sqlite")
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        self.retrieval_alias_index = MemoryRetrievalAliasIndex(
+            config,
+            db_path=self.db_path,
+            create=False,
+        )
+        # Compatibility attributes for local diagnostics and older callers.
+        self.retrieval_alias_stop_keys = self.retrieval_alias_index.stop_keys
+        self.compact_retrieval_alias_patterns = self.retrieval_alias_index.patterns
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -243,32 +195,7 @@ class MemoryMomentStore:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memory_moment_edges_target ON memory_moment_edges(target)"
         )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS memory_retrieval_aliases (
-                bucket_id TEXT NOT NULL,
-                moment_id TEXT NOT NULL DEFAULT '',
-                alias_text TEXT NOT NULL,
-                alias_key TEXT NOT NULL,
-                source TEXT NOT NULL CHECK(source IN ('title', 'moment')),
-                text_hash TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY(bucket_id, moment_id, alias_key, source)
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_memory_retrieval_aliases_alias_key
-            ON memory_retrieval_aliases(alias_key, bucket_id)
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_memory_retrieval_aliases_bucket
-            ON memory_retrieval_aliases(bucket_id)
-            """
-        )
+        self.retrieval_alias_index.ensure_schema(conn)
         conn.commit()
         conn.close()
 
@@ -276,7 +203,13 @@ class MemoryMomentStore:
         moments = parse_bucket_moments(bucket, self.relevance_options, self.annotation_options)
         bucket_id = _bucket_id(bucket)
         conn = self._connect()
-        self._replace_bucket(conn, bucket_id, moments, _bucket_title(bucket))
+        self._replace_bucket(
+            conn,
+            bucket_id,
+            moments,
+            _bucket_title(bucket),
+            explicit_aliases=_bucket_scene_cues(bucket),
+        )
         conn.commit()
         conn.close()
         return [dict(moment) for moment in moments]
@@ -288,7 +221,13 @@ class MemoryMomentStore:
         for bucket in buckets:
             bucket_id = _bucket_id(bucket)
             moments = parse_bucket_moments(bucket, self.relevance_options, self.annotation_options)
-            self._replace_bucket(conn, bucket_id, moments, _bucket_title(bucket))
+            self._replace_bucket(
+                conn,
+                bucket_id,
+                moments,
+                _bucket_title(bucket),
+                explicit_aliases=_bucket_scene_cues(bucket),
+            )
             indexed_buckets += 1
             indexed_moments += len(moments)
         conn.commit()
@@ -326,21 +265,7 @@ class MemoryMomentStore:
         return [self._row_to_moment(row) for row in rows]
 
     def list_for_bucket_aliases(self, bucket_id: str, limit: int = 100) -> list[dict]:
-        bucket_id = str(bucket_id or "").strip()
-        if not bucket_id:
-            return []
-        conn = self._connect()
-        rows = conn.execute(
-            """
-            SELECT * FROM memory_retrieval_aliases
-            WHERE bucket_id = ?
-            ORDER BY source ASC, moment_id ASC, alias_key ASC
-            LIMIT ?
-            """,
-            (bucket_id, max(1, int(limit))),
-        ).fetchall()
-        conn.close()
-        return [dict(row) for row in rows]
+        return self.retrieval_alias_index.list_for_bucket(bucket_id, limit=limit)
 
     def get(self, moment_id: str) -> dict | None:
         moment_id = str(moment_id or "").strip()
@@ -449,93 +374,91 @@ class MemoryMomentStore:
             "DELETE FROM memory_moments WHERE bucket_id = ?",
             (bucket_id,),
         )
-        alias_cursor = conn.execute(
-            "DELETE FROM memory_retrieval_aliases WHERE bucket_id = ?",
-            (bucket_id,),
-        )
+        alias_count = self.retrieval_alias_index.delete_bucket(conn, bucket_id)
         conn.commit()
         conn.close()
         return {
             "moments": max(0, int(moment_cursor.rowcount or 0)),
             "edges": max(0, int(edge_cursor.rowcount or 0)),
-            "aliases": max(0, int(alias_cursor.rowcount or 0)),
+            "aliases": alias_count,
         }
 
     def search_retrieval_aliases(self, query: str, limit: int = 20) -> list[dict]:
-        query_terms = _retrieval_alias_query_terms(query)
-        if not query_terms:
-            return []
+        return self.retrieval_alias_index.search(query, limit=limit)
 
-        conditions = ["a.alias_key LIKE ?" for _ in query_terms]
-        params: list[Any] = [f"%{key}%" for _, key in query_terms]
-        full_query_key = _retrieval_alias_key(query)
-        if full_query_key:
-            conditions.append("? LIKE '%' || a.alias_key || '%'")
-            params.append(full_query_key)
-
-        conn = self._connect()
-        rows = conn.execute(
-            f"""
-            SELECT a.*, counts.bucket_count
-            FROM memory_retrieval_aliases AS a
-            JOIN (
-                SELECT alias_key, COUNT(DISTINCT bucket_id) AS bucket_count
-                FROM memory_retrieval_aliases
-                GROUP BY alias_key
-            ) AS counts ON counts.alias_key = a.alias_key
-            WHERE {' OR '.join(conditions)}
-            """,
-            params,
-        ).fetchall()
-        conn.close()
-
-        results = []
-        for row in rows:
-            alias = dict(row)
-            alias_key = str(alias.get("alias_key") or "")
-            if alias_key in GENERIC_RETRIEVAL_ALIAS_STOP_KEYS:
-                continue
-            matched_terms = [
-                text
-                for text, key in query_terms
-                if key in alias_key or alias_key in key
-            ]
-            if not matched_terms:
-                continue
-            matched_keys = {
-                key for _, key in query_terms if key in alias_key or alias_key in key
-            }
-            coverage = len(matched_keys) / max(1, len({key for _, key in query_terms}))
-            if full_query_key == alias_key:
-                score = 1.0
-            elif full_query_key and (full_query_key in alias_key or alias_key in full_query_key):
-                score = 0.92
-            else:
-                specificity = max(len(key) for key in matched_keys) / max(1, len(alias_key))
-                score = min(0.9, 0.5 + coverage * 0.28 + min(1.0, specificity) * 0.12)
-            results.append(
-                {
-                    "bucket_id": alias["bucket_id"],
-                    "moment_id": alias["moment_id"],
-                    "alias_text": alias["alias_text"],
-                    "source": alias["source"],
-                    "bucket_count": int(alias["bucket_count"] or 0),
-                    "score": round(score, 4),
-                    "matched_terms": matched_terms,
-                }
-            )
-
-        results.sort(
-            key=lambda item: (
-                -float(item["score"]),
-                int(item["bucket_count"]),
-                0 if item["source"] == "title" else 1,
-                item["bucket_id"],
-                item["moment_id"],
-                item["alias_text"],
-            )
+    def sync_alias_projection(self, bucket: dict, items: list[dict]) -> dict:
+        """Replace legacy Moments with a non-Moment recall projection atomically."""
+        bucket_id = _bucket_id(bucket)
+        desired_aliases = self.retrieval_alias_index.build_rows(
+            bucket_id,
+            _bucket_title(bucket),
+            items,
+            explicit_aliases=_bucket_scene_cues(bucket),
         )
-        return results[: max(1, int(limit))]
+        escaped = (
+            bucket_id
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        moment_prefix = f"{escaped}:%"
+        conn = self._connect()
+        try:
+            moment_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM memory_moments WHERE bucket_id = ?",
+                    (bucket_id,),
+                ).fetchone()[0]
+                or 0
+            )
+            edge_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) FROM memory_moment_edges
+                    WHERE bucket_id = ?
+                       OR source LIKE ? ESCAPE '\\'
+                       OR target LIKE ? ESCAPE '\\'
+                    """,
+                    (bucket_id, moment_prefix, moment_prefix),
+                ).fetchone()[0]
+                or 0
+            )
+            aliases_changed = not self.retrieval_alias_index.bucket_matches(
+                conn,
+                bucket_id,
+                desired_aliases,
+            )
+            if not moment_count and not edge_count and not aliases_changed:
+                return {"moments": 0, "edges": 0, "aliases": 0, "changed": False}
+            edge_cursor = conn.execute(
+                """
+                DELETE FROM memory_moment_edges
+                WHERE bucket_id = ?
+                   OR source LIKE ? ESCAPE '\\'
+                   OR target LIKE ? ESCAPE '\\'
+                """,
+                (bucket_id, moment_prefix, moment_prefix),
+            )
+            moment_cursor = conn.execute(
+                "DELETE FROM memory_moments WHERE bucket_id = ?",
+                (bucket_id,),
+            )
+            alias_count = 0
+            if aliases_changed:
+                alias_count = self.retrieval_alias_index.replace_rows(
+                    conn,
+                    bucket_id,
+                    desired_aliases,
+                )
+            conn.commit()
+            return {
+                "moments": max(0, int(moment_cursor.rowcount or 0)),
+                "edges": max(0, int(edge_cursor.rowcount or 0)),
+                "aliases": alias_count,
+                "changed": True,
+            }
+        finally:
+            conn.close()
 
     def search_moments(
         self,
@@ -649,9 +572,10 @@ class MemoryMomentStore:
         bucket_id: str,
         moments: list[dict],
         bucket_title: str,
+        *,
+        explicit_aliases: Any = (),
     ) -> None:
         conn.execute("DELETE FROM memory_moments WHERE bucket_id = ?", (bucket_id,))
-        conn.execute("DELETE FROM memory_retrieval_aliases WHERE bucket_id = ?", (bucket_id,))
         conn.execute(
             """
             DELETE FROM memory_moment_edges
@@ -698,23 +622,13 @@ class MemoryMomentStore:
                     edge["created_at"],
                 ),
             )
-        for alias in _build_retrieval_aliases(bucket_id, bucket_title, moments):
-            conn.execute(
-                """
-                INSERT INTO memory_retrieval_aliases
-                (bucket_id, moment_id, alias_text, alias_key, source, text_hash, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    alias["bucket_id"],
-                    alias["moment_id"],
-                    alias["alias_text"],
-                    alias["alias_key"],
-                    alias["source"],
-                    alias["text_hash"],
-                    alias["updated_at"],
-                ),
-            )
+        self.retrieval_alias_index.replace_bucket(
+            conn,
+            bucket_id,
+            bucket_title,
+            moments,
+            explicit_aliases=explicit_aliases,
+        )
 
     def _row_to_moment(self, row: sqlite3.Row) -> dict:
         moment = dict(row)
@@ -724,64 +638,6 @@ class MemoryMomentStore:
             metadata = {}
         moment["metadata"] = metadata if isinstance(metadata, dict) else {}
         return moment
-
-
-def _build_retrieval_aliases(
-    bucket_id: str,
-    bucket_title: str,
-    moments: list[dict],
-) -> list[dict]:
-    updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    aliases: list[dict] = []
-    seen: set[tuple[str, str, str]] = set()
-
-    def add_alias(text: str, source: str, moment_id: str) -> bool:
-        alias_text = _clean_retrieval_alias_text(text)
-        if not _valid_retrieval_alias(alias_text):
-            return False
-        alias_key = _retrieval_alias_key(alias_text)
-        identity = (moment_id, alias_key, source)
-        if identity in seen:
-            return False
-        seen.add(identity)
-        aliases.append(
-            {
-                "bucket_id": bucket_id,
-                "moment_id": moment_id,
-                "alias_text": alias_text,
-                "alias_key": alias_key,
-                "source": source,
-                "text_hash": _sha1(alias_text),
-                "updated_at": updated_at,
-            }
-        )
-        return True
-
-    for variant in _retrieval_alias_variants(bucket_title):
-        if len(aliases) >= MAX_RETRIEVAL_ALIASES_PER_BUCKET:
-            return aliases
-        add_alias(variant, "title", "")
-
-    ordered_moments = sorted(
-        [moment for moment in moments if moment.get("section") in RETRIEVAL_ALIAS_SECTIONS],
-        key=lambda item: int(item.get("ordinal", 0)),
-    )
-    for moment in ordered_moments:
-        moment_id = str(moment.get("moment_id") or "")
-        if not moment_id:
-            continue
-        added_for_moment = 0
-        for phrase in _retrieval_phrase_candidates(moment.get("text")):
-            for variant in _retrieval_alias_variants(phrase):
-                if len(aliases) >= MAX_RETRIEVAL_ALIASES_PER_BUCKET:
-                    return aliases
-                if add_alias(variant, "moment", moment_id):
-                    added_for_moment += 1
-                if added_for_moment >= MAX_RETRIEVAL_ALIASES_PER_MOMENT:
-                    break
-            if added_for_moment >= MAX_RETRIEVAL_ALIASES_PER_MOMENT:
-                break
-    return aliases
 
 
 def _bucket_title(bucket: dict) -> str:
@@ -795,147 +651,9 @@ def _bucket_title(bucket: dict) -> str:
     )
 
 
-def _retrieval_phrase_candidates(value: Any) -> list[str]:
-    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
-    candidates: list[str] = []
-    for line in text.split("\n"):
-        fragments = [
-            fragment
-            for fragment in re.split(r"(?<=[\u3002\uff01\uff1f\uff1b!?;])\s*", line)
-            if _clean_retrieval_alias_text(fragment)
-        ]
-        if len(fragments) <= 1:
-            candidates.append(line)
-        else:
-            candidates.extend(fragments)
-
-    unique: list[str] = []
-    seen = set()
-    for candidate in candidates:
-        cleaned = _clean_retrieval_alias_text(candidate)
-        key = _retrieval_alias_key(cleaned)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        unique.append(cleaned)
-    return unique
-
-
-def _retrieval_alias_variants(value: Any) -> list[str]:
-    base = _clean_retrieval_alias_text(value)
-    if not base:
-        return []
-    variants = [base]
-    seen = {_retrieval_alias_key(base)}
-    queue = [(base, 0)]
-    while queue:
-        current, depth = queue.pop(0)
-        for pattern in COMPACT_RETRIEVAL_ALIAS_PATTERNS:
-            match = pattern.match(current)
-            if not match:
-                continue
-            compact = _clean_retrieval_alias_text(match.group(1))
-            key = _retrieval_alias_key(compact)
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            variants.append(compact)
-            if depth < 1:
-                queue.append((compact, depth + 1))
-    return variants
-
-
-def _clean_retrieval_alias_text(value: Any) -> str:
-    text = _clean_text(value)
-    text = re.sub(r"^(?:(?:#{1,6}|[-*+]|>)\s*)+", "", text).strip()
-    return text.strip(
-        " \t\r\n`\"'.,!?;:()[]{}"
-        "\u2018\u2019\u201c\u201d\u3001\u3002\uff01\uff1f\uff0c\uff1b\uff1a"
-        "\uff08\uff09\u3010\u3011"
-    )
-
-
-def _retrieval_alias_key(value: Any) -> str:
-    normalized = unicodedata.normalize("NFKC", str(value or "")).lower()
-    return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
-
-
-GENERIC_RETRIEVAL_ALIAS_STOP_KEYS = frozenset(
-    {
-        *GENERIC_RETRIEVAL_ALIAS_KEYS,
-        *(
-            _retrieval_alias_key(term)
-            for term in GENERIC_LEXICAL_STOPWORDS
-            if _retrieval_alias_key(term)
-        ),
-    }
-)
-
-
-def _valid_retrieval_alias(alias_text: str) -> bool:
-    alias_key = _retrieval_alias_key(alias_text)
-    if len(alias_key) < 3 or len(alias_text) > MAX_RETRIEVAL_ALIAS_CHARS:
-        return False
-    if alias_key in GENERIC_RETRIEVAL_ALIAS_STOP_KEYS:
-        return False
-    if len(re.findall(r"[A-Za-z0-9]+", alias_text)) > 14:
-        return False
-    if _retrieval_alias_is_date(alias_text) or _retrieval_alias_is_identifier(alias_text):
-        return False
-    return True
-
-
-def _retrieval_alias_is_date(value: str) -> bool:
-    text = str(value or "").strip()
-    return bool(
-        re.fullmatch(
-            r"\d{4}(?:[-/.]\d{1,2}){1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?",
-            text,
-        )
-        or re.fullmatch(
-            r"\d{4}\u5e74\d{1,2}\u6708(?:\d{1,2}\u65e5)?",
-            text,
-        )
-        or re.fullmatch(r"\d{8}", text)
-    )
-
-
-def _retrieval_alias_is_identifier(value: str) -> bool:
-    text = str(value or "").strip().lower()
-    compact = re.sub(r"[-_:{}\s]", "", text)
-    if compact.isdigit():
-        return True
-    if re.fullmatch(r"[0-9a-f]{8,64}", compact):
-        return True
-    if re.fullmatch(r"(?:id|uuid|bucket|moment|comment)[-_: #]*[a-z0-9-]+", text):
-        return True
-    return bool(
-        re.fullmatch(r"[a-z]+[-_]?[a-z0-9_-]*\d[a-z0-9_-]*", text)
-        and len(compact) >= 12
-    )
-
-
-def _retrieval_alias_query_terms(query: Any) -> list[tuple[str, str]]:
-    cleaned = _clean_retrieval_alias_text(query)
-    if not cleaned:
-        return []
-    candidates = _retrieval_alias_variants(cleaned)
-    candidates.extend(
-        part
-        for part in re.split(r"[\s,\uff0c\u3002\uff01\uff1f!?;\uff1b:\uff1a/\\|]+", cleaned)
-        if part
-    )
-
-    terms: list[tuple[str, str]] = []
-    seen = set()
-    for candidate in candidates:
-        text = _clean_retrieval_alias_text(candidate)
-        key = _retrieval_alias_key(text)
-        if len(key) < 2 or key in seen or key in GENERIC_RETRIEVAL_ALIAS_STOP_KEYS:
-            continue
-        seen.add(key)
-        terms.append((text, key))
-    return terms[:8]
+def _bucket_scene_cues(bucket: dict) -> list[str]:
+    meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+    return _list_text(meta.get("scene_cues"))
 
 
 def _annotation_options_from_config(config: dict | None) -> dict:
@@ -1044,6 +762,61 @@ def parse_bucket_moments(
             ordinal += 1
 
     return moments
+
+
+def build_bucket_recall_item(
+    bucket: dict,
+    *,
+    node_id: str,
+    node_kind: str,
+    section: str,
+    source: str,
+    source_id: str,
+    extra_metadata: dict | None = None,
+    relevance_options: MemoryRelevanceOptions | None = None,
+    annotation_options: dict | None = None,
+) -> dict:
+    """Build one in-memory recall item without parsing or persisting a Moment.
+
+    Canonical objects use this projection to participate in the current recall
+    policy while retaining their own identity.  Legacy bucket parsing remains
+    exclusively in ``parse_bucket_moments``.
+    """
+    if not isinstance(bucket, dict):
+        raise ValueError("bucket must be a dict")
+    normalized_node_id = str(node_id or "").strip()
+    normalized_kind = str(node_kind or "").strip()
+    if not normalized_node_id or not normalized_kind:
+        raise ValueError("node_id and node_kind are required")
+
+    bucket_id = _bucket_id(bucket)
+    meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+    metadata = _clean_metadata(
+        {
+            **_bucket_metadata(meta, bucket),
+            **(extra_metadata or {}),
+            "recall_node_kind": normalized_kind,
+        }
+    )
+    raw_content = str(bucket.get("content") or "")
+    item = _make_moment(
+        bucket_id=bucket_id,
+        section=str(section or "body"),
+        text=_clean_text(raw_content),
+        ordinal=0,
+        source=str(source or normalized_kind),
+        source_id=str(source_id or bucket_id),
+        metadata=metadata,
+        source_ref=_source_ref_for_body(raw_content, _source_ref_base(bucket)),
+        created_at=str(meta.get("created") or meta.get("updated_at") or ""),
+        updated_at=str(meta.get("updated_at") or meta.get("created") or ""),
+        relevance_options=relevance_options or memory_relevance_options_from_config(),
+        annotation_options={**DEFAULT_ANNOTATION_OPTIONS, **(annotation_options or {})},
+    )
+    item["moment_id"] = normalized_node_id
+    item["node_id"] = normalized_node_id
+    item["node_kind"] = normalized_kind
+    return item
 
 
 def preview_bucket_moment_chunks(

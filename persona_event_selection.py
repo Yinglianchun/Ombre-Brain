@@ -10,15 +10,11 @@ _SPACE_RE = re.compile(r"\s+")
 _TRACE_TZ = ZoneInfo("Asia/Shanghai")
 
 _DROP_TERMS = (
-    "小雨",
-    "池又雨",
     "宝宝",
     "宝贝",
     "老婆",
     "老公",
     "哥哥",
-    "Haven",
-    "haven",
     "今天",
     "昨天",
     "昨晚",
@@ -71,7 +67,11 @@ def trim_persona_excerpt(text: Any, limit: int = 220) -> str:
     return clean[: max(0, limit - 3)].rstrip() + "..."
 
 
-def normalize_persona_event_key(event: dict[str, Any]) -> str:
+def normalize_persona_event_key(
+    event: dict[str, Any],
+    *,
+    identity_terms: Iterable[str] | None = None,
+) -> str:
     text = " ".join(
         str(event.get(key) or "")
         for key in (
@@ -82,13 +82,17 @@ def normalize_persona_event_key(event: dict[str, Any]) -> str:
         )
     )
     text = text.lower()
-    for term in _DROP_TERMS:
+    for term in (*_DROP_TERMS, *(identity_terms or [])):
         text = text.replace(term.lower(), "")
     text = _NON_KEY_RE.sub("", text)
     return text[:160]
 
 
-def persona_event_quality_score(event: dict[str, Any]) -> float:
+def persona_event_quality_score(
+    event: dict[str, Any],
+    *,
+    identity_terms: Iterable[str] | None = None,
+) -> float:
     try:
         score = float(event.get("confidence", 0.5) or 0.5)
     except (TypeError, ValueError):
@@ -113,7 +117,7 @@ def persona_event_quality_score(event: dict[str, Any]) -> float:
         score -= 0.08
     if str(event.get("error") or "").strip():
         score -= 0.45
-    if _is_generic_event(event):
+    if _is_generic_event(event, identity_terms=identity_terms):
         score -= 0.24
     return max(0.0, round(score, 4))
 
@@ -123,6 +127,7 @@ def select_persona_events(
     *,
     limit: int = 5,
     similarity_threshold: float = 0.86,
+    identity_terms: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     if limit <= 0:
         return []
@@ -131,13 +136,13 @@ def select_persona_events(
     for event in events:
         if not isinstance(event, dict):
             continue
-        key = normalize_persona_event_key(event)
+        key = normalize_persona_event_key(event, identity_terms=identity_terms)
         if not key and not any(
             str(event.get(field) or "").strip()
             for field in ("user_excerpt", "assistant_excerpt", "surface_trigger", "inner_thought", "residue")
         ):
             continue
-        score = persona_event_quality_score(event)
+        score = persona_event_quality_score(event, identity_terms=identity_terms)
         enriched = dict(event)
         enriched["_selection_key"] = key
         enriched["_selection_score"] = score
@@ -184,14 +189,24 @@ def format_persona_event_trace_line(
     return prefix + " | ".join(parts)
 
 
-def _is_generic_event(event: dict[str, Any]) -> bool:
-    key = normalize_persona_event_key(event)
+def _is_generic_event(
+    event: dict[str, Any],
+    *,
+    identity_terms: Iterable[str] | None = None,
+) -> bool:
+    key = normalize_persona_event_key(event, identity_terms=identity_terms)
     if key in _GENERIC_KEYS:
         return True
     if len(key) <= 2:
         return True
-    trigger = normalize_persona_event_key({"surface_trigger": event.get("surface_trigger")})
-    intent = normalize_persona_event_key({"perceived_intent": event.get("perceived_intent")})
+    trigger = normalize_persona_event_key(
+        {"surface_trigger": event.get("surface_trigger")},
+        identity_terms=identity_terms,
+    )
+    intent = normalize_persona_event_key(
+        {"perceived_intent": event.get("perceived_intent")},
+        identity_terms=identity_terms,
+    )
     return bool(trigger in _GENERIC_KEYS and intent in _GENERIC_KEYS)
 
 

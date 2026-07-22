@@ -597,7 +597,7 @@ class DreamEngine:
 
         return {
             "dreamer": self.identity.get("ai_name") or "AI",
-            "user_display_name": self.identity.get("user_display_name", "小雨"),
+            "user_display_name": self.identity.get("user_display_name") or "用户",
             "identity_anchor": anchor_payload,
             "daytime_residue": [material_payload(bucket) for bucket in materials],
             "old_echo": material_payload(old_echo) if old_echo else None,

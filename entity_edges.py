@@ -30,18 +30,6 @@ USER_RELATION_SPECS = (
     ("habit", r"(?:有个)?习惯是\s*([^。；;，,\n]{1,40})"),
 )
 
-AI_PARTICIPATION_VERB = (
-    r"(?:参与|协作|负责|帮忙|帮她|帮小雨|陪她|陪小雨|"
-    r"一起(?:做|写|修|开发|实现|调试|搭建)?|共同(?:做|写|开发|实现|调试|搭建)?|"
-    r"搭建|搭好|修复|修补|修好|撰写|写了|写过|在写|开发|实现|调试)"
-)
-
-AI_PARTICIPATION_TAIL = (
-    r"[^。！？!?；;\n]{0,18}"
-    + AI_PARTICIPATION_VERB
-    + r"(?:了|过|着)?\s*([^。；;，,\n]{2,48})"
-)
-
 PARTICIPATION_OBJECT_MARKERS = (
     "项目",
     "系统",
@@ -405,7 +393,10 @@ def extract_entity_edges_from_bucket(bucket: dict, identity: dict | None = None)
                 )
             )
 
-    for match in re.compile(ai_subject_pattern + AI_PARTICIPATION_TAIL, re.IGNORECASE).finditer(relation_text):
+    for match in re.compile(
+        ai_subject_pattern + _ai_participation_tail(identity),
+        re.IGNORECASE,
+    ).finditer(relation_text):
         obj = _clean_participation_object(match.group(1))
         if not _valid_participation_object(obj, identity):
             continue
@@ -667,6 +658,16 @@ def _terms_pattern(terms: list[str]) -> str:
     return r"(?:" + "|".join(escaped or [r"a^"]) + r")"
 
 
+def _ai_participation_tail(identity: dict) -> str:
+    user_pattern = _terms_pattern([*_user_terms(identity), "她"])
+    verb = (
+        rf"(?:参与|协作|负责|帮忙|帮(?:{user_pattern})|陪(?:{user_pattern})|"
+        r"一起(?:做|写|修|开发|实现|调试|搭建)?|共同(?:做|写|开发|实现|调试|搭建)?|"
+        r"搭建|搭好|修复|修补|修好|撰写|写了|写过|在写|开发|实现|调试)"
+    )
+    return rf"[^。！？!?；;\n]{{0,18}}{verb}(?:了|过|着)?\s*([^。；;，,\n]{{2,48}})"
+
+
 def _clean_entity_object(value: Any) -> str:
     text = strip_wikilinks(str(value or "")).strip()
     text = re.sub(r"^[“\"'「『（(]+|[”\"'」』）)]+$", "", text)
@@ -697,6 +698,7 @@ def _valid_entity_object(obj: str, identity: dict) -> bool:
     noisy = set(NOISY_OBJECTS)
     ai_name = _canonical_ai_subject(identity)
     noisy.update({ai_name, f"小{ai_name}"})
+    noisy.update(_user_terms(identity))
     return _compact_key(obj) not in {_compact_key(item) for item in noisy}
 
 

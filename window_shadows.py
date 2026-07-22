@@ -8,12 +8,22 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from identity import identity_names
 
-WINDOW_SHADOW_VERSION = "window-shadow-v2"
+
+WINDOW_SHADOW_VERSION = "window-shadow-v3"
+HANDOFF_NOTE_MIN_CHARS = 250
+HANDOFF_NOTE_MAX_CHARS = 400
 
 
 _HEADING_RE = re.compile(r"(?m)^(#{2,6})\s+(.+?)\s*$")
-_SECTION_KEYS = ("self", "voice", "relationship", "interaction", "moments")
+_SECTION_KEYS = ("self", "voice", "relationship", "interaction", "handoff", "moments")
+_BARE_CONTINUE_QUERY_RE = re.compile(
+    r"^(?:(?:好|嗯|唔|行|可以|可|那|那么|好呀|好耶|嗯嗯))?"
+    r"(?:(?:我们)?(?:继续|接着(?:来|说)?|然后呢))"
+    r"(?:吧|呀|啦|哦|噢)?$",
+    re.IGNORECASE,
+)
 
 
 def _now_utc() -> str:
@@ -42,6 +52,8 @@ def _section_key(heading: str) -> str:
         return "interaction"
     if "怎么相处" in key or "相处方式" in key:
         return "interaction"
+    if "给下个窗口的我" in key or "交给下个窗口" in key or "handoffnote" in key:
+        return "handoff"
     if "不能丢" in key or "重要时刻" in key or "难忘时刻" in key or "重要场景" in key:
         return "moments"
     if "我对" in key and "我们" in key and ("新懂" in key or "理解" in key):
@@ -67,7 +79,25 @@ def parse_window_shadow(content: str) -> dict[str, str]:
     return sections
 
 
-def validate_window_shadow(content: str) -> tuple[dict[str, str], list[str]]:
+def handoff_note_char_count(content: str) -> int:
+    return len(re.sub(r"\s+", "", str(content or "").strip()))
+
+
+def is_bare_window_continue_query(content: str) -> bool:
+    """Match a low-information first-turn continuation, never `继续做某件事`."""
+    compact = re.sub(
+        r"[\s!！?？。.,，、:：;；~～…_\-]+",
+        "",
+        str(content or "").strip(),
+    )
+    return bool(compact and len(compact) <= 12 and _BARE_CONTINUE_QUERY_RE.fullmatch(compact))
+
+
+def validate_window_shadow(
+    content: str,
+    *,
+    require_handoff_note: bool = False,
+) -> tuple[dict[str, str], list[str]]:
     sections = parse_window_shadow(content)
     errors = []
     if not any(sections.get(key) for key in ("self", "voice", "relationship", "interaction")):
@@ -76,6 +106,17 @@ def validate_window_shadow(content: str) -> tuple[dict[str, str], list[str]]:
         errors.append("self_section_needs_first_person")
     if sections.get("voice") and "我" not in sections["voice"]:
         errors.append("voice_section_needs_first_person")
+    if require_handoff_note:
+        handoff_note = str(sections.get("handoff") or "").strip()
+        if not handoff_note:
+            errors.append("missing_handoff_note")
+        else:
+            note_chars = handoff_note_char_count(handoff_note)
+            if note_chars < HANDOFF_NOTE_MIN_CHARS or note_chars > HANDOFF_NOTE_MAX_CHARS:
+                errors.append(
+                    f"handoff_note_chars_out_of_range:{note_chars}:"
+                    f"{HANDOFF_NOTE_MIN_CHARS}-{HANDOFF_NOTE_MAX_CHARS}"
+                )
     return sections, errors
 
 
@@ -168,7 +209,11 @@ def extract_window_shadow_moments(content: str) -> list[dict[str, str]]:
     return extract_window_shadow_scenes(content, allow_legacy_moment=True)
 
 
-def project_window_shadow_handoff(sections: dict[str, str] | None) -> dict[str, str]:
+def project_window_shadow_handoff(
+    sections: dict[str, str] | None,
+    *,
+    user_display_name: str = "用户",
+) -> dict[str, str]:
     """Project authored handoff layers without asking another model to summarize them."""
     values = sections if isinstance(sections, dict) else {}
 
@@ -181,6 +226,7 @@ def project_window_shadow_handoff(sections: dict[str, str] | None) -> dict[str, 
         return "\n\n".join(parts).strip()
 
     return {
+        "handoff_note": str(values.get("handoff") or "").strip(),
         "flowing_self": render(
             (
                 ("self", "这一窗之后，什么留在了我身上"),
@@ -189,7 +235,7 @@ def project_window_shadow_handoff(sections: dict[str, str] | None) -> dict[str, 
         ),
         "recent_relationship": render(
             (
-                ("relationship", "我对小雨和我们新懂了什么"),
+                ("relationship", f"我对{str(user_display_name or '用户').strip() or '用户'}和我们新懂了什么"),
                 ("interaction", "什么仍在发生、仍悬着或值得带走"),
             )
         ),
@@ -200,6 +246,7 @@ class WindowShadowStore:
     """Append-only full-window self narratives outside ordinary memory buckets."""
 
     def __init__(self, config: dict):
+        self.user_display_name = identity_names(config).get("user_display_name") or "用户"
         state_dir = config.get("state_dir") or os.path.join(
             os.path.dirname(os.path.abspath(config.get("buckets_dir", "buckets"))),
             "state",
@@ -220,12 +267,15 @@ class WindowShadowStore:
             CREATE TABLE IF NOT EXISTS window_shadows (
                 window_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL DEFAULT '',
+                profile_id TEXT NOT NULL DEFAULT '',
+                parent_shadow_id TEXT NOT NULL DEFAULT '',
                 source_date TEXT NOT NULL DEFAULT '',
                 version TEXT NOT NULL,
                 source_hash TEXT NOT NULL,
                 content TEXT NOT NULL,
                 sections_json TEXT NOT NULL DEFAULT '{}',
                 moment_bucket_ids_json TEXT NOT NULL DEFAULT '[]',
+                continue_scene_id TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -236,6 +286,19 @@ class WindowShadowStore:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_window_shadows_session ON window_shadows(session_id, created_at DESC)"
+        )
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(window_shadows)").fetchall()
+        }
+        if "profile_id" not in columns:
+            conn.execute("ALTER TABLE window_shadows ADD COLUMN profile_id TEXT NOT NULL DEFAULT ''")
+        if "parent_shadow_id" not in columns:
+            conn.execute("ALTER TABLE window_shadows ADD COLUMN parent_shadow_id TEXT NOT NULL DEFAULT ''")
+        if "continue_scene_id" not in columns:
+            conn.execute("ALTER TABLE window_shadows ADD COLUMN continue_scene_id TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_window_shadows_parent ON window_shadows(parent_shadow_id)"
         )
         conn.commit()
         conn.close()
@@ -261,6 +324,7 @@ class WindowShadowStore:
                 parsed = default
             item["sections" if key == "sections_json" else "moment_bucket_ids"] = parsed
         item["scene_bucket_ids"] = list(item.get("moment_bucket_ids") or [])
+        item["continue_scene_id"] = str(item.get("continue_scene_id") or "").strip()
         item["ordinary_recall"] = False
         return item
 
@@ -279,6 +343,8 @@ class WindowShadowStore:
         content: str,
         *,
         session_id: str = "",
+        profile_id: str = "",
+        parent_shadow_id: str = "",
         source_date: str = "",
         sections: dict[str, str] | None = None,
     ) -> tuple[dict, bool]:
@@ -298,13 +364,15 @@ class WindowShadowStore:
         conn.execute(
             """
             INSERT INTO window_shadows (
-                window_id, session_id, source_date, version, source_hash,
+                window_id, session_id, profile_id, parent_shadow_id, source_date, version, source_hash,
                 content, sections_json, moment_bucket_ids_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
             """,
             (
                 window_id,
                 session_key,
+                str(profile_id or "").strip(),
+                str(parent_shadow_id or "").strip(),
                 str(source_date or "").strip(),
                 WINDOW_SHADOW_VERSION,
                 content_hash,
@@ -318,19 +386,43 @@ class WindowShadowStore:
         conn.close()
         return self.get(window_id) or {}, True
 
-    def attach_moment_buckets(self, window_id: str, bucket_ids: list[str]) -> dict | None:
+    def attach_moment_buckets(
+        self,
+        window_id: str,
+        bucket_ids: list[str],
+        *,
+        continue_scene_id: str = "",
+    ) -> dict | None:
         clean_ids = list(dict.fromkeys(str(value or "").strip() for value in bucket_ids if str(value or "").strip()))
+        primary_id = str(continue_scene_id or "").strip()
+        if primary_id and primary_id not in clean_ids:
+            raise ValueError("continue_scene_id must belong to scene_bucket_ids")
         conn = self._connect()
         conn.execute(
-            "UPDATE window_shadows SET moment_bucket_ids_json = ?, updated_at = ? WHERE window_id = ?",
-            (json.dumps(clean_ids, ensure_ascii=False), _now_utc(), str(window_id or "").strip()),
+            "UPDATE window_shadows SET moment_bucket_ids_json = ?, continue_scene_id = ?, updated_at = ? WHERE window_id = ?",
+            (
+                json.dumps(clean_ids, ensure_ascii=False),
+                primary_id,
+                _now_utc(),
+                str(window_id or "").strip(),
+            ),
         )
         conn.commit()
         conn.close()
         return self.get(window_id)
 
-    def attach_scene_buckets(self, window_id: str, bucket_ids: list[str]) -> dict | None:
-        return self.attach_moment_buckets(window_id, bucket_ids)
+    def attach_scene_buckets(
+        self,
+        window_id: str,
+        bucket_ids: list[str],
+        *,
+        continue_scene_id: str = "",
+    ) -> dict | None:
+        return self.attach_moment_buckets(
+            window_id,
+            bucket_ids,
+            continue_scene_id=continue_scene_id,
+        )
 
     def delete(self, window_id: str) -> bool:
         """Rollback a just-created Shadow row; callers must verify ownership."""
@@ -371,21 +463,45 @@ class WindowShadowStore:
         if not row:
             return None
         projection = project_window_shadow_handoff(
-            row.get("sections", {}) if isinstance(row.get("sections"), dict) else {}
+            row.get("sections", {}) if isinstance(row.get("sections"), dict) else {},
+            user_display_name=self.user_display_name,
         )
         return {
             "window_id": str(row.get("window_id") or ""),
             "session_id": str(row.get("session_id") or ""),
             "source_date": str(row.get("source_date") or ""),
             "source_hash": str(row.get("source_hash") or ""),
+            "scene_bucket_ids": list(row.get("scene_bucket_ids") or []),
+            "continue_scene_id": str(row.get("continue_scene_id") or ""),
+            **projection,
+        }
+
+    def handoff_projection(self, window_id: str) -> dict | None:
+        """Return one exact parent Shadow projection; never guess by recency."""
+        row = self.get(window_id)
+        if not row:
+            return None
+        projection = project_window_shadow_handoff(
+            row.get("sections", {}) if isinstance(row.get("sections"), dict) else {},
+            user_display_name=self.user_display_name,
+        )
+        return {
+            "window_id": str(row.get("window_id") or ""),
+            "session_id": str(row.get("session_id") or ""),
+            "profile_id": str(row.get("profile_id") or ""),
+            "parent_shadow_id": str(row.get("parent_shadow_id") or ""),
+            "source_date": str(row.get("source_date") or ""),
+            "source_hash": str(row.get("source_hash") or ""),
+            "scene_bucket_ids": list(row.get("scene_bucket_ids") or []),
+            "continue_scene_id": str(row.get("continue_scene_id") or ""),
             **projection,
         }
 
     def list(self, limit: int = 20, *, include_content: bool = True) -> list[dict]:
         limit = max(1, min(int(limit or 20), 200))
         fields = "*" if include_content else (
-            "window_id, session_id, source_date, version, source_hash, '' AS content, "
-            "sections_json, moment_bucket_ids_json, created_at, updated_at"
+            "window_id, session_id, profile_id, parent_shadow_id, source_date, version, source_hash, '' AS content, "
+            "sections_json, moment_bucket_ids_json, continue_scene_id, created_at, updated_at"
         )
         conn = self._connect()
         rows = conn.execute(
@@ -428,7 +544,9 @@ class WindowShadowStore:
                     "source_date": row.get("source_date", ""),
                     "created_at": row.get("created_at", ""),
                     "text": text,
-                    "allowed_scopes": ["persona", "relationship"],
+                    # Shadow prose is Haven's observation, so it can propose a
+                    # User or Relationship portrait but can never publish one.
+                    "allowed_scopes": ["user", "relationship"],
                 }
             )
         return output

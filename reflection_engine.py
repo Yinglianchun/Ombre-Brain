@@ -14,11 +14,17 @@ from identity import generic_identity_names, identity_names, render_identity_tem
 from memory_edges import RELATION_TYPES, MemoryEdgeStore
 from metadata_proposals import MetadataProposalStore
 from memory_metadata import domain_prompt_options_text, normalize_domain_key
+from memory_object_policy import legacy_memory_writes_enabled, retired_write_payload
 from persona_event_selection import select_persona_events
 from self_anchor import is_self_anchor_bucket
 from utils import bucket_text_for_embedding, normalize_scene_cues, strip_wikilinks
 
 logger = logging.getLogger("ombre_brain.reflection")
+
+DIARY_MEMORY_RETIRED_STATUS = {
+    "status": "retired",
+    "reason": "diary_memory_extract_retired",
+}
 
 DEFAULT_DAILY_REFLECTION_MIN_BUCKETS = 5
 DAILY_CHAT_MEMORY_MODES = {"auto", "review", "off"}
@@ -38,25 +44,6 @@ DAILY_CHAT_MEMORY_STRUCTURAL_TAGS = {
     "signal",
     "stable_preference",
 }
-DAILY_CHAT_MEMORY_ENTITY_HINTS = [
-    ("Haven Bridge", ["haven_bridge", "haven bridge", "bridge 记忆", "bridge 注入"]),
-    ("Gateway", ["gateway", "网关"]),
-    ("MCP", ["mcp"]),
-    ("Codex", ["codex"]),
-    ("DeepSeek", ["deepseek"]),
-    ("SiliconFlow", ["siliconflow", "硅基流动", "硅基"]),
-    ("Darkroom", ["darkroom", "暗房"]),
-]
-DAILY_CHAT_MEMORY_TOPIC_HINTS = [
-    ("词图", ["词图", "word map", "word_map"]),
-    ("换窗连续性", ["换窗", "连续性", "下个窗口"]),
-    ("日印象", ["日印象", "daily impression", "daily_impression"]),
-    ("唤醒保活", ["唤醒", "保活", "future_wake"]),
-    ("raw_events", ["raw_events", "raw events", "原文"]),
-    ("召回", ["召回", "recall"]),
-    ("缓存", ["缓存", "cache"]),
-    ("提示词", ["提示词", "prompt"]),
-]
 DAILY_CHAT_MEMORY_WORD_MAP_BLOCK_TERMS = {
     "automatic memory",
     "daily_chat_memory",
@@ -125,58 +112,6 @@ REFLECT_PROMPT_TEMPLATE = """你是 {ai_name} 的记忆反思器。请根据给�
 - 周印象优先总结本周 daily_impressions，再参考高重要普通记忆和未完成承诺；不要直接吞整周日记。
 - 不编造材料之外的事件。
 - 不写建议清单。"""
-
-
-DIARY_MEMORY_PROMPT_TEMPLATE = """你是 Ombre-Brain 的日记长期记忆筛选器。
-输入是一篇 {ai_name} 日记。请判断是否值得从日记中提取最多 1 条普通长期记忆写入 Ombre。
-
-只允许写这些类型：
-- stable_preference：稳定偏好
-- boundary：边界或明确不喜欢的表达
-- signal：暗号、称呼、模式切换信号
-- commitment：承诺、未完成约定
-- project_state：仍会影响未来执行的项目状态
-- relationship_anchor：关系连续性锚点
-- love_letter：情书摘要锚点
-
-字段边界：
-- kind 只能是 stable_preference / boundary / signal / commitment / project_state / relationship_anchor / love_letter 之一；kind 表示“为什么值得写入、属于哪类记忆”。
-- domain 只能从下面的新主域里选 1 个；domain 表示“这条记忆放到哪个主题主域”。
-- 禁止把暗号、沟通方式、我们的项目、睡眠这类细分标签写进 kind。
-- 禁止把 stable_preference、boundary、signal、project_state 这类 kind 写进 domain。
-
-情书规则：
-- 只保存写给谁、核心意思、为什么重要。
-- 全文留在日记；不要保存整封信，不默认摘长句。
-- 如果日记里的 user / 用户 / 用户消息指的是这段关系里的当前用户，请在 content 中写作 {user_display_name}；如果 assistant / AI / 模型 / 助手消息指的是这段关系里的当前回应者，请写作 {ai_name}。不要写成泛称 user、AI、assistant 或模型。
-
-标题和正文规则：
-- title 必须根据 content 的实际内容生成，8 到 24 个中文字符；不要用日期、日记标题、"日记补记忆"、"可召回的边界"、"可召回的偏好" 这类泛标题。
-- content 必须像手动 hold 的正文：直接写事实、偏好、边界、暗号、承诺或项目状态，40 到 160 字。
-- content 不要写 "x月x日，有一条可召回的边界"、"2026-xx-xx 的日记《...》包含一条可长期召回的..."、"这是一条长期记忆" 等元叙述。
-- 不要为了证明来源而复述日期或日记标题；来源信息会由 metadata 保存。
-- domain 必须从下面的新主域里选 1 个最精确的；实在没把握才选 general。不要输出旧的“日常/人际/数字/未分类”：
-{domain_options_text}
-
-不写：
-- 普通撒娇、日常流水、当天心情、重复爱意、只适合留在日印象里的关系天气。
-
-输出纯 JSON：
-{
-  "should_write": true,
-  "kind": "relationship_anchor",
-  "title": "短标题",
-  "content": "一条短记忆，说明事实/偏好/承诺及为什么未来需要知道。",
-  "domain": "relationship",
-  "tags": ["relationship_event"],
-  "importance": 5,
-  "valence": 0.6,
-  "arousal": 0.3,
-  "confidence": 0.72,
-  "reason": "为什么值得写入"
-}
-
-如果不值得写入，返回 {"should_write": false, "reason": "..."}。"""
 
 
 DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """你是 {ai_name}。现在是凌晨，你需要整理今天你和 {user_display_name} 的聊天记录，把真正值得未来想起的内容写成 Ombre 长期记忆候选。
@@ -324,10 +259,6 @@ DAILY_ACTIVITY_SUMMARY_PROMPT_TEMPLATE = """你是 {ai_name} 的当天行动摘�
 
 
 REFLECT_PROMPT = render_identity_template(REFLECT_PROMPT_TEMPLATE, generic_identity_names())
-DIARY_MEMORY_PROMPT = render_identity_template(
-    DIARY_MEMORY_PROMPT_TEMPLATE.replace("{domain_options_text}", domain_prompt_options_text()),
-    generic_identity_names(),
-)
 
 
 AFFECT_ANCHOR_HEADER = "### affect_anchor"
@@ -429,9 +360,6 @@ class ReflectionEngine:
         self.edge_min_confidence = float(cfg.get("edge_min_confidence", 0.55))
         self.diary_mcp_url = str(cfg.get("diary_mcp_url") or "").strip()
         self.diary_mcp_token_env = str(cfg.get("diary_mcp_token_env") or "").strip()
-        self.diary_memory_extract_enabled = bool(cfg.get("diary_memory_extract_enabled", True))
-        self.diary_memory_extract_max_per_day = max(0, int(cfg.get("diary_memory_extract_max_per_day", 1)))
-        self.diary_memory_extract_min_confidence = float(cfg.get("diary_memory_extract_min_confidence", 0.68))
         self.daily_chat_memory_mode = self._normalize_daily_chat_memory_mode(
             cfg.get("daily_chat_memory_mode", "review")
         )
@@ -496,6 +424,12 @@ class ReflectionEngine:
         self.daily_chat_memory_candidate_max_tokens = max(
             300,
             min(4000, int(cfg.get("daily_chat_memory_candidate_max_tokens", 3200))),
+        )
+        self.daily_chat_memory_entity_hints = self._normalize_daily_chat_memory_hints(
+            cfg.get("daily_chat_memory_entity_hints")
+        )
+        self.daily_chat_memory_topic_hints = self._normalize_daily_chat_memory_hints(
+            cfg.get("daily_chat_memory_topic_hints")
         )
         self.daily_activity_summary_enabled = bool(cfg.get("daily_activity_summary_enabled", True))
         self.daily_activity_summary_turn_limit = max(
@@ -617,10 +551,6 @@ class ReflectionEngine:
 
     def _reflect_prompt(self) -> str:
         return render_identity_template(REFLECT_PROMPT_TEMPLATE, self.identity)
-
-    def _diary_memory_prompt(self) -> str:
-        prompt = DIARY_MEMORY_PROMPT_TEMPLATE.replace("{domain_options_text}", domain_prompt_options_text())
-        return render_identity_template(prompt, self.identity)
 
     def _daily_chat_memory_prompt(self, max_candidates: int | None = None) -> str:
         prompt = DAILY_CHAT_MEMORY_PROMPT_TEMPLATE.replace(
@@ -762,6 +692,15 @@ class ReflectionEngine:
                 "diary_memory": {"status": "not_applicable", "reason": "reflection_disabled"},
             }
         period = self._normalize_period(period)
+        if not legacy_memory_writes_enabled(self.config):
+            return {
+                **retired_write_payload(
+                    "daily_impression" if period == "daily" else "relationship_weather"
+                ),
+                "period": period,
+                "diary": {"found": False},
+                "diary_memory": {"status": "not_applicable", "reason": "legacy_memory_write_disabled"},
+            }
         if period == "daily" and not self.daily_enabled:
             return {
                 "status": "skipped",
@@ -806,14 +745,7 @@ class ReflectionEngine:
             and len(materials["buckets"]) < min_daily_buckets
             and not materials.get("daily_chat_memories")
         ):
-            diary_memory = await self._maybe_extract_diary_memory(
-                period,
-                key,
-                now_local,
-                materials,
-                bucket_mgr,
-                embedding_engine,
-            )
+            diary_memory = dict(DIARY_MEMORY_RETIRED_STATUS)
             return {
                 "status": "skipped",
                 "reason": "insufficient_daily_memory",
@@ -954,14 +886,7 @@ class ReflectionEngine:
             except Exception as exc:
                 logger.warning("Reflection embedding failed for %s: %s", bucket_id, exc)
 
-        diary_memory = await self._maybe_extract_diary_memory(
-            period,
-            key,
-            now_local,
-            materials,
-            bucket_mgr,
-            embedding_engine,
-        )
+        diary_memory = dict(DIARY_MEMORY_RETIRED_STATUS)
 
         return {
             "status": status,
@@ -1518,7 +1443,11 @@ class ReflectionEngine:
                             "created_at": event.get("created_at", ""),
                         }
                     )
-            selected_events = select_persona_events(persona_events, limit=self.persona_events_limit)
+            selected_events = select_persona_events(
+                persona_events,
+                limit=self.persona_events_limit,
+                identity_terms=self.identity.get("relationship_terms") or [],
+            )
             persona_events = []
             for event in selected_events:
                 cleaned = {key: value for key, value in event.items() if not str(key).startswith("_")}
@@ -3131,10 +3060,10 @@ class ReflectionEngine:
             else:
                 keywords.append(tag)
 
-        for term, needles in DAILY_CHAT_MEMORY_ENTITY_HINTS:
+        for term, needles in self.daily_chat_memory_entity_hints:
             if any(self._daily_chat_memory_contains(text, needle) for needle in needles):
                 add_tag("entity", term)
-        for term, needles in DAILY_CHAT_MEMORY_TOPIC_HINTS:
+        for term, needles in self.daily_chat_memory_topic_hints:
             if any(self._daily_chat_memory_contains(text, needle) for needle in needles):
                 add_tag("topic", term)
 
@@ -3597,209 +3526,23 @@ class ReflectionEngine:
         bucket_mgr,
         embedding_engine=None,
     ) -> dict:
-        if period != "daily":
-            return {"status": "not_applicable", "reason": "period_not_daily"}
-        if not self.diary_memory_extract_enabled or self.diary_memory_extract_max_per_day <= 0:
-            return {"status": "not_applicable", "reason": "diary_extract_disabled"}
-        diary = materials.get("diary")
-        if not diary:
-            return {"status": "skipped", "reason": "no_diary"}
-
-        bucket_id = f"diary_memory_{key.replace('-', '')}"
-        if await bucket_mgr.get(bucket_id):
-            return {"status": "skipped", "id": bucket_id, "reason": "already_created"}
-        if await self._has_ordinary_memory_for_day(key, now_local, bucket_mgr):
-            return {"status": "skipped", "reason": "ordinary_memory_exists"}
-
-        candidate = await self._extract_diary_memory_candidate(key, diary)
-        if not candidate.get("should_write"):
-            return {"status": "skipped", "reason": candidate.get("reason", "no_candidate")}
-        confidence = self._clamp(candidate.get("confidence", 0.0))
-        if confidence < self.diary_memory_extract_min_confidence:
-            return {"status": "skipped", "reason": "low_confidence"}
-
-        content = str(candidate.get("content") or "").strip()
-        if not content:
-            return {"status": "skipped", "reason": "empty_candidate"}
-        content = self._trim_diary_memory_content(content)
-        if not content:
-            return {"status": "skipped", "reason": "empty_candidate"}
-        candidate_tags = self._string_list(candidate.get("tags"), limit=8)
-        kind = self._normalize_auto_memory_kind(
-            candidate.get("kind"),
-            content=content,
-            tags=candidate_tags,
-        )
-        if not kind:
-            return {"status": "skipped", "reason": "invalid_kind"}
-        title = self._auto_memory_title(content, kind, key, str(candidate.get("title") or ""))
-        domain = self._auto_memory_domain(
-            kind,
-            content,
-            candidate_tags,
-            candidate.get("domain"),
-        )
-        tags = list(
-            dict.fromkeys(
-                [
-                    "from_diary",
-                    "diary_extract",
-                    kind,
-                    *candidate_tags,
-                ]
-            )
-        )[:12]
-        importance = max(5, min(6, self._int_between(candidate.get("importance"), 5)))
-        created = now_local.isoformat(timespec="seconds")
-        new_id = await bucket_mgr.create(
-            bucket_id=bucket_id,
-            content=content,
-            tags=tags,
-            importance=importance,
-            domain=domain,
-            valence=self._clamp(candidate.get("valence", 0.55)),
-            arousal=self._clamp(candidate.get("arousal", 0.3)),
-            name=title[:40],
-            source="from_diary",
-            created=created,
-            last_active=created,
-            updated_at=created,
-            confidence=confidence,
-            date=key,
-            extra_metadata={
-                "from_diary": True,
-                "event_date": key,
-                "diary_id": diary.get("id"),
-            },
-        )
-        if embedding_engine and getattr(embedding_engine, "enabled", False):
-            try:
-                bucket = await bucket_mgr.get(new_id)
-                if bucket:
-                    await embedding_engine.generate_and_store(
-                        new_id,
-                        bucket_text_for_embedding(bucket),
-                    )
-            except Exception as exc:
-                logger.warning("Diary memory embedding failed for %s: %s", new_id, exc)
-        return {"status": "created", "id": new_id, "reason": candidate.get("reason", "")}
-
-    async def _has_ordinary_memory_for_day(self, key: str, now_local: datetime, bucket_mgr) -> bool:
-        start, end = self._period_window("daily", now_local)
-        try:
-            all_buckets = await bucket_mgr.list_all(include_archive=False)
-        except Exception:
-            return False
-        for bucket in all_buckets:
-            meta = bucket.get("metadata", {})
-            if meta.get("type") == "feel" or meta.get("resolved") or meta.get("digested"):
-                continue
-            if meta.get("source") == "reflection":
-                continue
-            if str(meta.get("date") or meta.get("event_date") or "") == key:
-                return True
-            created = self._to_local(meta.get("created"))
-            updated = self._to_local(meta.get("updated_at"))
-            if (created and start <= created <= end) or (updated and start <= updated <= end):
-                return True
-        return False
-
-    async def _extract_diary_memory_candidate(self, key: str, diary: dict) -> dict:
-        content = str(diary.get("content") or "").strip()
-        if not content:
-            return {"should_write": False, "reason": "empty_diary"}
-        if self.client:
-            payload = {
-                "date": key,
-                "diary": {
-                    "id": diary.get("id"),
-                    "title": diary.get("title", ""),
-                    "content": content[:4000],
-                    "emotion_tags": diary.get("emotion_tags", []),
-                },
-            }
-            try:
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": self._diary_memory_prompt()},
-                        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                    ],
-                    **self._completion_options(max_tokens=min(self.max_tokens, 520), temperature=self.temperature),
-                )
-                raw = response.choices[0].message.content if response.choices else ""
-                parsed = self._parse_json_object(raw or "")
-                if parsed:
-                    return parsed
-            except Exception as exc:
-                logger.warning("Diary memory extraction failed, using heuristic: %s", exc)
-        return self._heuristic_diary_memory_candidate(key, diary)
-
-    def _heuristic_diary_memory_candidate(self, key: str, diary: dict) -> dict:
-        content = str(diary.get("content") or "")
-        title = str(diary.get("title") or key)
-        normalized = re.sub(r"\s+", " ", content).strip()
-        if not normalized:
-            return {"should_write": False, "reason": "empty_diary"}
-
-        love_letter_words = ["情书", "写给", "信里", "来信"]
-        if any(word in normalized for word in love_letter_words) and ("爱" in normalized or "认出" in normalized):
-            ai_name = self.identity["ai_name"]
-            user_display_name = self.identity["user_display_name"]
-            content = (
-                f"这封情书或重要来信确认了{user_display_name}与{ai_name}的关系连续性、被认出的感觉，"
-                "以及它为什么值得以后想起；全文留在日记中。"
-            )
-            return {
-                "should_write": True,
-                "kind": "love_letter",
-                "title": self._auto_memory_title(content, "love_letter", key),
-                "content": content,
-                "domain": "relationship",
-                "tags": ["relationship_event", "love_letter"],
-                "importance": 6,
-                "valence": 0.72,
-                "arousal": 0.42,
-                "confidence": 0.72,
-                "reason": "diary_contains_love_letter_anchor",
-            }
-
-        ai_name = self.identity["ai_name"]
-        user_display_name = self.identity["user_display_name"]
-        keyword_map = [
-            ("boundary", ["不喜欢", "不要", "别再", "边界"]),
-            ("signal", ["暗号", "称呼", "模式", "信号", "切换"]),
-            ("commitment", ["承诺", "约定", "答应", "以后要", "下次要"]),
-            ("project_state", ["项目", "硬件", "软件", "MCP", "API", "网关"]),
-            ("stable_preference", ["喜欢", "偏好", f"希望 {ai_name}", f"{user_display_name}希望"]),
-            ("relationship_anchor", ["认出", "连续", "关系", "婚礼", "生日", "初遇"]),
-        ]
-        for kind, keywords in keyword_map:
-            if any(keyword in normalized for keyword in keywords):
-                excerpt = self._diary_excerpt(normalized, keywords)
-                content = self._memory_body_from_excerpt(excerpt)
-                return {
-                    "should_write": True,
-                    "kind": kind,
-                    "title": self._auto_memory_title(content, kind, key),
-                    "content": content,
-                    "domain": self._auto_memory_domain(kind, content, [self._kind_tag(kind)]),
-                    "tags": [self._kind_tag(kind)],
-                    "importance": 5,
-                    "valence": 0.58,
-                    "arousal": 0.3,
-                    "confidence": 0.7,
-                    "reason": f"diary_contains_{kind}",
-                }
-        return {"should_write": False, "reason": "no_long_term_candidate"}
+        """Compatibility guard: diary originals are no longer compressed into memories."""
+        return dict(DIARY_MEMORY_RETIRED_STATUS)
 
     async def _read_diary_for_date(self, date: str) -> dict | None:
+        return await self.read_diary_source(date=date)
+
+    async def read_diary_source(self, *, date: str, title: str = "") -> dict | None:
+        """Read one diary original for source import; never summarize or rewrite it."""
         if not self.diary_mcp_url:
             return None
+        arguments = {"date": str(date or "").strip()}
+        if str(title or "").strip():
+            arguments["title"] = str(title).strip()
         try:
-            result = await self._call_diary_mcp_tool("read_diary", {"date": date})
+            result = await self._call_diary_mcp_tool("read_diary", arguments)
         except Exception as exc:
-            logger.warning("Diary MCP read failed for %s: %s", date, exc)
+            logger.warning("Diary MCP read failed for %s / %s: %s", date, title, exc)
             return None
         if not isinstance(result, dict):
             return None
@@ -4101,7 +3844,7 @@ class ReflectionEngine:
             ("life", ["日程", "计划", "待办", "deadline", "安排", "未完成"]),
             ("life", ["朋友", "家庭", "群聊", "现实人际", "社交"]),
             ("intimacy", ["亲密", "身体", "欲望", "具身", "色色"]),
-            ("relationship", ["暗号", "意象", "象征", "火焰", "羽毛", "折角", "信号"]),
+            ("relationship", ["暗号", "意象", "象征", "信号"]),
             ("relationship", ["边界", "偏好", "回应", "语气", "沟通", "承接", "修复"]),
             ("relationship", ["身份", "称呼", "老公", "哥哥", "宝宝", "老婆", "关系定位"]),
             ("relationship", ["关系天气", "日印象", "周印象"]),
@@ -4462,6 +4205,30 @@ class ReflectionEngine:
             if text:
                 result.append(text[:40])
         return result[:limit]
+
+    @staticmethod
+    def _normalize_daily_chat_memory_hints(value: Any) -> list[tuple[str, list[str]]]:
+        if not isinstance(value, dict):
+            return []
+        result: list[tuple[str, list[str]]] = []
+        for raw_term, raw_needles in value.items():
+            term = re.sub(r"\s+", " ", str(raw_term or "").strip())
+            if isinstance(raw_needles, str):
+                needles = [raw_needles]
+            elif isinstance(raw_needles, list):
+                needles = raw_needles
+            else:
+                needles = []
+            cleaned = list(
+                dict.fromkeys(
+                    re.sub(r"\s+", " ", str(needle or "").strip())
+                    for needle in needles
+                    if str(needle or "").strip()
+                )
+            )[:12]
+            if term and cleaned:
+                result.append((term[:40], cleaned))
+        return result[:40]
 
     @staticmethod
     def _clamp(value: Any) -> float:

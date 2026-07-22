@@ -1,6 +1,7 @@
 import os
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -138,8 +139,544 @@ class GatewayStateStore:
             ON upstream_usage (session_id, id DESC)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS window_sessions (
+                conversation_id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL,
+                previous_conversation_id TEXT NOT NULL DEFAULT '',
+                parent_shadow_id TEXT NOT NULL DEFAULT '',
+                closed_shadow_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                first_hook_prompt_at TEXT NOT NULL DEFAULT '',
+                opened_at TEXT NOT NULL,
+                closed_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_window_sessions_profile_recent
+            ON window_sessions (profile_id, opened_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_window_sessions_parent_claim
+            ON window_sessions (parent_shadow_id)
+            WHERE parent_shadow_id != ''
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS window_session_aliases (
+                profile_id TEXT NOT NULL,
+                transport_session_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (profile_id, transport_session_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_window_session_aliases_conversation
+            ON window_session_aliases (conversation_id)
+            """
+        )
+        window_columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(window_sessions)").fetchall()
+        }
+        if "first_hook_prompt_at" not in window_columns:
+            conn.execute(
+                "ALTER TABLE window_sessions ADD COLUMN first_hook_prompt_at TEXT NOT NULL DEFAULT ''"
+            )
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _utc_now() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    @staticmethod
+    def _window_session_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        item = dict(row)
+        item["handoff_ready"] = bool(str(item.get("parent_shadow_id") or "").strip())
+        item["hook_first_prompt_seen"] = bool(
+            str(item.get("first_hook_prompt_at") or "").strip()
+        )
+        return item
+
+    def get_window_session(
+        self,
+        conversation_id: str,
+        *,
+        profile_id: str = "",
+    ) -> dict[str, Any] | None:
+        safe_conversation_id = str(conversation_id or "").strip()
+        if not safe_conversation_id:
+            return None
+        conn = self._connect()
+        if str(profile_id or "").strip():
+            row = conn.execute(
+                "SELECT * FROM window_sessions WHERE conversation_id = ? AND profile_id = ?",
+                (safe_conversation_id, str(profile_id).strip()),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM window_sessions WHERE conversation_id = ?",
+                (safe_conversation_id,),
+            ).fetchone()
+        conn.close()
+        return self._window_session_row(row)
+
+    def resolve_window_conversation(
+        self,
+        *,
+        profile_id: str,
+        transport_session_id: str,
+        rotate_closed: bool = True,
+    ) -> dict[str, Any]:
+        """Resolve a client-stable session id to one internal window epoch.
+
+        Closing the active epoch leaves its authored Shadow on that row.  The
+        next valid chat request atomically creates (or reuses) exactly one child
+        epoch and binds the stable transport id to it.
+        """
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_transport_id = str(transport_session_id or "main").strip() or "main"
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            alias = conn.execute(
+                """
+                SELECT conversation_id
+                FROM window_session_aliases
+                WHERE profile_id = ? AND transport_session_id = ?
+                """,
+                (safe_profile_id, safe_transport_id),
+            ).fetchone()
+            active = None
+            if alias is not None:
+                active = conn.execute(
+                    """
+                    SELECT * FROM window_sessions
+                    WHERE conversation_id = ? AND profile_id = ?
+                    """,
+                    (str(alias["conversation_id"] or ""), safe_profile_id),
+                ).fetchone()
+                if active is None:
+                    conn.execute(
+                        """
+                        DELETE FROM window_session_aliases
+                        WHERE profile_id = ? AND transport_session_id = ?
+                        """,
+                        (safe_profile_id, safe_transport_id),
+                    )
+
+            resolution = "existing"
+            if active is None:
+                direct = conn.execute(
+                    "SELECT * FROM window_sessions WHERE conversation_id = ?",
+                    (safe_transport_id,),
+                ).fetchone()
+                if direct is not None and str(direct["profile_id"] or "") == safe_profile_id:
+                    active = direct
+                    resolution = "bound"
+                else:
+                    conversation_id = (
+                        safe_transport_id
+                        if direct is None
+                        else f"conversation_{uuid.uuid4().hex}"
+                    )
+                    now = self._utc_now()
+                    conn.execute(
+                        """
+                        INSERT INTO window_sessions (
+                            conversation_id, profile_id, previous_conversation_id,
+                            parent_shadow_id, closed_shadow_id, status,
+                            opened_at, closed_at, updated_at
+                        ) VALUES (?, ?, '', '', '', 'open', ?, '', ?)
+                        """,
+                        (conversation_id, safe_profile_id, now, now),
+                    )
+                    active = conn.execute(
+                        "SELECT * FROM window_sessions WHERE conversation_id = ?",
+                        (conversation_id,),
+                    ).fetchone()
+                    resolution = "opened"
+
+                now = self._utc_now()
+                conn.execute(
+                    """
+                    INSERT INTO window_session_aliases (
+                        profile_id, transport_session_id, conversation_id,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(profile_id, transport_session_id) DO UPDATE SET
+                        conversation_id = excluded.conversation_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        safe_profile_id,
+                        safe_transport_id,
+                        str(active["conversation_id"] or ""),
+                        now,
+                        now,
+                    ),
+                )
+
+            rotated = False
+            visited_ids: set[str] = set()
+            while (
+                rotate_closed
+                and active is not None
+                and str(active["status"] or "") == "closed"
+                and str(active["closed_shadow_id"] or "").strip()
+            ):
+                previous_id = str(active["conversation_id"] or "").strip()
+                if previous_id in visited_ids:
+                    conn.rollback()
+                    return {
+                        "status": "conflict",
+                        "reason": "window_chain_cycle",
+                        "transport_session_id": safe_transport_id,
+                        "conversation_id": previous_id,
+                    }
+                visited_ids.add(previous_id)
+                parent_shadow_id = str(active["closed_shadow_id"] or "").strip()
+                child = conn.execute(
+                    "SELECT * FROM window_sessions WHERE parent_shadow_id = ?",
+                    (parent_shadow_id,),
+                ).fetchone()
+                if child is not None and str(child["profile_id"] or "") != safe_profile_id:
+                    conn.rollback()
+                    return {
+                        "status": "conflict",
+                        "reason": "parent_shadow_profile_mismatch",
+                        "transport_session_id": safe_transport_id,
+                        "conversation_id": previous_id,
+                    }
+                if child is None:
+                    child_id = f"conversation_{uuid.uuid4().hex}"
+                    now = self._utc_now()
+                    conn.execute(
+                        """
+                        INSERT INTO window_sessions (
+                            conversation_id, profile_id, previous_conversation_id,
+                            parent_shadow_id, closed_shadow_id, status,
+                            opened_at, closed_at, updated_at
+                        ) VALUES (?, ?, ?, ?, '', 'open', ?, '', ?)
+                        """,
+                        (
+                            child_id,
+                            safe_profile_id,
+                            previous_id,
+                            parent_shadow_id,
+                            now,
+                            now,
+                        ),
+                    )
+                    child = conn.execute(
+                        "SELECT * FROM window_sessions WHERE conversation_id = ?",
+                        (child_id,),
+                    ).fetchone()
+                active = child
+                rotated = True
+
+            if rotated and active is not None:
+                now = self._utc_now()
+                conn.execute(
+                    """
+                    UPDATE window_session_aliases
+                    SET conversation_id = ?, updated_at = ?
+                    WHERE profile_id = ? AND transport_session_id = ?
+                    """,
+                    (
+                        str(active["conversation_id"] or ""),
+                        now,
+                        safe_profile_id,
+                        safe_transport_id,
+                    ),
+                )
+                conn.commit()
+                item = self._window_session_row(active) or {}
+                item.update(
+                    {
+                        "resolution": "rotated",
+                        "rotated": True,
+                        "transport_session_id": safe_transport_id,
+                    }
+                )
+                return item
+
+            conn.commit()
+            item = self._window_session_row(active) or {}
+            item.update(
+                {
+                    "resolution": resolution,
+                    "rotated": False,
+                    "transport_session_id": safe_transport_id,
+                }
+            )
+            return item
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def open_window(
+        self,
+        *,
+        profile_id: str,
+        conversation_id: str = "",
+        previous_conversation_id: str = "",
+        parent_shadow_id: str = "",
+    ) -> dict[str, Any]:
+        """Declare one API/UI window and claim at most one exact parent Shadow."""
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_conversation_id = str(conversation_id or "").strip() or f"conversation_{uuid.uuid4().hex}"
+        safe_previous_id = str(previous_conversation_id or "").strip()
+        requested_parent_id = str(parent_shadow_id or "").strip()
+
+        conn = self._connect()
+        existing = conn.execute(
+            "SELECT * FROM window_sessions WHERE conversation_id = ?",
+            (safe_conversation_id,),
+        ).fetchone()
+        if existing is not None:
+            conn.close()
+            item = self._window_session_row(existing) or {}
+            if str(item.get("profile_id") or "") != safe_profile_id:
+                return {
+                    "status": "conflict",
+                    "reason": "conversation_profile_mismatch",
+                    "conversation_id": safe_conversation_id,
+                }
+            if safe_previous_id and str(item.get("previous_conversation_id") or "") != safe_previous_id:
+                return {
+                    "status": "conflict",
+                    "reason": "previous_conversation_mismatch",
+                    "conversation_id": safe_conversation_id,
+                }
+            if requested_parent_id and str(item.get("parent_shadow_id") or "") != requested_parent_id:
+                return {
+                    "status": "conflict",
+                    "reason": "parent_shadow_mismatch",
+                    "conversation_id": safe_conversation_id,
+                }
+            item["status"] = "existing"
+            return item
+
+        resolved_parent_id = requested_parent_id
+        if safe_previous_id:
+            previous = conn.execute(
+                "SELECT * FROM window_sessions WHERE conversation_id = ? AND profile_id = ?",
+                (safe_previous_id, safe_profile_id),
+            ).fetchone()
+            if previous is None:
+                conn.close()
+                return {
+                    "status": "invalid",
+                    "reason": "previous_conversation_not_found",
+                    "conversation_id": safe_conversation_id,
+                    "previous_conversation_id": safe_previous_id,
+                }
+            previous_shadow_id = str(previous["closed_shadow_id"] or "").strip()
+            if not previous_shadow_id:
+                conn.close()
+                return {
+                    "status": "invalid",
+                    "reason": "previous_conversation_not_closed",
+                    "conversation_id": safe_conversation_id,
+                    "previous_conversation_id": safe_previous_id,
+                }
+            if resolved_parent_id and resolved_parent_id != previous_shadow_id:
+                conn.close()
+                return {
+                    "status": "conflict",
+                    "reason": "parent_shadow_not_from_previous_conversation",
+                    "conversation_id": safe_conversation_id,
+                }
+            resolved_parent_id = previous_shadow_id
+
+        now = self._utc_now()
+        try:
+            conn.execute(
+                """
+                INSERT INTO window_sessions (
+                    conversation_id, profile_id, previous_conversation_id,
+                    parent_shadow_id, closed_shadow_id, status,
+                    opened_at, closed_at, updated_at
+                ) VALUES (?, ?, ?, ?, '', 'open', ?, '', ?)
+                """,
+                (
+                    safe_conversation_id,
+                    safe_profile_id,
+                    safe_previous_id,
+                    resolved_parent_id,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            conn.close()
+            return {
+                "status": "conflict",
+                "reason": "parent_shadow_already_claimed" if resolved_parent_id else "conversation_conflict",
+                "conversation_id": safe_conversation_id,
+                "parent_shadow_id": resolved_parent_id,
+            }
+        row = conn.execute(
+            "SELECT * FROM window_sessions WHERE conversation_id = ?",
+            (safe_conversation_id,),
+        ).fetchone()
+        conn.close()
+        item = self._window_session_row(row) or {}
+        item["status"] = "opened"
+        return item
+
+    def close_window_session(
+        self,
+        *,
+        profile_id: str,
+        conversation_id: str,
+        shadow_id: str,
+    ) -> dict[str, Any]:
+        """Bind one authored Shadow to the conversation that produced it."""
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_conversation_id = str(conversation_id or "").strip()
+        safe_shadow_id = str(shadow_id or "").strip()
+        if not safe_conversation_id or not safe_shadow_id:
+            return {"status": "invalid", "reason": "conversation_and_shadow_required"}
+
+        conn = self._connect()
+        existing = conn.execute(
+            "SELECT * FROM window_sessions WHERE conversation_id = ?",
+            (safe_conversation_id,),
+        ).fetchone()
+        now = self._utc_now()
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO window_sessions (
+                    conversation_id, profile_id, previous_conversation_id,
+                    parent_shadow_id, closed_shadow_id, status,
+                    opened_at, closed_at, updated_at
+                ) VALUES (?, ?, '', '', ?, 'closed', ?, ?, ?)
+                """,
+                (safe_conversation_id, safe_profile_id, safe_shadow_id, now, now, now),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM window_sessions WHERE conversation_id = ?",
+                (safe_conversation_id,),
+            ).fetchone()
+            conn.close()
+            item = self._window_session_row(row) or {}
+            item["status"] = "closed"
+            return item
+
+        if str(existing["profile_id"] or "") != safe_profile_id:
+            conn.close()
+            return {
+                "status": "conflict",
+                "reason": "conversation_profile_mismatch",
+                "conversation_id": safe_conversation_id,
+            }
+        existing_shadow_id = str(existing["closed_shadow_id"] or "").strip()
+        if existing_shadow_id and existing_shadow_id != safe_shadow_id:
+            conn.close()
+            return {
+                "status": "conflict",
+                "reason": "conversation_already_closed_with_other_shadow",
+                "conversation_id": safe_conversation_id,
+                "closed_shadow_id": existing_shadow_id,
+            }
+        if existing_shadow_id == safe_shadow_id and str(existing["status"] or "") == "closed":
+            conn.close()
+            item = self._window_session_row(existing) or {}
+            item["status"] = "existing"
+            return item
+
+        conn.execute(
+            """
+            UPDATE window_sessions
+            SET closed_shadow_id = ?, status = 'closed', closed_at = ?, updated_at = ?
+            WHERE conversation_id = ?
+            """,
+            (safe_shadow_id, now, now, safe_conversation_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM window_sessions WHERE conversation_id = ?",
+            (safe_conversation_id,),
+        ).fetchone()
+        conn.close()
+        item = self._window_session_row(row) or {}
+        item["status"] = "closed"
+        return item
+
+    def claim_first_hook_prompt(
+        self,
+        *,
+        conversation_id: str,
+        profile_id: str = "",
+    ) -> dict[str, Any]:
+        """Atomically mark the first UserPromptSubmit-like hook for one window."""
+        safe_conversation_id = str(conversation_id or "").strip()
+        safe_profile_id = str(profile_id or "").strip()
+        if not safe_conversation_id:
+            return {"status": "invalid", "reason": "conversation_id_required", "is_first": False}
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if safe_profile_id:
+                row = conn.execute(
+                    "SELECT * FROM window_sessions WHERE conversation_id = ? AND profile_id = ?",
+                    (safe_conversation_id, safe_profile_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM window_sessions WHERE conversation_id = ?",
+                    (safe_conversation_id,),
+                ).fetchone()
+            if row is None:
+                conn.rollback()
+                return {"status": "invalid", "reason": "window_not_found", "is_first": False}
+            observed_at = str(row["first_hook_prompt_at"] or "").strip()
+            if observed_at:
+                conn.commit()
+                return {
+                    "status": "existing",
+                    "conversation_id": safe_conversation_id,
+                    "is_first": False,
+                    "observed_at": observed_at,
+                }
+            observed_at = self._utc_now()
+            conn.execute(
+                "UPDATE window_sessions SET first_hook_prompt_at = ?, updated_at = ? WHERE conversation_id = ?",
+                (observed_at, observed_at, safe_conversation_id),
+            )
+            conn.commit()
+            return {
+                "status": "claimed",
+                "conversation_id": safe_conversation_id,
+                "is_first": True,
+                "observed_at": observed_at,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def record_success(
         self,

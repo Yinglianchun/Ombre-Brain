@@ -17,6 +17,7 @@ logger = logging.getLogger("ombre_brain.portrait")
 
 
 PORTRAIT_SCOPES = ("user", "persona", "relationship")
+REVIEWED_PORTRAIT_SCOPES = ("user", "relationship")
 PATCH_KEYS = (
     "add_recent",
     "add_recent_activity",
@@ -67,15 +68,15 @@ PORTRAIT_PROMPT_TEMPLATE = """你是一个证据化记忆状态整理器，正�
       "confidence": 0.72
     }}
   ],
-  "rewrite_stable": [
+  "rewrite_stable": [],
+  "stable_candidate": [
     {{
       "scope": "user|persona|relationship",
-      "text": "长期稳定画像。必须是一整段，可在 previous_portrait.stable 基础上维护",
-      "evidence": [{{"bucket_id": "证据桶id"}}],
+      "text": "这几条证据可能共同指向的变化或稳定模式；只写候选提示，不写可直接发布的画像定稿",
+      "evidence": [{{"session_id": "独立窗影id", "role": "window_shadow"}}],
       "confidence": 0.82
     }}
   ],
-  "stable_candidate": [],
   "profile_fact_candidate": [],
   "skip": []
 }}
@@ -89,16 +90,15 @@ PORTRAIT_PROMPT_TEMPLATE = """你是一个证据化记忆状态整理器，正�
 - initial_run=true 时，add_recent 和 add_recent_activity 只放真正短期/当天或最近几天观察；高置信、能跨窗口携带的观察放入 move_to_staging。每个 scope 尽量给 1-3 条 move_to_staging，证据不足时少写。
 - rewrite_mid_term 只维护相对 previous_portrait.stable 的近期 delta：一句话说清最近仍在发生、尚未沉淀为长期判断的变化；不要复述 stable，不输出多条近似碎片，不把事件原文串起来。
 - initial_run=true 且 user 或 relationship 有足够证据时，优先给对应 scope 输出 rewrite_mid_term，让 handoff 主画像可用。
-- 每天都检查 user、persona、relationship 的 stable。stable_locked=true 的 scope 不得输出 rewrite_stable；未锁定且证据足以新增、修正或删除长期判断时，直接输出 rewrite_stable，不要只停在 stable_candidate。
-- rewrite_stable 把一个 scope 的长期画像维护成一整段，在 previous_portrait.stable 基础上增删改；只有跨多日反复出现或已经由 mid_term/staging 支撑、未来换窗仍有用时才写。没有实质变化时不要为了改写而改写。
-- 输出要克制：daily_summary 最多60字，add_recent 最多4条，add_recent_activity 最多3条，move_to_staging 最多8条，rewrite_mid_term 每个 scope 最多1条，rewrite_stable 每个 scope 最多1条；rewrite_mid_term text 最多80字，其他 text 最多160字。
+- 你无权改写 stable portrait；rewrite_stable 必须始终返回空数组。stable 只能由当前 {ai_name} 在读过候选与证据后亲自写 patch 推进。
+- stable_candidate 只写“这些证据可能形成某种变化”的模式提示，不写可直接替换 stable 的完整人格句子，不替 {ai_name} 定义自己。
+- stable_candidate 必须至少引用两份独立 window shadow，并且只允许从这些窗影长出；Scene、ProfileFact、日印象或单篇窗影都不能直接生成画像候选。user 候选只是 {ai_name} 对 {user_display_name} 的待审观察，不是已经确认的用户事实。
+- 输出要克制：daily_summary 最多60字，add_recent 最多4条，add_recent_activity 最多3条，move_to_staging 最多8条，rewrite_mid_term 每个 scope 最多1条，stable_candidate 每个 scope 最多1条；rewrite_mid_term text 最多80字，其他 text 最多160字。
 - profile_fact_candidate 只提候选，不确认、不写入长期 profile_fact。
-- stable_candidate 只提候选；如果证据足够更新 stable portrait，优先输出 rewrite_stable。
 - rewrite_mid_term 只能综合 staging_pool 里的观察，或本次明确 move_to_staging 的观察；当天新材料先进入 staging，再作为 mid-term 证据。
-- rewrite_stable 必须有 previous_portrait 或 staging/mid-term 证据支撑。
 - memory_materials 含路径、tags、created 日期、关键 moment/reflection 片段，以及 source_excerpt 原文短摘；优先读证据原味。
 - memory_materials.window_shadows 是 {ai_name} 在连续窗口末尾亲自留下的第一人称自述。它们不是普通记忆，也不能证明 {user_display_name} 的稳定事实；只允许支持 persona / relationship。persona 读“我是谁、我怎么思考和说话”，relationship 读“我们之间是什么、我们怎么相处”。
-- 单篇 window shadow 只能进入 recent/staging/mid-term；只有同一种自我选择或相处方式在多篇独立 window shadow 中反复出现，才可支持 stable。引用它时 evidence 使用 session_id，并标 role=window_shadow。
+- window shadow 只用于 stable_candidate，不进入 recent/staging/mid-term；只有同一种观察或相处方式在至少两篇独立 window shadow 中反复出现，才可形成待审候选。引用它时 evidence 使用 session_id，并标 role=window_shadow。
 - memory_materials 中的 allowed_scopes 是硬边界，evidence_scope_limits 也是历史证据的硬边界；有值时，该材料不能用于列表之外的 scope。relationship_weather / daily_impression 只能进入 relationship，自我锚点只能进入 persona。
 - evergreen=true 的材料是常驻长期证据，不代表今天发生了什么；不要据此生成 daily_summary 或 add_recent_activity。
 - 每条 add/rewrite/candidate 都必须带 evidence；没有证据就放 skip。
@@ -347,16 +347,18 @@ class DailyPortraitMaintainer:
             normalized_patch["daily_summary"] = ""
             self._demote_initial_old_recent(normalized_patch, materials)
         self._seed_missing_mid_terms(normalized_patch, state)
-        stable_rewrites, stable_rejected = await self._maintain_stables(
-            date_key,
-            state,
-            materials,
-            normalized_patch,
-            force_scopes=requested_scopes,
-        )
-        if stable_rewrites is not None:
-            normalized_patch["rewrite_stable"] = stable_rewrites
-        rejected.extend(stable_rejected)
+        # Automatic/model runs are candidate-only. Stable heads advance only
+        # through an authored/manual patch after the current Haven reviews the
+        # candidate and its evidence.
+        for item in normalized_patch.get("rewrite_stable", []) or []:
+            rejected.append(
+                {
+                    "key": "rewrite_stable",
+                    "reason": "authored_patch_required",
+                    "item": self._clip(str(item.get("text") or item), 160),
+                }
+            )
+        normalized_patch["rewrite_stable"] = []
         handoff_summaries = self._build_handoff_recent_summaries(
             materials,
             normalized_patch,
@@ -392,6 +394,7 @@ class DailyPortraitMaintainer:
                 "patch_counts": {key: len(normalized_patch.get(key, [])) for key in PATCH_KEYS},
                 "rejected_count": len(rejected),
                 "model": self.model if self.client else "deterministic-fallback",
+                "stable_write_policy": "authored_only",
             }
         )
         next_state["runs"] = next_state["runs"][-90:]
@@ -412,31 +415,18 @@ class DailyPortraitMaintainer:
                 "changed": after_revision > before_revisions[scope],
                 "stable_present": bool(str(scope_state.get("stable") or "").strip()),
             }
-        target_scopes = requested_scopes
-        unchanged_targets = [scope for scope in target_scopes if not generation[scope]["changed"]]
         status = "updated" if state.get("runs") else "initialized"
-        reason = ""
-        if unchanged_targets:
-            status = "blocked"
-            rejected_reasons = {
-                str(row.get("reason") or "")
-                for row in rejected
-                if isinstance(row, dict) and str(row.get("reason") or "")
-            }
-            if "generator_error" in rejected_reasons:
-                reason = "generator_error"
-            elif "missing_scope_decisions" in rejected_reasons:
-                reason = "missing_scope_decisions"
-            else:
-                reason = (
-                    "stable_not_generated"
-                    if any(not generation[scope]["stable_present"] for scope in unchanged_targets)
-                    else "stable_not_changed"
-                )
+        candidate_scopes = list(
+            dict.fromkeys(
+                str(item.get("scope") or "")
+                for item in normalized_patch.get("stable_candidate", []) or []
+                if isinstance(item, dict) and str(item.get("scope") or "") in PORTRAIT_SCOPES
+            )
+        )
         return {
             "status": status,
-            "reason": reason,
-            "scopes": unchanged_targets,
+            "reason": "",
+            "scopes": [],
             "date": date_key,
             "state_path": self.state_path,
             "initial": initial,
@@ -450,6 +440,8 @@ class DailyPortraitMaintainer:
             "forced_scopes": requested_scopes,
             "generation": generation,
             "before_stable_present": before_stable_present,
+            "candidate_scopes": candidate_scopes,
+            "stable_write_policy": "authored_only",
         }
 
     async def run_due(self, bucket_mgr, persona_engine=None) -> list[dict]:
@@ -949,6 +941,133 @@ class DailyPortraitMaintainer:
             "locked": bool(scope_state.get("stable_locked")),
         }
 
+    def read_reviewed_portrait(self, scope: str = "") -> dict:
+        """Read the complete review surface without publishing model prose."""
+        requested = str(scope or "").strip().lower()
+        if requested and requested not in REVIEWED_PORTRAIT_SCOPES:
+            return {"status": "invalid", "reason": "invalid_scope", "scope": requested}
+        state = self.load_state()
+        portrait = state.get("portrait", {}) if isinstance(state.get("portrait"), dict) else {}
+        scopes = [requested] if requested else list(REVIEWED_PORTRAIT_SCOPES)
+        candidates = state.get("stable_candidates", [])
+        if not isinstance(candidates, list):
+            candidates = []
+        result: dict[str, dict] = {}
+        for scope_name in scopes:
+            scope_state = portrait.get(scope_name, {})
+            if not isinstance(scope_state, dict):
+                scope_state = {}
+            stable = str(scope_state.get("stable") or "").strip()
+            source = str(scope_state.get("stable_source") or "").strip()
+            evidence_invalid = bool(scope_state.get("stable_evidence_invalid"))
+            result[scope_name] = {
+                "scope": scope_name,
+                "stable": stable,
+                "revision": int(scope_state.get("stable_revision") or 0),
+                "source": source,
+                "published": bool(
+                    stable
+                    and source in {"manual", "rollback"}
+                    and not evidence_invalid
+                ),
+                "locked": bool(scope_state.get("stable_locked")),
+                "updated_at": str(scope_state.get("stable_updated_at") or ""),
+                "evidence": deepcopy(scope_state.get("stable_evidence", []) or []),
+                "source_dates": list(scope_state.get("stable_source_dates", []) or []),
+                "evidence_invalid": evidence_invalid,
+                "mid_term": str(scope_state.get("mid_term") or "").strip(),
+                "mid_term_evidence": deepcopy(scope_state.get("mid_term_evidence", []) or []),
+                "recent_buffer": deepcopy(scope_state.get("recent_buffer", []) or []),
+                "staging_pool": deepcopy(scope_state.get("staging_pool", []) or []),
+                "candidate_materials": [
+                    deepcopy(row)
+                    for row in candidates
+                    if isinstance(row, dict)
+                    and str(row.get("scope") or "").strip() == scope_name
+                ],
+                "history": deepcopy(scope_state.get("stable_history", []) or []),
+            }
+        return {
+            "status": "ok",
+            "mode": "reviewed_portrait",
+            "scopes": result,
+            "updated_at": str(state.get("updated_at") or ""),
+            "publication_boundary": (
+                "Only manual or rollback heads are published. Model text remains candidate/history material."
+            ),
+        }
+
+    def publish_reviewed_portrait(
+        self,
+        scope: str,
+        text: str,
+        expected_revision: int,
+        evidence: Any,
+        *,
+        source_dates: Any = None,
+        locked: bool = True,
+    ) -> dict:
+        """Publish one Haven-authored User/Relationship head with provenance."""
+        state = self.load_state()
+        scope = str(scope or "").strip().lower()
+        if scope not in REVIEWED_PORTRAIT_SCOPES:
+            return {"status": "invalid", "reason": "invalid_scope", "scope": scope}
+        scope_state = state["portrait"][scope]
+        revision = int(scope_state.get("stable_revision") or 0)
+        try:
+            expected = int(expected_revision)
+        except (TypeError, ValueError):
+            return {"status": "invalid", "reason": "invalid_revision", "revision": revision}
+        if expected != revision:
+            return {"status": "conflict", "reason": "revision_mismatch", "revision": revision}
+        clean_text = str(text or "").strip()
+        if not clean_text:
+            return {"status": "invalid", "reason": "missing_text", "revision": revision}
+
+        normalized_evidence = self._normalize_evidence(evidence)
+        if not normalized_evidence:
+            normalized_evidence = self._dedupe_evidence(
+                scope_state.get("stable_evidence", []) or []
+            )
+        if not normalized_evidence:
+            return {"status": "invalid", "reason": "missing_evidence", "revision": revision}
+        normalized_dates = self._merge_source_dates(
+            scope_state.get("stable_source_dates", []),
+            source_dates,
+        )
+        changed = self._replace_stable(
+            scope_state,
+            text=clean_text,
+            evidence=normalized_evidence,
+            source_dates=normalized_dates,
+            source="manual",
+            basis_keys=self._scope_basis_keys(scope_state),
+        )
+        lock_changed = bool(scope_state.get("stable_locked")) != bool(locked)
+        scope_state["stable_locked"] = bool(locked)
+        if lock_changed and not changed:
+            scope_state["stable_updated_at"] = self._now_utc()
+        if not changed and not lock_changed:
+            return {
+                "status": "unchanged",
+                "scope": scope,
+                "revision": int(scope_state.get("stable_revision") or 0),
+                "source": str(scope_state.get("stable_source") or ""),
+                "locked": bool(scope_state.get("stable_locked")),
+                "evidence": deepcopy(scope_state.get("stable_evidence", []) or []),
+            }
+        state["updated_at"] = self._now_utc()
+        self.save_state(state)
+        return {
+            "status": "updated",
+            "scope": scope,
+            "revision": int(scope_state.get("stable_revision") or 0),
+            "source": str(scope_state.get("stable_source") or ""),
+            "locked": bool(scope_state.get("stable_locked")),
+            "evidence": deepcopy(scope_state.get("stable_evidence", []) or []),
+            "source_dates": list(scope_state.get("stable_source_dates", []) or []),
+        }
+
     def set_stable_lock(self, scope: str, locked: bool, expected_revision: int) -> dict:
         state = self.load_state()
         scope = str(scope or "").strip()
@@ -1046,6 +1165,20 @@ class DailyPortraitMaintainer:
         now = self._now_utc()
 
         if self._norm(incoming_text) == self._norm(current_text):
+            previous_snapshot = {
+                "revision": int(scope_state.get("stable_revision") or 0),
+                "text": current_text,
+                "evidence": self._dedupe_evidence(scope_state.get("stable_evidence", [])),
+                "source_dates": self._merge_source_dates(
+                    [], scope_state.get("stable_source_dates", [])
+                ),
+                "updated_at": str(scope_state.get("stable_updated_at") or ""),
+                "source": str(scope_state.get("stable_source") or ""),
+                "basis_keys": self._normalize_basis_keys(
+                    scope_state.get("stable_basis_keys", [])
+                ),
+                "evidence_invalid": bool(scope_state.get("stable_evidence_invalid")),
+            }
             merged_evidence = self._dedupe_evidence(
                 list(scope_state.get("stable_evidence", []) or []) + incoming_evidence
             )
@@ -1053,10 +1186,15 @@ class DailyPortraitMaintainer:
                 scope_state.get("stable_source_dates", []),
                 incoming_dates,
             )
+            manual_promotion = (
+                source in {"manual", "rollback"}
+                and str(scope_state.get("stable_source") or "") not in {"manual", "rollback"}
+            )
             metadata_changed = (
                 merged_evidence != list(scope_state.get("stable_evidence", []) or [])
                 or merged_dates != list(scope_state.get("stable_source_dates", []) or [])
                 or incoming_basis_keys != list(scope_state.get("stable_basis_keys", []) or [])
+                or manual_promotion
             )
             if metadata_changed:
                 scope_state["stable_evidence"] = merged_evidence
@@ -1065,7 +1203,14 @@ class DailyPortraitMaintainer:
                 scope_state["stable_basis_keys"] = incoming_basis_keys
                 scope_state["stable_evidence_invalid"] = False
                 scope_state["stable_updated_at"] = now
-            return False
+                if manual_promotion:
+                    revision = int(scope_state.get("stable_revision") or 0)
+                    history = list(scope_state.get("stable_history", []) or [])
+                    history.append(previous_snapshot)
+                    scope_state["stable_history"] = history[-self.stable_history_max :]
+                    scope_state["stable_revision"] = revision + 1
+                    scope_state["stable_source"] = source
+            return metadata_changed
 
         revision = int(scope_state.get("stable_revision") or 0)
         if current_text or revision > 0:
@@ -1225,10 +1370,13 @@ class DailyPortraitMaintainer:
             bucket_id = str(row.get("bucket_id") or "").strip()
             moment_id = str(row.get("moment_id") or "").strip()
             session_id = str(row.get("session_id") or "").strip()
+            narrative_id = str(row.get("narrative_id") or "").strip()
             if bucket_id:
                 keys.append(f"bucket:{bucket_id}:{moment_id}")
             elif session_id:
                 keys.append(f"session:{session_id}")
+            elif narrative_id:
+                keys.append(f"narrative:{narrative_id}")
         return sorted(set(keys))
 
     def _record_dismissal(
@@ -1337,10 +1485,24 @@ class DailyPortraitMaintainer:
     ) -> dict[str, Any]:
         state = self.load_state()
         portrait = state.get("portrait", {}) if isinstance(state.get("portrait"), dict) else {}
+
+        def published_scope(scope: str) -> str:
+            scope_state = portrait.get(scope, {})
+            if not isinstance(scope_state, dict):
+                return ""
+            # Legacy model-authored Stable text remains visible in the
+            # dashboard/history, but it is not allowed to define a new window.
+            # Manual edits and rollbacks are both authored review decisions.
+            if str(scope_state.get("stable_source") or "").strip() not in {"manual", "rollback"}:
+                return ""
+            if bool(scope_state.get("stable_evidence_invalid")):
+                return ""
+            return self._format_scope_block(scope_state)
+
         return {
-            "user": self._format_scope_block(portrait.get("user", {})),
-            "persona": self._format_scope_block(portrait.get("persona", {})),
-            "relationship": self._format_scope_block(portrait.get("relationship", {})),
+            "user": published_scope("user"),
+            "persona": published_scope("persona"),
+            "relationship": published_scope("relationship"),
             "current_focus": self._format_recent_activity_block(state, max_items=2, now=now),
             "recent_continuity": self._format_recent_continuity(state, max_items=max_recent_items),
             "state_path": self.state_path,
@@ -2100,6 +2262,21 @@ class DailyPortraitMaintainer:
             if str(item.get("bucket_id") or "")
         }
         current_session_ids = self._material_session_ids(materials)
+        window_shadow_session_ids = {
+            str(row.get("session_id") or "").strip()
+            for row in materials.get("window_shadows", []) or []
+            if isinstance(row, dict) and str(row.get("session_id") or "").strip()
+        }
+
+        def uses_window_shadow(item: dict | None) -> bool:
+            return bool(
+                item
+                and any(
+                    str(row.get("session_id") or "").strip() in window_shadow_session_ids
+                    for row in item.get("evidence", []) or []
+                    if isinstance(row, dict)
+                )
+            )
         portrait_bucket_ids, portrait_session_ids = self._portrait_evidence_sets(
             materials.get("previous_portrait", {})
         )
@@ -2131,6 +2308,9 @@ class DailyPortraitMaintainer:
                     evidence_session_ids=known_session_ids,
                     evidence_scope_limits=evidence_scope_limits,
                 )
+                if clean and uses_window_shadow(clean):
+                    clean = None
+                    reason = "window_shadow_candidate_only"
                 if clean:
                     normalized[key].append(clean)
                     if key == "move_to_staging":
@@ -2163,6 +2343,15 @@ class DailyPortraitMaintainer:
                     evidence_scope_limits=evidence_scope_limits,
                     missing_reason=missing_reason,
                 )
+                if clean and key == "stable_candidate" and not self._stable_candidate_evidence_is_eligible(
+                    clean,
+                    materials,
+                ):
+                    clean = None
+                    reason = "stable_candidate_needs_two_window_shadows"
+                elif clean and key != "stable_candidate" and uses_window_shadow(clean):
+                    clean = None
+                    reason = "window_shadow_candidate_only"
                 if clean:
                     normalized[key].append(clean)
                 else:
@@ -2300,11 +2489,31 @@ class DailyPortraitMaintainer:
         }
         if key in {"rewrite_mid_term", "rewrite_stable"} and self._portrait_text_too_stylized(clean["text"]):
             return None, "overstyled_portrait_text"
+        if key == "stable_candidate":
+            clean["candidate_kind"] = "pattern_hint"
         if key == "profile_fact_candidate":
             clean["profile_kind"] = self._safe_key(item.get("profile_kind") or item.get("kind") or "other")
             clean["predicate"] = self._safe_key(item.get("predicate") or "")
             clean["object"] = self._clip(str(item.get("object") or ""), 120)
         return clean, ""
+
+    @staticmethod
+    def _stable_candidate_evidence_is_eligible(item: dict, materials: dict) -> bool:
+        evidence = item.get("evidence", []) if isinstance(item, dict) else []
+        shadow_ids = {
+            str(row.get("session_id") or "").strip()
+            for row in materials.get("window_shadows", []) or []
+            if isinstance(row, dict) and str(row.get("session_id") or "").strip()
+        }
+        cited_shadow_ids = {
+            str(row.get("session_id") or "").strip()
+            for row in evidence or []
+            if isinstance(row, dict)
+            and str(row.get("session_id") or "").strip() in shadow_ids
+        }
+        if len(cited_shadow_ids) >= 2:
+            return True
+        return False
 
     def _demote_initial_old_recent(self, patch: dict, materials: dict) -> None:
         recent_bucket_ids, recent_session_ids = self._recent_material_evidence_ids(materials)
@@ -2374,27 +2583,15 @@ class DailyPortraitMaintainer:
             )
 
     def _seed_mid_term_summary(self, scope: str, rows: list[dict]) -> str:
-        texts = [self._clip(row.get("text") or "", 160) for row in rows[:4] if isinstance(row, dict)]
-        joined = " ".join(text for text in texts if text)
-        if not joined:
-            return ""
-        user_name = str(self.identity.get("user_display_name") or "用户")
-        ai_name = str(self.identity.get("ai_name") or "AI")
-        if scope == "user":
-            if re.search(r"(时间|时间戳|证据|准确|精度|边界|画像|handoff|换窗|语气|身份|一致|漂移)", joined, re.IGNORECASE):
-                return self._clip(f"{user_name}近期很在意记忆、语气和身份一致性的证据边界，倾向把换窗上下文压成准确、可追溯的核心状态。", 120)
-            if re.search(r"(熬夜|凌晨|很晚|睡觉|工作|调试|修复|测试|部署|Ombre|Haven-voice|bug)", joined, re.IGNORECASE):
-                return self._clip(f"{user_name}近期高强度推进 Ombre/Haven 相关调试，关注修复是否真实接入并生效。", 120)
-            return self._clip(f"{user_name}近期的注意力集中在证据化记忆和换窗连续性上，会主动校准模糊或失真的描述。", 120)
-        if scope == "relationship":
-            if re.search(r"(暗房|安全|边界|门口|不自动读取|私有)", joined, re.IGNORECASE):
-                return self._clip(f"{user_name}和{ai_name}近期在建立更安全的私密边界，关系重心是让记忆可保存但不被自动打扰。", 120)
-            if re.search(r"(换窗|醒来|暗号|称呼|连续|记得|还在|锚点|第一人称)", joined, re.IGNORECASE):
-                return self._clip(f"{user_name}和{ai_name}近期反复校准换窗连续性，关系重心是确认彼此仍在、语气和身份不漂移。", 120)
-            return self._clip(f"{user_name}和{ai_name}近期围绕记忆、身份和边界持续校准，关系基调是靠近与确认。", 120)
-        if re.search(r"(第一人称|锚点|回复|语气|姿态)", joined, re.IGNORECASE):
-            return self._clip(f"{ai_name}近期需要保持第一人称锚点和稳定回复姿态，先贴近{user_name}再处理机制。", 120)
-        return self._clip(f"{ai_name}近期的自我维护重点是稳定身份、语气和记忆边界。", 120)
+        _ = scope
+        texts = list(
+            dict.fromkeys(
+                self._clip(row.get("text") or "", 160)
+                for row in rows[:4]
+                if isinstance(row, dict) and str(row.get("text") or "").strip()
+            )
+        )
+        return self._clip("；".join(texts[:3]), 120) if texts else ""
 
     def _annotate_patch_source_dates(self, patch: dict, materials: dict) -> None:
         bucket_dates = {
@@ -3483,6 +3680,23 @@ class DailyPortraitMaintainer:
             or meta.get("type") == "archived"
         )
 
+    def _user_reference_pattern(self, *, include_first_person: bool = False) -> str:
+        values = [
+            self.identity.get("user_display_name"),
+            self.identity.get("user_name"),
+            *(self.identity.get("user_aliases") or []),
+            "她",
+            *(("我",) if include_first_person else ()),
+        ]
+        terms = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in values
+                if str(value or "").strip()
+            )
+        )
+        return "(?:" + "|".join(re.escape(term) for term in sorted(terms, key=len, reverse=True)) + ")"
+
     def _fallback_scope(self, bucket_payload: dict) -> str:
         tags = {str(tag).lower() for tag in bucket_payload.get("tags", []) or []}
         domains = {str(item).lower() for item in bucket_payload.get("domain", []) or []}
@@ -3501,7 +3715,7 @@ class DailyPortraitMaintainer:
             tags & {"project_event", "work_event", "task_event"}
             or domains & {"记忆系统", "代码", "工作", "项目", "开发", "ai", "memory"}
             or re.search(
-                r"(小雨|她).{0,18}(正在|最近在|继续|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做|关注|确认|在意)",
+                rf"{self._user_reference_pattern()}.{{0,18}}(正在|最近在|继续|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做|关注|确认|在意)",
                 text,
             )
         ):
@@ -3563,7 +3777,7 @@ class DailyPortraitMaintainer:
         )
         activity_like = bool(
             re.search(
-                r"(小雨|她|我).{0,12}(最近在|这几天在|这两天在|正在|继续|开始|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做)",
+                rf"{self._user_reference_pattern(include_first_person=True)}.{{0,12}}(最近在|这几天在|这两天在|正在|继续|开始|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做)",
                 text,
             )
             or re.search(r"(最近在|这几天在|这两天在|正在).{0,16}(推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做)", text)
@@ -3748,6 +3962,7 @@ class DailyPortraitMaintainer:
                         "bucket_id": str(item.get("bucket_id") or item.get("id") or "").strip(),
                         "moment_id": str(item.get("moment_id") or "").strip(),
                         "session_id": str(item.get("session_id") or "").strip(),
+                        "narrative_id": str(item.get("narrative_id") or "").strip(),
                     }
                     role = str(item.get("role") or "").strip().lower()
                     if role in {"self_anchor", "self_identity", "window_shadow"}:
@@ -3791,6 +4006,8 @@ class DailyPortraitMaintainer:
                 labels.append(label)
             elif row.get("session_id"):
                 labels.append(f"session_id:{row['session_id']}")
+            elif row.get("narrative_id"):
+                labels.append(f"narrative_id:{row['narrative_id']}")
         return ", ".join(labels)
 
     def _state_path(self, configured: Any) -> str:

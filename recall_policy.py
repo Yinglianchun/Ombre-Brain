@@ -503,8 +503,6 @@ RELATIONSHIP_BACKGROUND_QUERY_FILLERS = frozenset(
         "你们",
         "他们",
         "她们",
-        "小雨",
-        "haven",
         "哥哥",
         "老公",
         "老婆",
@@ -1317,6 +1315,7 @@ class RecallPolicy:
         semantic_threshold: float = 0.72,
         rerank_threshold: float = 0.65,
         ai_reaction_names: list[str] | tuple[str, ...] | None = None,
+        relationship_names: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self.options = options or memory_relevance_options_from_config()
         self.semantic_threshold = _safe_float(semantic_threshold, 0.72)
@@ -1324,6 +1323,14 @@ class RecallPolicy:
         self.ai_reaction_names = self._normalize_reaction_names(
             ai_reaction_names if ai_reaction_names is not None else [identity_names().get("ai_name")]
         )
+        default_relationship_names = identity_names().get("relationship_terms") or []
+        self.relationship_names = self._normalize_recall_context_terms(
+            relationship_names if relationship_names is not None else default_relationship_names
+        )
+        self.relationship_background_fillers = {
+            *RELATIONSHIP_BACKGROUND_QUERY_FILLERS,
+            *self.relationship_names,
+        }
         self.recall_context_terms = self._normalize_recall_context_terms(
             [*self.options.context_terms, *GENERIC_RECALL_CONTEXT_TERMS]
         )
@@ -1379,6 +1386,7 @@ class RecallPolicy:
             for term in locatable_terms
             if str(term or "").strip() and self._compact_entity_keyword(term)
         ]
+        terms = [term for term in terms if not self._axis_term_is_explicitly_negated(query, term)]
         if not terms:
             return (), (), False
         if self._short_taste_query_terms(query):
@@ -1437,7 +1445,23 @@ class RecallPolicy:
     @staticmethod
     def _query_has_multi_axis_marker(query: str) -> bool:
         text = str(query or "")
-        return any(marker in text for marker in (" 和 ", " 与 ", " 以及 ", " 还有 ", "和", "与", "以及", "还有", "、", "，", ",", "/", "|"))
+        return any(marker in text for marker in (" 和 ", " 与 ", " 以及 ", " 还有 ", "和", "与", "以及", "还有", "、", "/", "|"))
+
+    @classmethod
+    def _axis_term_is_explicitly_negated(cls, query: str, term: str) -> bool:
+        query_key = cls._compact_entity_keyword(query)
+        term_key = cls._compact_entity_keyword(term)
+        if not query_key or not term_key:
+            return False
+        start = 0
+        while True:
+            index = query_key.find(term_key, start)
+            if index < 0:
+                return False
+            prefix = query_key[max(0, index - 8):index]
+            if re.search(r"(?:没有|并没有|并未|未曾|没|未|不曾)(?:写|填|标|注明|包含|提到|给出|留下|留)?$", prefix):
+                return True
+            start = index + max(1, len(term_key))
 
     def _relation_axis_groups(
         self,
@@ -1879,7 +1903,7 @@ class RecallPolicy:
         compact = self._compact_marker_text(text)
         if any(self._marker_in_text(marker, text, compact) for marker in RELATIONSHIP_QUERY_INTENT_MARKERS):
             return True
-        names = ("我", "你", "哥哥", "老公", "老婆", "haven", "小雨")
+        names = ("我", "你", "哥哥", "老公", "老婆", *self.relationship_names)
         people = "|".join(re.escape(name) for name in names)
         return bool(
             re.search(rf"(爱|喜欢)({people})", compact)
@@ -1918,7 +1942,7 @@ class RecallPolicy:
             return False
         if self._is_recall_context_term(key):
             return False
-        if key in RELATIONSHIP_BACKGROUND_QUERY_FILLERS or compact in RELATIONSHIP_BACKGROUND_QUERY_FILLERS:
+        if key in self.relationship_background_fillers or compact in self.relationship_background_fillers:
             return False
         if key in WEAK_RECALL_TOPIC_TERMS or compact in WEAK_RECALL_TOPIC_TERMS:
             return False

@@ -303,6 +303,9 @@ class BucketManager:
         except Exception as e:
             logger.warning(f"Failed to load bucket for update / 加载桶失败: {file_path}: {e}")
             return False
+        if bool(post.get("source_record_immutable", False)):
+            logger.warning("Refused immutable source record update / 拒绝修改不可变来源记录: %s", bucket_id)
+            return False
 
         # --- Pinned/protected buckets: lock importance to 10, ignore importance changes ---
         # --- 钉选/保护桶：importance 不可修改，强制保持 10 ---
@@ -565,10 +568,14 @@ class BucketManager:
             return False
 
         try:
+            post = frontmatter.load(file_path)
+            if bool(post.get("source_record_immutable", False)):
+                logger.warning("Refused immutable source record deletion / 拒绝删除不可变来源记录: %s", bucket_id)
+                return False
             tombstone = self._build_tombstone(bucket_id, file_path)
             os.remove(file_path)
             self._write_tombstone(tombstone)
-        except OSError as e:
+        except Exception as e:
             logger.error(f"Failed to delete bucket file / 删除桶文件失败: {file_path}: {e}")
             return False
 
@@ -1347,6 +1354,9 @@ class BucketManager:
         try:
             # Read once, get domain info and update type / 一次性读取
             post = frontmatter.load(file_path)
+            if bool(post.get("source_record_immutable", False)):
+                logger.warning("Refused immutable source record archive / 拒绝归档不可变来源记录: %s", bucket_id)
+                return False
             domain = post.get("domain", ["未分类"])
             if not isinstance(domain, list):
                 domain = [domain]

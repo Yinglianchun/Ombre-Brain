@@ -11,6 +11,19 @@
 # streamable-http: 远程使用（标准 HTTP，对隧道/CDN/代理友好）
 transport: "stdio"
 
+# --- MCP tool surface / MCP 工具面 ---
+# daily advertises only the eight ordinary memory actions. Legacy/admin tools
+# remain directly callable by exact name for existing Bridge jobs and rollback.
+# Set legacy (or OMBRE_MCP_TOOL_SURFACE=legacy) to advertise the full old table.
+mcp:
+  tool_surface: "daily"
+
+# --- Memory object write retirement / 旧记忆对象停止新增 ---
+# Old feel/whisper/daily-impression/ProfileFact data remains readable. This
+# switch exists only as a reversible compatibility escape hatch.
+memory_objects:
+  legacy_writes_enabled: false       # env rollback: OMBRE_LEGACY_MEMORY_WRITES=1
+
 # --- Log level / 日志级别 ---
 log_level: "INFO"
 
@@ -44,20 +57,14 @@ identity:
 merge_threshold: 90
 
 # --- Import safety / 大文件导入安全 ---
-# Conversation-history import defaults to smaller chunks and no automatic merge.
-# 对话历史导入默认小窗处理，且不自动合并，避免大文件把无关记忆揉成一个桶。
+# Conversation-history import uses smaller chunks and never merges imported memories.
+# 对话历史导入使用小窗处理；不同记忆永不合并，只跳过同文或近同文重复项。
 import:
   chunk_target_tokens: 3500          # smaller than old 10k windows to reduce mixed-topic chunks
   extract_max_input_chars: 0         # 0 = do not hard-truncate; rely on chunking
   max_items_per_chunk: 5
   max_tags: 6
   max_tag_chars: 12
-  auto_merge_enabled: false          # exact/safe duplicate skip still runs
-  merge_threshold: 90
-  merge_min_content_similarity: 99
-  merge_require_domain_overlap: true
-  merge_require_source_match: true
-  merge_block_disjoint_dates: true
   operit_tagging_enabled: true        # raw entries land first; model tagging runs afterward
   operit_tagging_concurrency: 2       # bounded worker count; never fan out the whole backup
   operit_tagging_max_attempts: 3      # total attempts per entry, including the first call
@@ -285,17 +292,20 @@ moment_annotations:
 gateway:
   host: "0.0.0.0"
   port: 8010
-  default_session_id: "main"      # used only by compatible routes when the header is omitted
+  default_session_id: "main"      # stable transport alias; Gateway rotates internal window epochs after close_window
+  handoff_breath_url: "http://127.0.0.1:8000/breath-hook"  # Brain's private startup-package endpoint
+  handoff_max_tokens: 1400         # reviewed portraits + exact 250–400-char handoff note + small unfinished items
+  handoff_timeout_seconds: 3
   upstream_base_url: "https://api.openai.com/v1"
   upstream_default_model: "gpt-4.1-mini"
   upstream_models:
     - "gpt-4.1-mini"
     - "gpt-4.1"
   # Optional prompt cache hints / 可选提示缓存参数
-  # openai: send prompt_cache_key using X-Ombre-Session-Id; leave empty for other providers.
+  # openai: send prompt_cache_key using the resolved conversation id; leave empty for other providers.
   # anthropic: send top-level cache_control for proxies that require it.
   # anthropic_explicit: put cache_control on system/tools/prior assistant history.
-  # openai: 使用 X-Ombre-Session-Id 发送 prompt_cache_key；
+  # openai: X-Ombre-Conversation-Id is an optional explicit window id; fixed X-Ombre-Session-Id also works.
   # anthropic: 给只认顶层 cache_control 的中转站使用；
   # anthropic_explicit: 在 system/tools/上一条 assistant 历史上显式打断点。
   prompt_cache: "openai"
@@ -377,6 +387,7 @@ gateway:
   recalled_memory_budget: 900
   direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
   retrieval_mode: graph       # default: direct Scene recall plus bounded Scene-edge diffusion
+  scene_native_recall_enabled: false # opt-in/reversible: true enables native Scene + legacy bridge dual graph
   operit_context_rewrite_enabled: false # Operit-only text turn cleanup: split stable/activity attachment context before forwarding
   bucket_list_cache_ttl_seconds: 300 # cache active bucket list inside Gateway; 0 disables
   portrait_memory_enabled: true  # read-only stable portrait cache from profile_fact by default
@@ -402,7 +413,7 @@ gateway:
   favorite_memory_max_cards: 1
   related_memory_budget: 220
   core_memory_interval_rounds: 0
-  current_inner_state_interval_rounds: 0
+  current_inner_state_interval_rounds: 15 # compare the latest 15 rounds; inject nothing without a clear net change
   relationship_weather_interval_rounds: 0
   favorite_memory_interval_rounds: 0
   word_map_hint_enabled: false       # true lets derived Word Map add weak recall candidates; still gated by RecallPolicy
@@ -567,8 +578,8 @@ memory_relevance:
   section_hints: {}
 
 # --- Persona State Engine / 人格状态引擎 ---
-# Tracks slow personality drift, relationship state, and per-session affect.
-# 追踪缓慢人格变化、关系状态，以及按会话保存的短期情绪。
+# Tracks relationship state and per-session affect. Personality drift is retired.
+# 追踪关系状态，以及按会话保存的短期情绪；不再数值化人格变化。
 persona:
   enabled: true
   profile_id: "main_profile"
@@ -583,26 +594,30 @@ persona:
   max_tokens: 500
   global_decay_hours: 168
   session_mood_half_life_minutes: 90
-  max_personality_delta: 0.01
   max_relationship_delta: 0.03
   max_affect_delta: 0.18
   # Recent Persona Events is a sparse log, not a per-message transcript.
-  # Strong relationship/personality/affect signals write immediately; ordinary turns batch.
+  # Evaluate numeric state once per N successful Gateway rounds.
+  evaluation_interval_rounds: 3
+  state_change_window_rounds: 15
+  state_change_min_abs: 0.08       # inject only the single strongest meaningful change
+  # Strong relationship/affect signals write immediately; ordinary evaluated turns batch.
   # Turn this off to keep evaluating numeric state without writing persona_events.
   event_recording_enabled: true
-  event_batch_size: 2
+  event_batch_size: 1             # one event opportunity per 3-round evaluation
   event_affect_total_threshold: 0.45
   event_affect_single_threshold: 0.14
   event_similarity_threshold: 0.82
   event_force_after_minutes: 30
   event_excerpt_chars: 220          # short evidence snippets for future date traces, not full transcripts
   evaluation_context_turns: 3       # previous same-session turns sent to the post-reply Persona evaluator
-  initial_personality:
-    openness: 0.56
-    conscientiousness: 0.50
-    extraversion: 0.44
-    agreeableness: 0.66
-    neuroticism: 0.36
+  # Optional pre-reply conflict scout. It is read-only and fail-soft: on a
+  # confident conflict/withdrawal signal it injects one private anti-retreat
+  # reminder, never a reply script or an action decision.
+  conflict_nudge_enabled: false
+  conflict_nudge_context_turns: 3
+  conflict_nudge_min_confidence: 0.55
+  conflict_nudge_timeout_seconds: 4
   initial_relationship:
     affinity: 0.86
     dominance: 0.38
@@ -616,6 +631,7 @@ persona:
     longing: 0.34
     security: 0.68
     protective_drive: 0.52
+    libido: 0.18                 # tone temperature only; never action or consent inference
     mood_label: "warm_neutral"
     session_defensiveness: 0.12
     residue: ""
@@ -630,7 +646,7 @@ persona:
 reflection:
   enabled: true
   auto_enabled: true
-  daily_enabled: true              # daily relationship-weather impressions; persona_events only supplement
+  daily_enabled: false             # retired legacy relationship-weather writes; old data remains readable
   enrich_on_write: true
   memory_affect_anchor_enabled: false     # legacy compatibility only; new writes do not append affect_anchor sections
   relationship_weather_affect_anchor_enabled: false  # legacy compatibility only; feel content stays body-only
@@ -644,9 +660,9 @@ reflection:
   temperature: 0.1
   max_tokens: 700
   timezone: "Asia/Shanghai"
-  daily_hour: 4                   # generate daily impression after this local hour
-  daily_min_memory_items: 5        # ordinary memory/update items required before daily impression writes
-  daily_conversation_turn_limit: 12 # small short-term turn window for daily impression material
+  daily_hour: 4                   # legacy rollback only (OMBRE_LEGACY_MEMORY_WRITES=1)
+  daily_min_memory_items: 5        # legacy rollback only
+  daily_conversation_turn_limit: 12 # legacy rollback only
   daily_chat_memory_mode: review   # review = pending candidates; auto = write selected Gateway chat memories; off = disabled
   daily_chat_memory_hour: 0        # organize the previous day's Gateway chats after local midnight
   daily_chat_memory_turn_limit: 0  # 0 = use all raw_events for that date; >0 caps restored turns
@@ -665,12 +681,16 @@ reflection:
   daily_chat_memory_summary_max_tokens: 2200
   daily_chat_memory_candidate_model: ""
   daily_chat_memory_candidate_max_tokens: 3200
+  # Optional deployment-owned semantic cues. Keep project/topic vocab here,
+  # not in ReflectionEngine code. Example: {"Project X": ["project-x", "项目X"]}
+  daily_chat_memory_entity_hints: {}
+  daily_chat_memory_topic_hints: {}
   daily_activity_summary_enabled: true      # writes one "what happened today" item into portrait recent_timeline
   daily_activity_summary_turn_limit: 0      # 0 = use all raw_events for that date; not sourced from auto-memory candidates
   daily_activity_summary_max_tokens: 320
   persona_events_limit: 12         # selected and deduped; persona events supplement daily weather only
   persona_events_scan_limit: 80
-  weekly_enabled: false            # weekly impressions are off by default; daily impressions remain
+  weekly_enabled: false            # retired legacy weekly impression writes
   weekly_day: 0                   # 0=Monday, 6=Sunday; auto run writes the previous week
   weekly_hour: 4
   check_interval_minutes: 60
@@ -686,9 +706,9 @@ reflection:
     shared: {}                     # e.g. terms that count as overlap but do not decide edge direction
   diary_mcp_url: ""               # optional diary MCP URL, e.g. http://127.0.0.1:8000/mcp
   diary_mcp_token_env: ""         # optional bearer token env var name, e.g. MCP_BEARER_TOKEN
-  diary_memory_extract_enabled: true
-  diary_memory_extract_max_per_day: 1
-  diary_memory_extract_min_confidence: 0.68
+  # 日记压缩成 diary_memory_* 的旧写路径已退休。
+  # 需要把日记用于证据时，显式调用 import_diary_source；它保存逐字原文与 sha256，
+  # 不调用模型、不生成普通记忆，也不参与普通召回。
   # Env vars:
   #   OMBRE_REFLECTION_API_KEY
   #   OMBRE_REFLECTION_BASE_URL
@@ -778,6 +798,16 @@ portrait:
   candidate_max: 40
   # Env vars:
   #   OMBRE_PORTRAIT_API_KEY
+
+# --- Narrative Rolls / 叙事卷 ---
+# A manually published typed projection layer. Each revision preserves the exact
+# reviewed Markdown and verifies its Scene sources. It is not a bucket pool.
+narrative_rolls:
+  registry_path: ""                    # empty = state_dir/narrative_rolls/registry.json; keep private narrative data out of Git
+  documents_dir: ""                   # empty = registry sibling revisions/; immutable Haven-authored revision files
+  shadow_admission_enabled: true   # keep candidate/admission evidence in recall debug
+  live_injection_enabled: true     # strong gate injects one authored body; weak/ambiguous matches stay out
+  ambiguity_margin: 10             # tied strong rolls remain index-only and do not inject a body
 
 # --- Night dream worker / 夜梦 ---
 # Generates latent dreams in the background. Dashboard lists their metadata first,

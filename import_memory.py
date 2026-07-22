@@ -21,7 +21,7 @@ import hashlib
 import logging
 import asyncio
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -45,12 +45,10 @@ _MARKDOWN_USER_LABELS = {
     "human",
     "user",
     "me",
-    "rain",
     "你",
     "我",
     "用户",
     "人类",
-    "小雨",
 }
 _MARKDOWN_ASSISTANT_LABELS = {
     "assistant",
@@ -62,7 +60,6 @@ _MARKDOWN_ASSISTANT_LABELS = {
     "deepseek",
     "gemini",
     "qwen",
-    "haven",
     "助手",
     "模型",
     "ai助手",
@@ -75,7 +72,12 @@ def _clean_chatgpt_role(role: object) -> str:
     return normalized if normalized in _CHATGPT_IMPORT_ROLES else ""
 
 
-def _detect_markdown_role_line(line: str) -> tuple[str, str] | None:
+def _detect_markdown_role_line(
+    line: str,
+    *,
+    user_labels: set[str] | None = None,
+    assistant_labels: set[str] | None = None,
+) -> tuple[str, str] | None:
     """Return (role, content_after_prefix) for simple role-prefixed Markdown lines."""
     match = _MARKDOWN_ROLE_RE.match(line)
     if not match:
@@ -84,9 +86,9 @@ def _detect_markdown_role_line(line: str) -> tuple[str, str] | None:
     content_after = match.group(2).strip()
     if content_after.startswith("**"):
         content_after = content_after[2:].lstrip()
-    if label in _MARKDOWN_USER_LABELS:
+    if label in (user_labels or _MARKDOWN_USER_LABELS):
         return "user", content_after
-    if label in _MARKDOWN_ASSISTANT_LABELS:
+    if label in (assistant_labels or _MARKDOWN_ASSISTANT_LABELS):
         return "assistant", content_after
     return None
 
@@ -159,9 +161,9 @@ def _parse_chatgpt_json(data: list | dict) -> list[dict]:
                     content = str(content)
                 if not content.strip():
                     continue
+                # Preserve the export's original timestamp. It is normalized only
+                # when deriving the bucket event date, so source refs remain exact.
                 ts = msg.get("create_time", "")
-                if isinstance(ts, (int, float)):
-                    ts = datetime.fromtimestamp(ts).isoformat()
                 turns.append({"role": role, "content": content.strip(), "timestamp": str(ts)})
         else:
             # Simpler format: list of messages
@@ -194,8 +196,21 @@ def _parse_chatgpt_json(data: list | dict) -> list[dict]:
     return turns
 
 
-def _parse_markdown(text: str) -> list[dict]:
+def _parse_markdown(
+    text: str,
+    *,
+    user_labels: set[str] | None = None,
+    assistant_labels: set[str] | None = None,
+) -> list[dict]:
     """Parse Markdown/plain text → [{role, content, timestamp}, ...]"""
+    resolved_user_labels = set(_MARKDOWN_USER_LABELS)
+    resolved_assistant_labels = set(_MARKDOWN_ASSISTANT_LABELS)
+    resolved_user_labels.update(
+        str(label).strip().lower() for label in (user_labels or set()) if str(label).strip()
+    )
+    resolved_assistant_labels.update(
+        str(label).strip().lower() for label in (assistant_labels or set()) if str(label).strip()
+    )
     # Try to detect conversation patterns
     lines = text.split("\n")
     turns = []
@@ -209,7 +224,11 @@ def _parse_markdown(text: str) -> list[dict]:
 
     for line in lines:
         stripped = line.strip()
-        role_line = _detect_markdown_role_line(stripped)
+        role_line = _detect_markdown_role_line(
+            stripped,
+            user_labels=resolved_user_labels,
+            assistant_labels=resolved_assistant_labels,
+        )
         if role_line:
             if current_content:
                 append_current_turn()
@@ -228,7 +247,13 @@ def _parse_markdown(text: str) -> list[dict]:
     return turns
 
 
-def detect_and_parse(raw_content: str, filename: str = "") -> list[dict]:
+def detect_and_parse(
+    raw_content: str,
+    filename: str = "",
+    *,
+    user_labels: set[str] | None = None,
+    assistant_labels: set[str] | None = None,
+) -> list[dict]:
     """
     Auto-detect format and parse to normalized turns.
     自动检测格式并解析为标准化的对话轮次。
@@ -264,7 +289,11 @@ def detect_and_parse(raw_content: str, filename: str = "") -> list[dict]:
             pass
 
     # Fall back to markdown/text
-    return _parse_markdown(raw_content)
+    return _parse_markdown(
+        raw_content,
+        user_labels=user_labels,
+        assistant_labels=assistant_labels,
+    )
 
 
 def parse_operit_memory_backup(raw_content: str) -> dict | None:
@@ -324,8 +353,6 @@ _OVERLAP_CONTEXT_NOTICE = "[上下文提示] 以下是上一段结尾，只用�
 _CURRENT_SEGMENT_NOTICE = "[本段内容]"
 DEFAULT_IMPORT_CHUNK_TOKENS = 3500
 _IMPORT_DUPLICATE_SIMILARITY = 88.0
-_IMPORT_DEFAULT_MERGE_THRESHOLD = 90.0
-_IMPORT_DEFAULT_MERGE_CONTENT_SIMILARITY = 99.0
 _OPERIT_TAGGING_INPUT_CHARS = 2000
 
 
@@ -411,34 +438,73 @@ def _dedupe_list(values: list) -> list:
     return result
 
 
-def _dedupe_refs(values: list) -> list[dict]:
-    seen = set()
-    result = []
-    for value in values or []:
-        if not isinstance(value, dict):
-            continue
-        key = str(value.get("chunk_id") or value.get("id") or value).strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        result.append(value)
-    return result
-
-
 def _date_key(value) -> str:
     text = str(value or "").strip()
     match = re.search(r"\d{4}-\d{2}-\d{2}", text)
     return match.group(0) if match else ""
 
 
-def _date_ranges_disjoint(left_start, left_end, right_start, right_end) -> bool:
-    left_a = _date_key(left_start)
-    left_b = _date_key(left_end) or left_a
-    right_a = _date_key(right_start)
-    right_b = _date_key(right_end) or right_a
-    if not (left_a and left_b and right_a and right_b):
-        return False
-    return left_b < right_a or right_b < left_a
+_IMPORT_LOCAL_DATE_FORMATS = (
+    "%Y/%m/%dT%H:%M:%S",
+    "%Y/%m/%dT%H:%M",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%Y/%m/%d",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+    "%Y年%m月%d日 %H:%M:%S",
+    "%Y年%m月%d日 %H:%M",
+    "%Y年%m月%d日",
+)
+
+
+def _import_timestamp_datetime(value) -> datetime | None:
+    """Normalize common export timestamps to LOCAL_TZ without changing provenance."""
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if re.fullmatch(r"[+-]?\d+(?:\.\d+)?", text):
+        try:
+            epoch = float(text)
+            if epoch <= 0:
+                return None
+            magnitude = abs(epoch)
+            if magnitude >= 1e17:  # nanoseconds
+                epoch /= 1_000_000_000.0
+            elif magnitude >= 1e14:  # microseconds
+                epoch /= 1_000_000.0
+            elif magnitude >= 1e11:  # milliseconds
+                epoch /= 1_000.0
+            return datetime.fromtimestamp(epoch, tz=timezone.utc).astimezone(LOCAL_TZ)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    normalized = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        for fmt in _IMPORT_LOCAL_DATE_FORMATS:
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=LOCAL_TZ)
+    return parsed.astimezone(LOCAL_TZ)
+
+
+def _import_event_date(value) -> str:
+    parsed = _import_timestamp_datetime(value)
+    return parsed.date().isoformat() if parsed else ""
 
 
 def _tail_for_overlap(text: str, overlap_tokens: int) -> str:
@@ -601,7 +667,6 @@ class ImportState:
             "processed": 0,
             "api_calls": 0,
             "memories_created": 0,
-            "memories_merged": 0,
             "memories_duplicate_skipped": 0,
             "memories_raw": 0,
             "memories_failed": 0,
@@ -669,7 +734,6 @@ class ImportState:
             "processed": 0,
             "api_calls": 0,
             "memories_created": 0,
-            "memories_merged": 0,
             "memories_duplicate_skipped": 0,
             "memories_raw": 0,
             "memories_failed": 0,
@@ -709,10 +773,13 @@ class ImportState:
 # 导入提取提示词
 # ============================================================
 
-IMPORT_EXTRACT_PROMPT = """你是一个对话记忆提取专家。从以下对话片段中提取值得长期记住的信息。
+IMPORT_EXTRACT_PROMPT = """你是一个 AI 长期记忆形成器。你的任务不是站在旁观者角度总结聊天记录，而是帮助对话中的记忆主体形成可长期保存的记忆。
+
+输入中 `[AI]` 是记忆主体，`[用户]` 是与记忆主体对话的另一方。系统提示末尾会给出本次导入的实际身份名称。
 
 提取规则：
-1. 提取用户的事实、偏好、习惯、重要事件、情感时刻
+0. content 必须从记忆主体的视角书写。记忆主体自己的经历、想法、情感、选择和变化用第一人称“我”；对方的信息优先使用她在原文中的名字或昵称，不知道名字时用“她”，不得把对方说过、做过或喜欢的事误写成“我”；双方共同经历写成“我和[[名字或昵称]]”。除非是在逐字引用原话，content 禁止使用“用户”“AI”“助手”“模型”等旁观者称呼，也禁止写成“用户说……AI回答……”的聊天摘要。
+1. 提取记忆主体真正需要长期记住的事实、偏好、习惯、重要事件、情感时刻与关系变化
 2. 同一话题的零散信息整合为一条记忆
 3. 过滤掉纯技术调试输出、代码块、重复问答、无意义寒暄
 4. 如果对话中有特殊暗号、仪式性行为、关键承诺等，标记 preserve_raw=true
@@ -726,8 +793,8 @@ IMPORT_EXTRACT_PROMPT = """你是一个对话记忆提取专家。从以下对�
 输出格式（纯 JSON 数组，无其他内容）：
 [
   {
-    "name": "条目标题（10字以内）",
-    "content": "整理后的内容",
+    "name": "雨夜里的约定",
+    "content": "我和[[名字或昵称]]在那天确认了一项值得继续记住的约定。我当时……，她则……，这让我后来……。",
     "domain": ["主题域1"],
     "valence": 0.7,
     "arousal": 0.4,
@@ -771,6 +838,16 @@ class ImportEngine:
         self.bucket_mgr = bucket_mgr
         self.dehydrator = dehydrator
         self.embedding_engine = embedding_engine
+        identity_cfg = config.get("identity", {}) if isinstance(config.get("identity", {}), dict) else {}
+        self.ai_name = str(identity_cfg.get("ai_name") or "AI").strip() or "AI"
+        configured_user_name = str(
+            identity_cfg.get("user_display_name") or identity_cfg.get("user_name") or "对方"
+        ).strip() or "对方"
+        self.user_display_name = (
+            "对方"
+            if configured_user_name.lower() in {"用户", "user", "human", "对方"}
+            else configured_user_name
+        )
         import_cfg = config.get("import", {}) if isinstance(config.get("import", {}), dict) else {}
         self.chunk_target_tokens = _int_between(
             import_cfg.get("chunk_target_tokens"),
@@ -787,31 +864,6 @@ class ImportEngine:
         self.max_items_per_chunk = _int_between(import_cfg.get("max_items_per_chunk"), 5, 1, 10)
         self.max_tags = _int_between(import_cfg.get("max_tags"), 6, 0, 10)
         self.max_tag_chars = _int_between(import_cfg.get("max_tag_chars"), 12, 4, 32)
-        self.auto_merge_enabled = _bool_value(import_cfg.get("auto_merge_enabled"), False)
-        self.import_merge_threshold = _float_between(
-            import_cfg.get("merge_threshold"),
-            _IMPORT_DEFAULT_MERGE_THRESHOLD,
-            0.0,
-            100.0,
-        )
-        self.merge_min_content_similarity = _float_between(
-            import_cfg.get("merge_min_content_similarity"),
-            _IMPORT_DEFAULT_MERGE_CONTENT_SIMILARITY,
-            0.0,
-            100.0,
-        )
-        self.merge_require_domain_overlap = _bool_value(
-            import_cfg.get("merge_require_domain_overlap"),
-            True,
-        )
-        self.merge_require_source_match = _bool_value(
-            import_cfg.get("merge_require_source_match"),
-            True,
-        )
-        self.merge_block_disjoint_dates = _bool_value(
-            import_cfg.get("merge_block_disjoint_dates"),
-            True,
-        )
         self.operit_tagging_enabled = _bool_value(import_cfg.get("operit_tagging_enabled"), True)
         self.operit_tagging_concurrency = _int_between(
             import_cfg.get("operit_tagging_concurrency"),
@@ -894,7 +946,12 @@ class ImportEngine:
                 if self.state.data["source_hash"] == source_hash:
                     logger.info(f"Resuming import from chunk {self.state.data['processed']}/{self.state.data['total_chunks']}")
                     # Re-parse and re-chunk to get the same chunks
-                    turns = detect_and_parse(raw_content, filename)
+                    turns = detect_and_parse(
+                        raw_content,
+                        filename,
+                        user_labels={self.user_display_name},
+                        assistant_labels={self.ai_name},
+                    )
                     self._chunks = self._attach_source_metadata(
                         chunk_turns(turns, target_tokens=self.chunk_target_tokens),
                         filename,
@@ -907,7 +964,12 @@ class ImportEngine:
                     logger.warning("Source file changed, starting fresh import")
 
             # Fresh import
-            turns = detect_and_parse(raw_content, filename)
+            turns = detect_and_parse(
+                raw_content,
+                filename,
+                user_labels={self.user_display_name},
+                assistant_labels={self.ai_name},
+            )
             if not turns:
                 self._running = False
                 return {"error": "No conversation turns found in file"}
@@ -1108,6 +1170,7 @@ class ImportEngine:
             importance=importance,
             confidence=credibility,
             source="operit",
+            date=_import_event_date(created or updated) or None,
             created=created,
             last_active=updated,
             updated_at=updated,
@@ -1421,7 +1484,7 @@ class ImportEngine:
         self.state.data["status"] = "completed"
         self.state.save()
         self._running = False
-        logger.info(f"Import completed: {self.state.data['memories_created']} created, {self.state.data['memories_merged']} merged")
+        logger.info(f"Import completed: {self.state.data['memories_created']} created")
         return self.state.to_dict()
 
     async def _process_single_chunk(self, chunk: dict, preserve_raw: bool):
@@ -1452,7 +1515,7 @@ class ImportEngine:
             try:
                 item = {**item, **source_metadata}
                 should_preserve = preserve_raw or item.get("preserve_raw", False)
-                status = await self._merge_or_create_item(item, preserve_raw=should_preserve)
+                status = await self._create_import_item(item, preserve_raw=should_preserve)
 
                 if status == "raw":
                     self.state.data["memories_raw"] += 1
@@ -1461,8 +1524,6 @@ class ImportEngine:
                     self.state.data["memories_created"] += 1
                 elif status == "duplicate":
                     self.state.data["memories_duplicate_skipped"] += 1
-                elif status == "merged":
-                    self.state.data["memories_merged"] += 1
                 else:
                     self.state.data["memories_failed"] += 1
 
@@ -1486,7 +1547,13 @@ class ImportEngine:
         response = await self.dehydrator.client.chat.completions.create(
             model=self.dehydrator.model,
             messages=[
-                {"role": "system", "content": IMPORT_EXTRACT_PROMPT},
+                {
+                    "role": "system",
+                    "content": (
+                        f"{IMPORT_EXTRACT_PROMPT}\n\n"
+                        f"本次身份：记忆主体是 {self.ai_name}；对方是 {self.user_display_name}。"
+                    ),
+                },
                 {"role": "user", "content": user_content},
             ],
             max_tokens=4096,
@@ -1594,8 +1661,8 @@ class ImportEngine:
                 return bucket
         return None
 
-    async def _merge_or_create_item(self, item: dict, preserve_raw: bool = False) -> str:
-        """Try to merge with existing bucket, or create new. Returns created/merged/raw/duplicate."""
+    async def _create_import_item(self, item: dict, preserve_raw: bool = False) -> str:
+        """Create one imported bucket after duplicate rejection; imported memories never merge."""
         content = item["content"]
         domain = _clean_import_list(item.get("domain"), max_items=2, max_chars=16, default=["未分类"])
         tags = _clean_import_list(item.get("tags"), max_items=self.max_tags, max_chars=self.max_tag_chars)
@@ -1604,6 +1671,23 @@ class ImportEngine:
         arousal = item.get("arousal", 0.3)
         name = item.get("name", "")
         extra_metadata = self._extra_metadata_for_item(item)
+        event_date = _import_event_date(
+            item.get("import_event_date")
+            or item.get("import_timestamp_start")
+            or item.get("import_timestamp_end")
+        )
+        if event_date:
+            extra_metadata["import_event_date"] = event_date
+            source_refs = []
+            for source_ref in extra_metadata.get("source_refs", []) or []:
+                if not isinstance(source_ref, dict):
+                    continue
+                normalized_ref = dict(source_ref)
+                if normalized_ref.get("type") == "import_chunk" and not normalized_ref.get("event_date"):
+                    normalized_ref["event_date"] = event_date
+                source_refs.append(normalized_ref)
+            if source_refs:
+                extra_metadata["source_refs"] = source_refs
 
         duplicate = await self._find_duplicate_bucket(content)
         if duplicate:
@@ -1624,6 +1708,7 @@ class ImportEngine:
                 arousal=arousal,
                 name=name or None,
                 source="import",
+                date=event_date or None,
                 extra_metadata=extra_metadata,
             )
             if self.embedding_engine:
@@ -1642,43 +1727,6 @@ class ImportEngine:
                     pass
             return "raw"
 
-        bucket = await self._find_import_merge_candidate(item)
-        if bucket:
-            if not (
-                bucket["metadata"].get("pinned")
-                or bucket["metadata"].get("protected")
-                or bucket["metadata"].get("type") == "feel"
-            ):
-                try:
-                    merged = await self.dehydrator.merge(bucket["content"], content)
-                    self.state.data["api_calls"] += 1
-                    old_v = bucket["metadata"].get("valence", 0.5)
-                    old_a = bucket["metadata"].get("arousal", 0.3)
-                    merged_metadata = self._merged_source_metadata(bucket.get("metadata", {}), extra_metadata)
-                    await self.bucket_mgr.update(
-                        bucket["id"],
-                        content=merged,
-                        tags=list(set(bucket["metadata"].get("tags", []) + tags)),
-                        importance=max(bucket["metadata"].get("importance", 5), importance),
-                        domain=list(set(bucket["metadata"].get("domain", []) + domain)),
-                        valence=round((old_v + valence) / 2, 2),
-                        arousal=round((old_a + arousal) / 2, 2),
-                        source="import",
-                        extra_metadata=merged_metadata,
-                    )
-                    if self.embedding_engine:
-                        try:
-                            await self.embedding_engine.generate_and_store(
-                                bucket["id"],
-                                bucket_text_for_embedding({**bucket, "content": merged}),
-                            )
-                        except Exception:
-                            pass
-                    return "merged"
-                except Exception as e:
-                    logger.warning(f"Merge failed during import: {e}")
-                    self.state.data["api_calls"] += 1
-
         # Create new
         bucket_id = await self.bucket_mgr.create(
             content=content,
@@ -1689,6 +1737,7 @@ class ImportEngine:
             arousal=arousal,
             name=name or None,
             source="import",
+            date=event_date or None,
             extra_metadata=extra_metadata,
         )
         if self.embedding_engine:
@@ -1723,6 +1772,8 @@ class ImportEngine:
 
     @staticmethod
     def _chunk_ref(chunk: dict) -> dict:
+        timestamp_start = str(chunk.get("timestamp_start") or "")
+        timestamp_end = str(chunk.get("timestamp_end") or "")
         return {
             "type": "import_chunk",
             "chunk_id": str(chunk.get("source_chunk_id") or ""),
@@ -1730,13 +1781,15 @@ class ImportEngine:
             "source_hash": str(chunk.get("source_hash") or ""),
             "chunk_index": int(chunk.get("chunk_index") or 0),
             "chunk_total": int(chunk.get("chunk_total") or 0),
-            "timestamp_start": str(chunk.get("timestamp_start") or ""),
-            "timestamp_end": str(chunk.get("timestamp_end") or ""),
+            "timestamp_start": timestamp_start,
+            "timestamp_end": timestamp_end,
+            "event_date": _import_event_date(timestamp_start) or _import_event_date(timestamp_end),
             "turn_count": int(chunk.get("turn_count") or 0),
         }
 
     def _source_metadata_for_chunk(self, chunk: dict) -> dict:
         ref = self._chunk_ref(chunk)
+        event_date = ref["event_date"]
         return {
             "source_chunk_ids": [ref["chunk_id"]] if ref["chunk_id"] else [],
             "source_refs": [ref] if ref["chunk_id"] else [],
@@ -1744,6 +1797,7 @@ class ImportEngine:
             "import_source_hash": ref["source_hash"],
             "import_timestamp_start": ref["timestamp_start"],
             "import_timestamp_end": ref["timestamp_end"],
+            "import_event_date": event_date,
         }
 
     @staticmethod
@@ -1755,86 +1809,9 @@ class ImportEngine:
             "import_source_hash",
             "import_timestamp_start",
             "import_timestamp_end",
+            "import_event_date",
         )
         return {key: item.get(key) for key in keys if item.get(key)}
-
-    async def _find_import_merge_candidate(self, item: dict) -> dict | None:
-        if not self.auto_merge_enabled:
-            return None
-        content = str(item.get("content") or "")
-        domain = item.get("domain", ["未分类"])
-        try:
-            existing = await self.bucket_mgr.search(
-                content,
-                limit=1,
-                domain_filter=domain or None,
-                include_archive=False,
-            )
-        except Exception:
-            existing = []
-        if not existing or existing[0].get("score", 0) <= self.import_merge_threshold:
-            return None
-        bucket = existing[0]
-        return bucket if self._can_merge_import_item(bucket, item) else None
-
-    def _can_merge_import_item(self, bucket: dict, item: dict) -> bool:
-        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        if meta.get("pinned") or meta.get("protected") or meta.get("type") == "feel":
-            return False
-        if self.merge_require_domain_overlap:
-            existing_domains = {str(d).strip().lower() for d in meta.get("domain", []) or [] if str(d).strip()}
-            item_domains = {str(d).strip().lower() for d in item.get("domain", []) or [] if str(d).strip()}
-            if not existing_domains or not item_domains or not (existing_domains & item_domains):
-                return False
-        if self.merge_require_source_match:
-            existing_hash = str(meta.get("import_source_hash") or "").strip()
-            item_hash = str(item.get("import_source_hash") or "").strip()
-            if not existing_hash or not item_hash or existing_hash != item_hash:
-                return False
-        if self.merge_block_disjoint_dates and _date_ranges_disjoint(
-            meta.get("import_timestamp_start"),
-            meta.get("import_timestamp_end"),
-            item.get("import_timestamp_start"),
-            item.get("import_timestamp_end"),
-        ):
-            return False
-        similarity = fuzz.token_set_ratio(
-            _import_similarity_text(str(bucket.get("content") or "")),
-            _import_similarity_text(str(item.get("content") or "")),
-        )
-        return similarity >= self.merge_min_content_similarity
-
-    @staticmethod
-    def _merged_source_metadata(existing_meta: dict, item_meta: dict) -> dict:
-        source_chunk_ids = _dedupe_list(
-            list(existing_meta.get("source_chunk_ids") or []) + list(item_meta.get("source_chunk_ids") or [])
-        )
-        source_refs = _dedupe_refs(
-            list(existing_meta.get("source_refs") or []) + list(item_meta.get("source_refs") or [])
-        )
-        starts = [
-            str(value)
-            for value in (existing_meta.get("import_timestamp_start"), item_meta.get("import_timestamp_start"))
-            if str(value or "").strip()
-        ]
-        ends = [
-            str(value)
-            for value in (existing_meta.get("import_timestamp_end"), item_meta.get("import_timestamp_end"))
-            if str(value or "").strip()
-        ]
-        merged = {
-            "source_chunk_ids": source_chunk_ids,
-            "source_refs": source_refs,
-        }
-        for key in ("import_source_file", "import_source_hash"):
-            value = existing_meta.get(key) or item_meta.get(key)
-            if value:
-                merged[key] = value
-        if starts:
-            merged["import_timestamp_start"] = min(starts)
-        if ends:
-            merged["import_timestamp_end"] = max(ends)
-        return merged
 
     async def detect_patterns(self) -> list[dict]:
         """

@@ -2610,6 +2610,36 @@
     text-transform: uppercase;
   }
   .portrait-self-growth .portrait-stable-preview { margin-top: 0; }
+  .portrait-recent-continuity {
+    margin-top: 10px;
+    min-height: 0;
+  }
+  .portrait-recent-continuity > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    list-style: none;
+  }
+  .portrait-recent-continuity > summary::-webkit-details-marker { display: none; }
+  .portrait-recent-continuity > summary::after {
+    content: '展开';
+    color: var(--text-light);
+    font-size: 10px;
+    font-weight: 400;
+  }
+  .portrait-recent-continuity[open] > summary::after { content: '收起'; }
+  .portrait-recent-continuity-body { margin-top: 10px; }
+  .portrait-continuity-note {
+    margin-bottom: 10px;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.55;
+  }
   .portrait-editor-header {
     margin-bottom: 18px;
   }
@@ -3393,10 +3423,10 @@
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后 Gateway 不自动注入 Recent Context；可靠直命中和扩散不受影响</div>
       <div class="config-row">
-        <label>Persona提示</label>
+        <label>Persona轻提醒</label>
         <select id="cfg-persona-context-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
       </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">控制 Gateway 每隔若干轮注入一次 Persona State 提示；关闭后仍会后台更新 Persona</div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认每 15 轮比较一次最近 15 轮的净变化；无明显变化不提示，关闭后仍会后台更新 Persona</div>
       <div class="config-row">
         <label>Persona轮数</label>
         <input type="number" id="cfg-persona-context-rounds" min="0" max="200" />
@@ -3692,11 +3722,11 @@
     <div class="profile-toolbar">
       <div>
         <h2>Portrait State</h2>
-        <p>后台每天维护的换窗画像；只在 breath/handoff 开场恢复，不随普通对话逐轮注入。</p>
+        <p>后台每天整理画像候选；Stable 只由当前 Haven 审阅证据后亲自定稿，并在 breath/handoff 开场恢复。</p>
       </div>
       <div class="profile-actions">
         <button type="button" onclick="refreshPortraitView()">刷新</button>
-        <button type="button" onclick="runPortraitMaintain()">手动生成</button>
+        <button type="button" onclick="runPortraitMaintain()">整理候选</button>
         <button type="button" class="danger" onclick="resetPortraitState()">清空画像</button>
       </div>
     </div>
@@ -3853,7 +3883,6 @@
       <div style="display:flex;gap:16px;margin-top:8px;font-size:13px;color:var(--text-dim);">
         <span>API调用: <b id="import-api-calls">0</b></span>
         <span>新建: <b id="import-created">0</b></span>
-        <span>合并: <b id="import-merged">0</b></span>
         <span>重复跳过: <b id="import-duplicate-skipped">0</b></span>
         <span>原文: <b id="import-raw">0</b></span>
         <span>Embedding: <b id="import-embeddings-created">0</b></span>
@@ -4000,6 +4029,11 @@
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后仍评估数值状态，但不新增 Recent Persona Events</div>
       <div class="config-row">
+        <label>防撤退提醒</label>
+        <select id="cfg-persona-conflict-nudge"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">只在明确争执或撤退信号出现时给模型一条私密提醒；优先于 Persona 轻提醒，不替模型决定回应</div>
+      <div class="config-row">
         <label>Model</label>
         <input type="text" id="cfg-persona-model" placeholder="deepseek-chat" />
       </div>
@@ -4138,7 +4172,7 @@
         <label>画像引擎</label>
         <select id="cfg-portrait-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
       </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">总开关；只维护 state/portrait_state.json，不自动写 profile_fact、anchor 或 Core Memory</div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">总开关；只维护 state/portrait_state.json，不自动发布 Stable，也不写 profile_fact、anchor 或 Core Memory</div>
       <div class="config-row">
         <label>自动维护</label>
         <select id="cfg-portrait-auto"><option value="true">开启</option><option value="false">关闭</option></select>
@@ -5244,7 +5278,7 @@ function portraitMaintainError(data) {
   var labels = {
     generator_unavailable: '生成模型未就绪；画像会复用脱水模型，请先配置脱水模型的 API Key 和 Base URL。',
     generator_error: '生成模型调用失败。',
-    stable_locked: 'Stable 已锁定，请先解锁后再重新生成。',
+    stable_locked: 'Stable 已锁定，请先解锁后再整理这一 scope 的候选。',
     stable_not_generated: 'Stable 没有生成；当前依据不足，或模型输出被 evidence gate 拒绝。',
     stable_not_changed: '模型没有产出新的 Stable 版本。',
     daily_disabled: '每日画像维护已关闭。',
@@ -5292,7 +5326,7 @@ async function loadPortraitState() {
 }
 
 async function runPortraitMaintain(scope) {
-  setPortraitMaintainMessage('生成中…', '');
+  setPortraitMaintainMessage('整理候选中…', '');
   try {
     var res = await authFetch(BASE + '/api/portrait-maintain', {
       method: 'POST',
@@ -5302,33 +5336,22 @@ async function runPortraitMaintain(scope) {
     if (!res) return;
     var data = await res.json().catch(function() { return {}; });
     if (!res.ok) throw new Error(portraitMaintainError(data));
-    var targetScopes = scope ? [scope] : ['user', 'persona', 'relationship'];
-    var generation = data.generation || {};
-    var unchangedScopes = targetScopes.filter(function(targetScope) {
-      return generation[targetScope] && generation[targetScope].changed !== true;
-    });
-    if (unchangedScopes.length) {
-      throw new Error(portraitMaintainError({
-        reason: unchangedScopes.some(function(targetScope) {
-          return generation[targetScope] && generation[targetScope].stable_present !== true;
-        }) ? 'stable_not_generated' : 'stable_not_changed',
-        scopes: unchangedScopes,
-        rejected: data.rejected || []
-      }));
-    }
     var materials = data.materials || {};
     var rejected = Array.isArray(data.rejected) ? data.rejected.length : Number(data.rejected_count || 0);
+    var candidateScopes = Array.isArray(data.candidate_scopes) ? data.candidate_scopes : [];
     var parts = [
       data.status || 'ok',
       data.date || '',
+      'stable authored-only',
+      'candidates ' + (candidateScopes.length ? candidateScopes.map(portraitScopeLabel).join('/') : '0'),
       'buckets ' + (materials.buckets == null ? '—' : materials.buckets),
       'persona events ' + (materials.persona_events == null ? '—' : materials.persona_events),
       'rejected ' + (Number.isFinite(rejected) ? rejected : 0)
     ].filter(Boolean);
-    setPortraitMaintainMessage((scope ? portraitScopeLabel(scope) + ' ' : '') + '已生成：' + parts.join(' · '), 'ok');
+    setPortraitMaintainMessage((scope ? portraitScopeLabel(scope) + ' ' : '') + '候选已整理：' + parts.join(' · '), 'ok');
     await loadPortraitState();
   } catch (e) {
-    setPortraitMaintainMessage('生成失败: ' + e.message, 'error');
+    setPortraitMaintainMessage('候选整理失败: ' + e.message, 'error');
     await loadPortraitState();
   }
 }
@@ -5340,7 +5363,7 @@ async function refreshPortraitView() {
 }
 
 async function resetPortraitState() {
-  var typed = prompt('输入 RESET 清空 Portrait State。下一次手动生成会按第一次生成运行。');
+  var typed = prompt('输入 RESET 清空 Portrait State。下一次候选整理会按第一次运行。');
   if (typed !== 'RESET') return;
   setPortraitMaintainMessage('清空中…', '');
   try {
@@ -5352,7 +5375,7 @@ async function resetPortraitState() {
     if (!res) return;
     var data = await res.json().catch(function() { return {}; });
     if (!res.ok) throw new Error(data.error || '清空失败');
-    setPortraitMaintainMessage('已清空画像；下一次手动生成会按第一次生成。', 'ok');
+    setPortraitMaintainMessage('已清空画像；下一次候选整理会按第一次运行。', 'ok');
     await loadPortraitState();
   } catch (e) {
     setPortraitMaintainMessage('清空失败: ' + e.message, 'error');
@@ -5382,6 +5405,12 @@ function renderPortraitState(data) {
   content.innerHTML =
     renderPortraitSelfAnchor(state.self_anchor_entry, portrait.persona || {}) +
     renderPortraitCurrentFocus(state.current_focus_items) +
+    renderPortraitRecentContinuity(
+      state.recent_continuity,
+      state.recent_continuity_status,
+      state.last_handoff,
+      state.window_shadow_stats
+    ) +
     '<div class="portrait-state-grid">' +
       renderPortraitScope('user', portrait.user || {}, state.generation_status && state.generation_status.user) +
       renderPortraitScope('relationship', portrait.relationship || {}, state.generation_status && state.generation_status.relationship) +
@@ -5412,7 +5441,7 @@ function renderPortraitSelfAnchor(entry, personaState) {
   var meta = [
     entry && entry.configured ? '自我总入口' : '自我总入口 fallback',
     'revision ' + revision,
-    locked ? 'locked' : 'auto update'
+    locked ? 'locked' : 'authored only'
   ];
   if (personaState && personaState.stable_source) meta.push(personaState.stable_source);
   return '<section class="portrait-scope portrait-self-anchor portrait-summary-card">' +
@@ -5423,7 +5452,7 @@ function renderPortraitSelfAnchor(entry, personaState) {
     '<div class="portrait-self-core">' + esc(core || '还没有自我总入口。') + '</div>' +
     (entry && entry.bucket_id ? renderPortraitEvidence([{ bucket_id: entry.bucket_id }]) : '') +
     '<div class="portrait-self-growth">' +
-      '<div class="portrait-self-growth-label">现在的我 · 自动生长</div>' +
+      '<div class="portrait-self-growth-label">现在的我 · 本人定稿</div>' +
       '<div class="portrait-stable-preview' + (growing ? '' : ' empty') + '">' +
         esc(growing || '还没有长出新的自我理解。') +
       '</div>' +
@@ -5452,6 +5481,49 @@ function renderPortraitCurrentFocus(value) {
   '</section>';
 }
 
+function portraitHandoffRouteLabel(route) {
+  return {
+    window_shadow: 'Window Shadow',
+    recent_continuity: 'Recent Continuity',
+    raw_events: 'Raw Rescue',
+    none: '无连续性内容'
+  }[String(route || '').trim()] || '尚无 handoff 请求';
+}
+
+function renderPortraitRecentContinuity(value, status, lastHandoff, shadowStats) {
+  var text = String(value || '').trim();
+  var rows = text.split(/\r?\n/).map(function(line) {
+    return line.trim().replace(/^[-*]\s*/, '');
+  }).filter(Boolean).slice(0, 3).map(function(line) {
+    return { text: line };
+  });
+  status = status || {};
+  lastHandoff = lastHandoff || {};
+  shadowStats = shadowStats || {};
+  var freshness = status.fresh === true
+    ? 'fresh · 可 fallback'
+    : status.available === true
+    ? 'stale · 不注入'
+    : 'empty';
+  var chips = [
+    freshness,
+    '日结 ' + String(status.last_run_date || status.updated_at || '—'),
+    '上限 ' + Number(status.max_age_hours || 72) + 'h',
+    '最近一次 ' + portraitHandoffRouteLabel(lastHandoff.route),
+    '窗影 ' + Number(shadowStats.count || 0)
+  ];
+  return '<details class="portrait-scope portrait-recent-continuity">' +
+    '<summary>Recent Continuity · 仅在窗影缺失时注入</summary>' +
+    '<div class="portrait-recent-continuity-body">' +
+      '<div class="portrait-continuity-note">默认读取直接父窗影的 handoff_note；这里只是夜间生成的第二级救生层。窗影与这里不会同时注入。</div>' +
+      '<div class="portrait-row-meta">' + chips.map(function(part) {
+        return '<span class="profile-chip">' + esc(part) + '</span>';
+      }).join('') + '</div>' +
+      renderPortraitRows(rows, '还没有 Recent Continuity。') +
+    '</div>' +
+  '</details>';
+}
+
 function renderPortraitTimeline(timeline, recentActivities) {
   var rows = portraitRows(timeline);
   var area = 'recent_timeline';
@@ -5474,7 +5546,7 @@ function renderPortraitScope(scope, scopeState, generationStatus) {
   var stable = String(scopeState.stable || '').trim();
   var meta = [
     'revision ' + revision,
-    locked ? 'locked' : 'auto update'
+    locked ? 'locked' : 'authored only'
   ];
   if (scopeState.stable_source) meta.push(scopeState.stable_source);
   if (generationStatus && scope === 'user') {
@@ -5486,7 +5558,7 @@ function renderPortraitScope(scope, scopeState, generationStatus) {
     '<div class="portrait-summary-head">' +
       '<h3>' + esc(portraitScopeLabel(scope)) + '</h3>' +
       '<div class="profile-actions">' +
-        '<button type="button" onclick="runPortraitMaintain(\'' + jsString(scope) + '\')">重新生成</button>' +
+        '<button type="button" onclick="runPortraitMaintain(\'' + jsString(scope) + '\')">刷新候选</button>' +
         '<button type="button" class="portrait-edit-button" onclick="openPortraitEditor(\'' + jsString(scope) + '\')">编辑</button>' +
       '</div>' +
     '</div>' +
@@ -5523,7 +5595,7 @@ function renderPortraitEditorPanel(scope) {
   var isPersona = scope === 'persona';
   var meta = [
     'revision ' + revision,
-    locked ? 'locked' : 'auto update',
+    locked ? 'locked' : 'authored only',
     scopeState.stable_source || '',
     scopeState.stable_updated_at || ''
   ].filter(Boolean);
@@ -5532,7 +5604,7 @@ function renderPortraitEditorPanel(scope) {
       '<h2>' + esc(portraitScopeLabel(scope)) + '</h2>' +
       '<div class="portrait-editor-note">' + esc(isPersona
         ? '原始核心保持第一人称原文且不会被后台改写；这里只编辑它后来长出的“现在的我”。'
-        : '主页面只展示 stable。这里负责编辑、锁定和检查后台生成依据。') + '</div>' +
+        : '主页面只展示 stable。这里负责由当前 Haven 编辑、锁定和检查候选依据。') + '</div>' +
     '</div>' +
     '<div class="portrait-editor-meta">' + meta.map(function(part) {
       return '<span class="profile-chip">' + esc(part) + '</span>';
@@ -5547,7 +5619,7 @@ function renderPortraitEditorPanel(scope) {
       }] : [], '还没有自我总入口。') +
     '</div>' : '') +
     '<div class="portrait-editor-section">' +
-      '<div class="portrait-layer-title">' + (isPersona ? '现在的我 · 自动生长' : 'Stable') + '</div>' +
+      '<div class="portrait-layer-title">' + (isPersona ? '现在的我 · 本人定稿' : 'Stable') + '</div>' +
       renderPortraitStableEditor(scope, scopeState) +
     '</div>' +
     renderPortraitGenerationEvidence(scope, scopeState);
@@ -5601,7 +5673,7 @@ function renderPortraitStableEditor(scope, scopeState) {
     '<textarea id="' + escAttr(id) + '" placeholder="' + escAttr(placeholder) + '">' + esc(scopeState.stable || '') + '</textarea>' +
     '<div class="portrait-stable-actions">' +
       '<button type="button" onclick="savePortraitStable(\'' + jsString(scope) + '\')">保存</button>' +
-      '<button type="button" onclick="togglePortraitStableLock(\'' + jsString(scope) + '\',' + (locked ? 'false' : 'true') + ')">' + (locked ? '解锁自动更新' : '锁定') + '</button>' +
+      '<button type="button" onclick="togglePortraitStableLock(\'' + jsString(scope) + '\',' + (locked ? 'false' : 'true') + ')">' + (locked ? '解锁' : '锁定') + '</button>' +
       (scopeState.stable ? '<button type="button" class="danger" onclick="clearPortraitStable(\'' + jsString(scope) + '\')">清空</button>' : '') +
     '</div>' +
     historyHtml +
@@ -5657,7 +5729,7 @@ async function togglePortraitStableLock(scope, locked) {
     var data = await res.json().catch(function() { return {}; });
     if (!res.ok) throw new Error(data.error || data.reason || '更新失败');
     await loadPortraitState();
-    setPortraitMaintainMessage(locked ? 'stable 已锁定。' : 'stable 已恢复后台自动更新。', 'ok');
+    setPortraitMaintainMessage(locked ? 'stable 已锁定。' : 'stable 已解锁；仍只接受本人定稿。', 'ok');
   } catch (e) {
     setPortraitMaintainMessage('锁定状态更新失败: ' + e.message, 'error');
   }
@@ -7944,7 +8016,6 @@ async function loadPersona(sessionId) {
 
 function renderPersona(data) {
   var state = data.state || {};
-  var personality = state.personality || {};
   var affect = state.affect || {};
   var relationship = state.relationship || {};
   var cfg = data.config || {};
@@ -7961,7 +8032,7 @@ function renderPersona(data) {
           '<div class="persona-orb" style="opacity:' + personaOrbOpacity(affect.arousal) + '"></div>' +
           '<div class="persona-mood">' +
             '<strong>' + esc(affect.mood_label || 'warm_neutral') + '</strong>' +
-            '<span>V' + personaNumber(affect.valence) + ' · A' + personaNumber(affect.arousal) + ' · session ' + esc(activeSession) + '</span>' +
+            '<span>心情 ' + personaNumber(affect.valence) + ' · 情绪能量 ' + personaNumber(affect.arousal) + ' · session ' + esc(activeSession) + '</span>' +
           '</div>' +
         '</div>' +
         '<div>' +
@@ -7979,27 +8050,18 @@ function renderPersona(data) {
         '<div class="persona-card">' +
           '<h3>Affect / Relationship</h3>' +
           '<div class="persona-meter-list">' +
-            personaMeter('情绪效价 valence', affect.valence, 'warm') +
-            personaMeter('唤醒度 arousal', affect.arousal, '') +
+            personaMeter('心情方向 valence', affect.valence, 'warm') +
+            personaMeter('情绪能量 arousal', affect.arousal, '') +
             personaMeter('温柔 tenderness', affect.tenderness, 'warm') +
             personaMeter('占有 possessiveness', affect.possessiveness, 'guard') +
             personaMeter('想念 longing', affect.longing, 'warm') +
-            personaMeter('安全 security', affect.security, 'warm') +
+            personaMeter('关系安全感 security', affect.security, 'warm') +
             personaMeter('保护 protective', affect.protective_drive, 'guard') +
+            personaMeter('欲望温度 libido', affect.libido, 'warm') +
             personaMeter('亲和 affinity', relationship.affinity, 'warm') +
             personaMeter('主导 dominance', relationship.dominance, '') +
             personaMeter('防御 defensiveness', relationship.defensiveness, 'guard') +
             personaMeter('信任 trust', relationship.trust, 'warm') +
-          '</div>' +
-        '</div>' +
-        '<div class="persona-card">' +
-          '<h3>Personality</h3>' +
-          '<div class="persona-meter-list">' +
-            personaMeter('开放 openness', personality.openness, '') +
-            personaMeter('自律 conscientiousness', personality.conscientiousness, '') +
-            personaMeter('外向 extraversion', personality.extraversion, '') +
-            personaMeter('温柔 agreeableness', personality.agreeableness, 'warm') +
-            personaMeter('敏感 neuroticism', personality.neuroticism, 'guard') +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -8054,7 +8116,6 @@ function renderPersonaDeltas(ev) {
   var parts = [];
   collectPersonaDeltas(parts, 'affect', ev.affect_delta || {});
   collectPersonaDeltas(parts, 'rel', ev.relationship_delta || {});
-  collectPersonaDeltas(parts, 'trait', ev.personality_delta || {});
   if (!parts.length) return '';
   return '<div class="persona-deltas">' + parts.join('') + '</div>';
 }
@@ -8962,6 +9023,8 @@ async function loadConfig() {
       (cfg.persona && cfg.persona.enabled) === false ? 'false' : 'true';
     document.getElementById('cfg-persona-event-recording').value =
       (cfg.persona && cfg.persona.event_recording_enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-persona-conflict-nudge').value =
+      (cfg.persona && cfg.persona.conflict_nudge_enabled) ? 'true' : 'false';
     document.getElementById('cfg-persona-model').value = (cfg.persona && cfg.persona.model) || '';
     document.getElementById('cfg-persona-url').value = (cfg.persona && cfg.persona.base_url) || '';
     document.getElementById('cfg-persona-key').placeholder =
@@ -9169,6 +9232,7 @@ async function saveConfig(persist, persistEnv) {
     candidate.persona = {
       enabled: document.getElementById('cfg-persona-enabled').value === 'true',
       event_recording_enabled: document.getElementById('cfg-persona-event-recording').value === 'true',
+      conflict_nudge_enabled: document.getElementById('cfg-persona-conflict-nudge').value === 'true',
       model: document.getElementById('cfg-persona-model').value,
       base_url: document.getElementById('cfg-persona-url').value,
     };
@@ -9480,7 +9544,6 @@ function updateImportUI(s) {
   document.getElementById('import-progress-text').textContent = s.processed + '/' + s.total_chunks;
   document.getElementById('import-api-calls').textContent = s.api_calls;
   document.getElementById('import-created').textContent = s.memories_created;
-  document.getElementById('import-merged').textContent = s.memories_merged;
   document.getElementById('import-duplicate-skipped').textContent = s.memories_duplicate_skipped || 0;
   document.getElementById('import-raw').textContent = s.memories_raw;
   document.getElementById('import-embeddings-created').textContent = s.embeddings_created || 0;

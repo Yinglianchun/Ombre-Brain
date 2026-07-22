@@ -190,7 +190,6 @@ DEFAULT_WORD_MAP_OVERVIEW_STOPWORDS = {
     "自省",
     "陪伴",
     "归属感",
-    "小乖",
     "birthday",
     "fact",
     "from_daily_chat",
@@ -220,17 +219,7 @@ DEFAULT_OVERVIEW_ALIASES = {
     "dashboard": "Dashboard",
     "codex": "Codex",
 }
-DEFAULT_OVERVIEW_PRIORITY_TERMS = {
-    "darkroom",
-    "recall_cues",
-    "暗房",
-    "忱孚",
-    "折角",
-    "梦境机制",
-    "流星",
-    "第一行代码",
-    "记忆不是表演",
-}
+DEFAULT_OVERVIEW_PRIORITY_TERMS = ()
 DEFAULT_OVERVIEW_HUB_TERMS = ()
 DEFAULT_WEAK_HINT_TERMS = {
     "人机恋",
@@ -309,6 +298,7 @@ class WordMapStore:
             _normalize_term(item)
             for item in itertools.chain(
                 DEFAULT_WORD_MAP_OVERVIEW_STOPWORDS,
+                self.identity_stopwords,
                 cfg.get("overview_stopwords", []) or [],
             )
             if _normalize_term(item)
@@ -1246,7 +1236,7 @@ class WordMapStore:
         if re.search(r"[A-Za-z]", term) and re.search(r"[\u4e00-\u9fff]", term):
             score *= 1.18
         if not is_title and any(
-            marker in term for marker in ("机制", "暗房", "流星", "折角", "代码", "梦境", "显影", "外部", "验证")
+            marker in term for marker in ("机制", "代码", "梦境", "显影", "外部", "验证")
         ):
             score *= 1.28
         chinese_chars = re.findall(r"[\u4e00-\u9fff]", term)
