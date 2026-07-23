@@ -51,6 +51,7 @@ import json as _json_lib
 import re
 import secrets
 import time
+from contextvars import ContextVar
 from typing import Literal
 from base64 import b64decode
 from dataclasses import replace
@@ -176,6 +177,12 @@ from utils import (
     strip_temperature_meaning_lines,
     strip_wikilinks,
     suppress_migrated_legacy_sources,
+)
+
+
+_SCENE_WRITE_SOURCE: ContextVar[str] = ContextVar(
+    "scene_write_source",
+    default="hold_scene",
 )
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
@@ -3072,6 +3079,9 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "digested",
         "anchor",
         "source",
+        "memory_value_source",
+        "write_contract",
+        "scene_cues",
         "confidence",
         "period",
         "date",
@@ -3094,8 +3104,10 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "active",
         "deprecated",
     ]
+    object_type = "scene" if _is_canonical_scene_bucket(bucket) else "legacy_bucket"
     return {
         "id": bucket["id"],
+        "object_type": object_type,
         "metadata": {key: meta.get(key) for key in fields if key in meta},
         "metadata_view": metadata_view,
         **metadata_view,
@@ -9716,6 +9728,14 @@ async def hold(
 
     scene_title = _authored_scene_title(content, title)
     scene_cues = _authored_scene_cues(content, title=scene_title, explicit=cues)
+    scene_write_source = _SCENE_WRITE_SOURCE.get()
+    if scene_write_source not in {"hold_scene", "write_scene"}:
+        scene_write_source = "hold_scene"
+    scene_write_contract = (
+        "write-scene-v1"
+        if scene_write_source == "write_scene"
+        else "hold-scene-v2"
+    )
     domain = requested_domain or ["未分类"]
     # Ordinary source records keep legacy coordinates only for schema/client compatibility.
     # They no longer influence recall ranking or decay, and the tagger no longer infers them.
@@ -9745,7 +9765,7 @@ async def hold(
             bucket_type="permanent",
             pinned=True,
             date=event_date or None,
-            source="hold_scene",
+            source=scene_write_source,
             extra_metadata={
                 **_memory_classification_metadata(
                     classification["memory_subject"],
@@ -9753,7 +9773,7 @@ async def hold(
                     classification["memory_classification_source"],
                 ),
                 "memory_value_source": "authored_scene",
-                "write_contract": "hold-scene-v2",
+                "write_contract": scene_write_contract,
                 "scene_cues": scene_cues or None,
             },
         )
@@ -9776,10 +9796,10 @@ async def hold(
         memory_layer=classification["memory_layer"],
         memory_classification_source=classification["memory_classification_source"],
         date=event_date,
-        source="hold_scene",
+        source=scene_write_source,
         extra_metadata={
             "memory_value_source": "authored_scene",
-            "write_contract": "hold-scene-v2",
+            "write_contract": scene_write_contract,
             "scene_cues": scene_cues or None,
         },
         normalize_content=False,
@@ -11244,7 +11264,7 @@ async def recall(
     previous_session_id: str = "",
     parent_shadow_id: str = "",
 ) -> str:
-    """普通召回与相邻窗口交接的统一入口。mode="memory" 按 query/date 找 Scene 与受限叙事投影；mode="handoff" 读取 self anchor、直接父 Window Shadow 和未完线头。不会把 Portrait 自动塞进启动包；明确画像问题仍由现有显式门槛处理。旧 breath 继续可直呼但不再出现在日常工具表。"""
+    """普通召回与相邻窗口交接的统一入口。mode="memory" 按 query/date 找 Scene 与受限叙事投影；mode="handoff" 读取 self anchor、直接父 Window Shadow 和未完线头。不会把 Portrait 自动塞进启动包；明确画像问题仍由现有显式门槛处理。"""
     safe_mode = str(mode or "memory").strip().lower()
     if safe_mode not in {"memory", "handoff"}:
         return "mode 只能是 memory 或 handoff。"
@@ -11320,14 +11340,18 @@ async def write_scene(
     domain: str = "",
     cues: str = "",
 ) -> str:
-    """原样写一条具体 Scene。正文就是完整经历，不加 Markdown 类型标题；工具不脱水、不改写、不合并，也不能借此写 feel、whisper、日印象或 ProfileFact。旧 hold 仍可直呼以兼容现有客户端。"""
-    return await hold(
-        content=content,
-        title=title,
-        date=date,
-        domain=domain,
-        cues=cues,
-    )
+    """原样写一条具体 Scene。正文就是完整经历，不加 Markdown 类型标题；工具不脱水、不改写、不合并，也不能借此写 feel、whisper、日印象或 ProfileFact。"""
+    token = _SCENE_WRITE_SOURCE.set("write_scene")
+    try:
+        return await hold(
+            content=content,
+            title=title,
+            date=date,
+            domain=domain,
+            cues=cues,
+        )
+    finally:
+        _SCENE_WRITE_SOURCE.reset(token)
 
 
 @mcp.tool()
@@ -11336,7 +11360,7 @@ async def annotate(
     content: str,
     kind: str = "comment",
 ) -> dict:
-    """给一条已有来源追加带时间 Annotation。用于后来形成的新理解、修正或有来源的感受；Annotation 始终挂回来源，不独立扩散。旧 comment_bucket 继续可直呼。"""
+    """给一条已有来源追加带时间 Annotation。用于后来形成的新理解、修正或有来源的感受；Annotation 始终挂回来源，不独立扩散。"""
     return await comment_bucket(
         bucket_id=source_id,
         content=content,
@@ -11440,7 +11464,7 @@ async def publish_portrait(
     evidence: list[dict] | None = None,
     locked: bool = True,
 ) -> dict:
-    """由当前 Haven 在 read_portrait 审阅后，带 optimistic revision 与可验证 evidence 发布 User 或 Relationship Portrait。模型候选不会自动发布；旧 publish_portrait_patch 继续可直呼。"""
+    """由当前 Haven 在 read_portrait 审阅后，带 optimistic revision 与可验证 evidence 发布 User 或 Relationship Portrait。模型候选不会自动发布。"""
     return await publish_portrait_patch(
         scope=scope,
         text=text,
