@@ -11388,6 +11388,7 @@ class GatewayService:
 
         query_plan = self._recall_query_plan(query_text, context_mode=context_mode)
         dynamic_anchor_plan = self._dynamic_anchor_plan_from_items(seed_moments)
+        explicit_lookup_query = self.recall_policy.is_explicit_lookup_query(query_text)
         diffusion_seed_moments = [
             moment for moment in seed_moments
             if not self._is_source_record_capsule_only_moment(moment)
@@ -11438,9 +11439,10 @@ class GatewayService:
             if dynamic_anchor_plan:
                 row.update(self._dynamic_anchor_node_payload(moment, dynamic_anchor_plan))
                 if dynamic_anchor_plan.get("strict_diffusion"):
-                    row["dynamic_anchor_required_terms"] = list(
-                        dynamic_anchor_plan.get("required_terms") or []
-                    )
+                    if not explicit_lookup_query:
+                        row["dynamic_anchor_required_terms"] = list(
+                            dynamic_anchor_plan.get("required_terms") or []
+                        )
                     row["dynamic_anchor_category_terms"] = list(
                         dynamic_anchor_plan.get("category_terms") or []
                     )
@@ -16768,6 +16770,46 @@ class GatewayService:
             return "weak_evidence_only"
         return "no_hard_evidence"
 
+    def _passive_statement_has_recall_evidence(
+        self,
+        query: str,
+        item: dict,
+        evidence_labels: list[str],
+    ) -> bool:
+        if self.recall_policy.is_explicit_lookup_query(query):
+            return True
+        if item.get("distinctive_anchor_match"):
+            return True
+        label_set = {
+            str(label or "").strip()
+            for label in evidence_labels or []
+            if str(label or "").strip()
+        }
+        if label_set & {
+            "protected_phrase",
+            "source_record_exact",
+            "raw_transcript_exact",
+            "same_day_metadata",
+            "definition_literal_span",
+        }:
+            return True
+        bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+        meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+        title = str(meta.get("name") or bucket.get("name") or "").strip()
+        title_key = self._compact_lookup_key(title)
+        query_key = self._compact_lookup_key(query)
+        cjk_chars = len(re.findall(r"[\u4e00-\u9fff]", title_key))
+        precise_full_title = bool(
+            title_key
+            and title_key in query_key
+            and (
+                cjk_chars >= 4
+                or bool(re.search(r"\d", title_key))
+                or bool(re.search(r"[_.:/-]", title))
+            )
+        )
+        return precise_full_title
+
     def _suppressed_bucket_moment_search_boost(self, query: str, item: dict) -> float:
         if not isinstance(item, dict):
             return 0.0
@@ -17325,6 +17367,21 @@ class GatewayService:
         hard_evidence_labels = self._hard_bucket_evidence_labels(evidence_labels)
         item["evidence_labels"] = evidence_labels
         item["hard_evidence_labels"] = hard_evidence_labels
+        if not self._passive_statement_has_recall_evidence(
+            query,
+            item,
+            evidence_labels,
+        ):
+            item["admission_reason"] = "passive_statement_evidence_missing"
+            item["blocked_reason"] = "passive_statement_evidence_missing"
+            item["recall_policy_debug"] = {
+                "passive_statement": True,
+                "evidence_labels": evidence_labels,
+                "hard_evidence_labels": hard_evidence_labels,
+                "required_evidence": "two_scene_cues_or_precise_literal",
+                "auto": True,
+            }
+            return False
         dynamic_plan = item.get("dynamic_anchor_plan") if isinstance(item.get("dynamic_anchor_plan"), dict) else {}
         independent_anchor_evidence = bool(
             self._planner_lexical_direct_signal(item)

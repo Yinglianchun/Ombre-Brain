@@ -1683,6 +1683,63 @@ class RecallPolicy:
             return False
         return any(self._compact_marker_text(marker) in compact for marker in DETAIL_READ_QUERY_MARKERS)
 
+    def is_explicit_lookup_query(self, query: str) -> bool:
+        """Separate active lookup from passive chat without classifying its topic."""
+        text = str(query or "").strip()
+        if not text:
+            return False
+        compact = self._compact_marker_text(text)
+        if (
+            self.is_detail_read_query(text)
+            or self.is_emotional_reason_lookup(text)
+            or "?" in text
+            or "？" in text
+            or re.search(r"(?:吗|么|嘛|呢|来着)$", compact)
+        ):
+            return True
+        return any(
+            marker in compact
+            for marker in (
+                "还记得",
+                "记不记得",
+                "想起",
+                "想起来",
+                "回忆一下",
+                "查一下",
+                "查查",
+                "搜一下",
+                "找一下",
+                "检索",
+                "调出",
+                "读一下",
+                "给我看",
+                "告诉我",
+                "什么",
+                "为什么",
+                "怎么",
+                "怎样",
+                "咋",
+                "干嘛",
+                "干什么",
+                "做什么",
+                "做啥",
+                "哪",
+                "谁",
+                "多少",
+                "几个",
+                "几点",
+                "何时",
+                "什么时候",
+                "是否",
+                "是不是",
+                "有没有",
+                "说说",
+                "讲讲",
+                "说一下",
+                "讲一下",
+            )
+        )
+
     def _query_has_low_signal_shell(self, query: str) -> bool:
         text = str(query or "").strip().lower()
         compact = self._compact_marker_text(text)
