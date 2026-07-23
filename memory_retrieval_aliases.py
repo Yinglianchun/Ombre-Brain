@@ -545,16 +545,25 @@ class MemoryRetrievalAliasIndex:
             alias_key = str(alias.get("alias_key") or "")
             if alias_key in self.stop_keys:
                 continue
-            matched_terms = [
-                text
-                for text, key in query_terms
-                if key in alias_key or alias_key in key
-            ]
+            matched_pairs: list[tuple[str, str]] = []
+            seen_matched_keys: set[str] = set()
+            for text, key in query_terms:
+                if key in alias_key:
+                    matched_text, matched_key = text, key
+                elif alias_key in key:
+                    # The alias is the evidence.  Never report the containing
+                    # full query as though it had been found in the bucket.
+                    matched_text, matched_key = str(alias.get("alias_text") or ""), alias_key
+                else:
+                    continue
+                if not matched_key or matched_key in seen_matched_keys:
+                    continue
+                seen_matched_keys.add(matched_key)
+                matched_pairs.append((matched_text, matched_key))
+            matched_terms = [text for text, _ in matched_pairs]
             if not matched_terms:
                 continue
-            matched_keys = {
-                key for _, key in query_terms if key in alias_key or alias_key in key
-            }
+            matched_keys = {key for _, key in matched_pairs}
             coverage = len(matched_keys) / max(1, len({key for _, key in query_terms}))
             if full_query_key == alias_key:
                 score = 1.0

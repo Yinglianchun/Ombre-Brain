@@ -1331,6 +1331,7 @@ def _bucket_metadata(meta: dict, bucket: dict) -> dict:
             "bucket_type": meta.get("type"),
             "bucket_tags": tags,
             "bucket_domain": _list_text(meta.get("domain")),
+            "bucket_scene_cues": _list_text(meta.get("scene_cues")),
             "bucket_importance": meta.get("importance"),
             "bucket_valence": meta.get("valence"),
             "bucket_arousal": meta.get("arousal"),

@@ -15070,17 +15070,6 @@ class GatewayService:
                 add(key[-2:])
         return output[:16]
 
-    @staticmethod
-    def _dynamic_anchor_is_discriminative(document_count: int, document_frequency: int) -> bool:
-        if document_frequency <= 0 or document_count <= 0:
-            return False
-        if document_count < 20:
-            return document_frequency == 1
-        return document_frequency == 1 or (
-            document_frequency <= 2
-            and (document_frequency / max(document_count, 1)) <= 0.05
-        )
-
     def _dynamic_anchor_term_is_category(self, term: str) -> bool:
         key = self._compact_lookup_key(term)
         if not key:
@@ -15125,6 +15114,63 @@ class GatewayService:
                 if key:
                     alias_counts[key] = min(alias_counts.get(key, count), count)
 
+        query_key = self._compact_lookup_key(query)
+        identity_keys = self._identity_match_terms(compact=True)
+        cue_rows: dict[str, dict[str, Any]] = {}
+        for bucket in buckets or []:
+            if not isinstance(bucket, dict):
+                continue
+            bucket_id = str(bucket.get("id") or "").strip()
+            meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+            for cue in meta.get("scene_cues", []) or []:
+                cue_text = " ".join(str(cue or "").split()).strip()
+                cue_key = self._compact_lookup_key(cue_text)
+                if (
+                    not cue_key
+                    or cue_key not in query_key
+                    or cue_key in GENERIC_LEXICAL_STOPWORD_KEYS
+                    or cue_key in MEMORY_SENTINEL_RESIDUE_STOP_TERMS
+                    or cue_key in identity_keys
+                    or (re.fullmatch(r"[\u4e00-\u9fff]+", cue_key) and len(cue_key) < 2)
+                    or (
+                        re.fullmatch(r"[a-z0-9_.:/-]+", cue_key)
+                        and len(cue_key) < 3
+                        and not re.search(r"\d", cue_key)
+                    )
+                ):
+                    continue
+                row = cue_rows.setdefault(
+                    cue_key,
+                    {
+                        "term": cue_text,
+                        "bucket_ids": set(),
+                        "query_index": query_key.find(cue_key),
+                    },
+                )
+                if bucket_id:
+                    row["bucket_ids"].add(bucket_id)
+
+        cue_terms = self._dynamic_anchor_independent_terms([
+            str(row["term"])
+            for _key, row in sorted(
+                cue_rows.items(),
+                key=lambda item: (
+                    int(item[1].get("query_index") or 0),
+                    -len(item[0]),
+                    item[0],
+                ),
+            )
+        ])
+        independent_cue_keys = {
+            self._compact_lookup_key(term)
+            for term in cue_terms
+            if self._compact_lookup_key(term)
+        }
+        for cue_term in cue_terms:
+            cue_key = self._compact_lookup_key(cue_term)
+            if all(self._compact_lookup_key(term) != cue_key for term in terms):
+                terms.append(cue_term)
+
         overview = self._query_is_category_overview(query)
         term_rows: list[dict[str, Any]] = []
         discriminative: list[str] = []
@@ -15136,15 +15182,13 @@ class GatewayService:
             document_frequency = max(0, int(raw.get("document_frequency") or 0))
             document_count = max(0, int(raw.get("document_count") or 0))
             alias_count = alias_counts.get(self._compact_lookup_key(term), 0)
-            observed = document_frequency > 0 or alias_count > 0
+            cue_row = cue_rows.get(self._compact_lookup_key(term)) or {}
+            cue_bucket_count = len(cue_row.get("bucket_ids") or ())
+            observed = document_frequency > 0 or alias_count > 0 or cue_bucket_count > 0
             fixed_category = self._dynamic_anchor_term_is_category(term)
             is_discriminative = bool(
-                observed
+                self._compact_lookup_key(term) in independent_cue_keys
                 and not fixed_category
-                and (
-                    self._dynamic_anchor_is_discriminative(document_count, document_frequency)
-                    or (document_frequency <= 0 and 0 < alias_count <= 2)
-                )
             )
             is_category = bool(
                 observed
@@ -15168,6 +15212,7 @@ class GatewayService:
                     ) if document_count else 0.0,
                     "specificity": self._safe_float(raw.get("specificity"), 0.0),
                     "alias_bucket_count": alias_count,
+                    "scene_cue_bucket_count": cue_bucket_count,
                     "kind": (
                         "discriminative"
                         if is_discriminative
@@ -15180,11 +15225,9 @@ class GatewayService:
                 }
             )
 
-        row_by_key = {self._compact_lookup_key(row["term"]): row for row in term_rows}
         discriminative.sort(
             key=lambda term: (
-                int((row_by_key.get(self._compact_lookup_key(term)) or {}).get("document_frequency") or 9999),
-                int((row_by_key.get(self._compact_lookup_key(term)) or {}).get("alias_bucket_count") or 9999),
+                query_key.find(self._compact_lookup_key(term)),
                 -len(self._compact_lookup_key(term)),
             )
         )
@@ -15198,6 +15241,7 @@ class GatewayService:
             "category_overview": overview,
             "discriminative_terms": discriminative,
             "required_terms": discriminative,
+            "required_match_count": 2 if discriminative else 0,
             "category_terms": list(dict.fromkeys(category)),
             "support_terms": list(dict.fromkeys(support)),
             "strict_diffusion": strict_diffusion,
@@ -15217,6 +15261,31 @@ class GatewayService:
             return key[:2] in text_key and key[-2:] in text_key
         return False
 
+    def _dynamic_anchor_independent_terms(self, terms: list[str]) -> list[str]:
+        """Collapse nested cues so one phrase cannot count as two anchors."""
+        output: list[str] = []
+        output_keys: list[str] = []
+        for term in terms or []:
+            key = self._compact_lookup_key(term)
+            if not key:
+                continue
+            overlap_index = next(
+                (
+                    index
+                    for index, existing_key in enumerate(output_keys)
+                    if key in existing_key or existing_key in key
+                ),
+                None,
+            )
+            if overlap_index is None:
+                output.append(term)
+                output_keys.append(key)
+                continue
+            if len(key) > len(output_keys[overlap_index]):
+                output[overlap_index] = term
+                output_keys[overlap_index] = key
+        return output
+
     def _dynamic_anchor_bucket_payload(
         self,
         bucket: dict,
@@ -15224,6 +15293,9 @@ class GatewayService:
         alias_hits: list[dict[str, Any]],
     ) -> dict[str, Any]:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        cue_key = self._compact_lookup_key(
+            " ".join(str(item) for item in meta.get("scene_cues", []) or [])
+        )
         trusted_key = self._compact_lookup_key(
             " ".join(
                 [
@@ -15237,16 +15309,12 @@ class GatewayService:
         full_key = self._compact_lookup_key(self._date_recall_bucket_text(bucket))
         alias_key = self._compact_lookup_key(
             " ".join(
-                [
-                    str(row.get("alias_text") or "")
-                    + " "
-                    + " ".join(str(term) for term in row.get("matched_terms") or [])
-                    for row in alias_hits or []
-                ]
+                str(row.get("alias_text") or "")
+                for row in alias_hits or []
             )
         )
 
-        def covered(term: str, *, allow_full: bool = False) -> bool:
+        def covered_for_category(term: str, *, allow_full: bool = False) -> bool:
             return bool(
                 self._dynamic_anchor_term_matches_text(term, trusted_key)
                 or self._dynamic_anchor_term_matches_text(term, alias_key)
@@ -15255,15 +15323,22 @@ class GatewayService:
 
         discriminative_terms = list(plan.get("discriminative_terms") or [])
         required_terms = list(plan.get("required_terms") or [])
-        allow_full_anchor_match = not self._is_source_record_bucket(bucket)
         matched_terms = [
             term
             for term in discriminative_terms
-            if covered(term, allow_full=allow_full_anchor_match)
+            if self._dynamic_anchor_term_matches_text(term, cue_key)
         ]
+        required_match_count = max(0, int(plan.get("required_match_count") or 0))
+        distinctive_anchor_match = bool(
+            required_match_count
+            and len(matched_terms) >= required_match_count
+        )
         missing_terms = [term for term in required_terms if term not in matched_terms]
         category_terms = list(plan.get("category_terms") or [])
-        matched_category_terms = [term for term in category_terms if covered(term, allow_full=True)]
+        matched_category_terms = [
+            term for term in category_terms
+            if covered_for_category(term, allow_full=True)
+        ]
         view = normalize_memory_metadata(bucket)
         title = str(meta.get("name") or bucket.get("name") or "").strip()
         title_key = self._compact_lookup_key(title)
@@ -15282,7 +15357,7 @@ class GatewayService:
         )
         return {
             "dynamic_anchor_plan": plan,
-            "distinctive_anchor_match": bool(required_terms and not missing_terms),
+            "distinctive_anchor_match": distinctive_anchor_match,
             "distinctive_anchor_terms": matched_terms,
             "distinctive_anchor_missing_terms": missing_terms,
             "anchor_coverage": round(
@@ -15317,12 +15392,21 @@ class GatewayService:
         }
 
     def _dynamic_anchor_node_payload(self, node: dict, plan: dict[str, Any]) -> dict[str, Any]:
+        meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
+        cue_key = self._compact_lookup_key(
+            " ".join(str(item) for item in meta.get("bucket_scene_cues", []) or [])
+        )
         fields = self._compact_lookup_key(self._moment_search_fields(node))
         required_terms = list(plan.get("required_terms") or [])
         matched_terms = [
             term for term in plan.get("discriminative_terms") or []
-            if self._dynamic_anchor_term_matches_text(term, fields)
+            if self._dynamic_anchor_term_matches_text(term, cue_key)
         ]
+        required_match_count = max(0, int(plan.get("required_match_count") or 0))
+        distinctive_anchor_match = bool(
+            required_match_count
+            and len(matched_terms) >= required_match_count
+        )
         missing_terms = [term for term in required_terms if term not in matched_terms]
         matched_category_terms = [
             term for term in plan.get("category_terms") or []
@@ -15336,7 +15420,7 @@ class GatewayService:
             title_residue = title_residue.replace(self._compact_lookup_key(term), "")
         view = normalize_memory_metadata(self._reading_note_bucket_view(None, node))
         return {
-            "distinctive_anchor_match": bool(required_terms and not missing_terms),
+            "distinctive_anchor_match": distinctive_anchor_match,
             "distinctive_anchor_terms": matched_terms,
             "distinctive_anchor_missing_terms": missing_terms,
             "category_overview_item": bool(
