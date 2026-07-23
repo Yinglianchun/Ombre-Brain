@@ -12,6 +12,7 @@
 #
 # Config:
 #   OMBRE_HOOK_URL  — override the server URL (default: http://localhost:8000)
+#   OMBRE_BREATH_HOOK_TOKEN — bearer token; falls back to OMBRE_GATEWAY_TOKEN
 #   OMBRE_HOOK_SKIP — set to "1" to disable the hook temporarily
 # ============================================================
 
@@ -35,9 +36,17 @@ def main():
 
 
 def _call_endpoint(base_url, path):
+    token = (
+        os.environ.get("OMBRE_BREATH_HOOK_TOKEN")
+        or os.environ.get("OMBRE_GATEWAY_TOKEN")
+        or ""
+    ).strip()
+    headers = {"Accept": "text/plain"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         f"{base_url}{path}",
-        headers={"Accept": "text/plain"},
+        headers=headers,
         method="GET",
     )
     try:

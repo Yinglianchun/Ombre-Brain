@@ -422,7 +422,8 @@ curl -sS -b ombre.cookies -G \
 Brain 提供会话启动用的紧凑 handoff 文本：
 
 ```bash
-curl -sS 'http://127.0.0.1:8000/breath-hook?mode=handoff&session_id=claude-code&max_tokens=1200'
+curl -sS 'http://127.0.0.1:8000/breath-hook?mode=handoff&session_id=claude-code&max_tokens=1200' \
+  -H "Authorization: Bearer $OMBRE_BREATH_HOOK_TOKEN"
 ```
 
 Gateway 提供按当前 prompt 快速取 0–5 张记忆卡的 hook API：

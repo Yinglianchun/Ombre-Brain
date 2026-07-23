@@ -286,7 +286,7 @@ gateway:
   host: "0.0.0.0"
   port: 8010
   default_session_id: "main"      # stable transport alias; Gateway rotates internal window epochs after close_window
-  handoff_breath_url: "http://127.0.0.1:8000/breath-hook"  # Brain's private startup-package endpoint
+  handoff_breath_url: "http://127.0.0.1:8000/breath-hook"  # private; send Bearer from OMBRE_BREATH_HOOK_TOKEN or OMBRE_GATEWAY_TOKEN
   handoff_max_tokens: 1400         # reviewed portraits + exact 250–400-char handoff note + small unfinished items
   handoff_timeout_seconds: 3
   upstream_base_url: "https://api.openai.com/v1"

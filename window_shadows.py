@@ -269,6 +269,7 @@ class WindowShadowStore:
                 session_id TEXT NOT NULL DEFAULT '',
                 profile_id TEXT NOT NULL DEFAULT '',
                 parent_shadow_id TEXT NOT NULL DEFAULT '',
+                idempotency_key TEXT NOT NULL DEFAULT '',
                 source_date TEXT NOT NULL DEFAULT '',
                 version TEXT NOT NULL,
                 source_hash TEXT NOT NULL,
@@ -295,10 +296,19 @@ class WindowShadowStore:
             conn.execute("ALTER TABLE window_shadows ADD COLUMN profile_id TEXT NOT NULL DEFAULT ''")
         if "parent_shadow_id" not in columns:
             conn.execute("ALTER TABLE window_shadows ADD COLUMN parent_shadow_id TEXT NOT NULL DEFAULT ''")
+        if "idempotency_key" not in columns:
+            conn.execute("ALTER TABLE window_shadows ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''")
         if "continue_scene_id" not in columns:
             conn.execute("ALTER TABLE window_shadows ADD COLUMN continue_scene_id TEXT NOT NULL DEFAULT ''")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_window_shadows_parent ON window_shadows(parent_shadow_id)"
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_window_shadows_idempotency
+            ON window_shadows(idempotency_key)
+            WHERE idempotency_key != ''
+            """
         )
         conn.commit()
         conn.close()
@@ -308,8 +318,13 @@ class WindowShadowStore:
         return hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _window_id(content_hash: str, session_id: str) -> str:
-        seed = f"{str(session_id or '').strip()}\n{content_hash}"
+    def _window_id(content_hash: str, session_id: str, idempotency_key: str = "") -> str:
+        request_key = str(idempotency_key or "").strip()
+        seed = (
+            f"idempotency\n{request_key}"
+            if request_key
+            else f"{str(session_id or '').strip()}\n{content_hash}"
+        )
         return "window_" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
 
     @staticmethod
@@ -328,14 +343,22 @@ class WindowShadowStore:
         item["ordinary_recall"] = False
         return item
 
-    def plan(self, content: str, *, session_id: str = "") -> dict[str, str]:
+    def plan(
+        self,
+        content: str,
+        *,
+        session_id: str = "",
+        idempotency_key: str = "",
+    ) -> dict[str, str]:
         text = str(content or "")
         content_hash = self.source_hash(text)
-        window_id = self._window_id(content_hash, session_id)
+        request_key = str(idempotency_key or "").strip()
+        window_id = self._window_id(content_hash, session_id, request_key)
         return {
             "window_id": window_id,
             "session_id": str(session_id or "").strip() or window_id,
             "source_hash": content_hash,
+            "idempotency_key": request_key,
         }
 
     def write(
@@ -345,13 +368,18 @@ class WindowShadowStore:
         session_id: str = "",
         profile_id: str = "",
         parent_shadow_id: str = "",
+        idempotency_key: str = "",
         source_date: str = "",
         sections: dict[str, str] | None = None,
     ) -> tuple[dict, bool]:
         # The full window shadow is an authored artifact. Preserve it byte-for-byte
         # instead of applying the normal memory-content cleanup path.
         text = str(content or "")
-        planned = self.plan(text, session_id=session_id)
+        planned = self.plan(
+            text,
+            session_id=session_id,
+            idempotency_key=idempotency_key,
+        )
         content_hash = planned["source_hash"]
         window_id = planned["window_id"]
         existing = self.get(window_id)
@@ -364,15 +392,17 @@ class WindowShadowStore:
         conn.execute(
             """
             INSERT INTO window_shadows (
-                window_id, session_id, profile_id, parent_shadow_id, source_date, version, source_hash,
+                window_id, session_id, profile_id, parent_shadow_id, idempotency_key,
+                source_date, version, source_hash,
                 content, sections_json, moment_bucket_ids_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
             """,
             (
                 window_id,
                 session_key,
                 str(profile_id or "").strip(),
                 str(parent_shadow_id or "").strip(),
+                planned["idempotency_key"],
                 str(source_date or "").strip(),
                 WINDOW_SHADOW_VERSION,
                 content_hash,
@@ -385,6 +415,18 @@ class WindowShadowStore:
         conn.commit()
         conn.close()
         return self.get(window_id) or {}, True
+
+    def get_by_idempotency_key(self, idempotency_key: str) -> dict | None:
+        key = str(idempotency_key or "").strip()
+        if not key:
+            return None
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT * FROM window_shadows WHERE idempotency_key = ? LIMIT 1",
+            (key,),
+        ).fetchone()
+        conn.close()
+        return self._row(row)
 
     def attach_moment_buckets(
         self,

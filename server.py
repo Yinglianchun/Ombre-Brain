@@ -1057,6 +1057,33 @@ def _memory_write_token() -> str:
     )
 
 
+def _breath_hook_token() -> str:
+    return (
+        os.environ.get("OMBRE_BREATH_HOOK_TOKEN")
+        or _memory_write_token()
+    )
+
+
+def _require_breath_hook_auth(request):
+    from starlette.responses import JSONResponse
+
+    token = _breath_hook_token()
+    if not token:
+        return JSONResponse(
+            {"error": "breath_hook_auth_not_configured"},
+            status_code=503,
+        )
+    auth = str(request.headers.get("authorization") or "")
+    candidate = auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else ""
+    if candidate and hmac.compare_digest(candidate, token):
+        return None
+    return JSONResponse(
+        {"error": "unauthorized"},
+        status_code=401,
+        headers={"WWW-Authenticate": 'Bearer realm="Ombre handoff"'},
+    )
+
+
 def _authorized_memory_write(request) -> bool:
     token = _memory_write_token()
     if not token:
@@ -4046,6 +4073,9 @@ async def health_check(request):
 @mcp.custom_route("/breath-hook", methods=["GET"])
 async def breath_hook(request):
     from starlette.responses import PlainTextResponse
+    auth_error = _require_breath_hook_auth(request)
+    if auth_error is not None:
+        return auth_error
     try:
         requested_mode = str(request.query_params.get("mode") or "").strip().lower()
         if requested_mode in {"", "handoff"}:
@@ -4057,19 +4087,31 @@ async def breath_hook(request):
             parent_shadow_id = str(
                 request.query_params.get("parent_shadow_id") or ""
             ).strip()
-            query = str(request.query_params.get("query") or "").strip()
-            return PlainTextResponse(
-                await _recall_memory(
-                    mode="handoff",
-                    query=query,
-                    max_tokens=max_tokens,
-                    session_id=session_id,
-                    previous_session_id=previous_session_id,
-                    parent_shadow_id=parent_shadow_id,
-                    include_core=False,
-                    include_related=False,
+            if parent_shadow_id and not window_shadow_store.get(parent_shadow_id):
+                from starlette.responses import JSONResponse
+
+                return JSONResponse(
+                    {
+                        "error": "parent_shadow_not_found",
+                        "parent_shadow_id": parent_shadow_id,
+                    },
+                    status_code=404,
                 )
+            query = str(request.query_params.get("query") or "").strip()
+            text = await _recall_memory(
+                mode="handoff",
+                query=query,
+                max_tokens=max_tokens,
+                session_id=session_id,
+                previous_session_id=previous_session_id,
+                parent_shadow_id=parent_shadow_id,
+                include_core=False,
+                include_related=False,
             )
+            response = PlainTextResponse(text)
+            if parent_shadow_id:
+                response.headers["X-Ombre-Window-Shadow-Id"] = parent_shadow_id
+            return response
         all_buckets = await bucket_mgr.list_all(include_archive=False)
         # pinned
         pinned = [
@@ -10030,6 +10072,7 @@ async def _close_window_commit(
     profile_id: str = "",
     date: str = "",
     source: str = "",
+    idempotency_key: str = "",
     require_handoff_note: bool = True,
 ) -> dict:
     """Compensating transaction for one append-only Shadow and zero or more Scenes."""
@@ -10037,6 +10080,35 @@ async def _close_window_commit(
     text = str(shadow or "")
     if not text.strip():
         return {"status": "invalid", "reason": "empty_shadow", "error": "窗影内容为空，未保存。"}
+    request_key = str(idempotency_key or "").strip()
+    if len(request_key) > 200:
+        return {
+            "status": "invalid",
+            "reason": "invalid_idempotency_key",
+            "error": "idempotency_key 不能超过 200 个字符。",
+        }
+    if request_key:
+        existing_request = window_shadow_store.get_by_idempotency_key(request_key)
+        if existing_request:
+            existing_sections = existing_request.get("sections") or {}
+            existing_scene_ids = list(existing_request.get("scene_bucket_ids") or [])
+            return {
+                "status": "existing",
+                "window_id": str(existing_request.get("window_id") or ""),
+                "conversation_id": str(existing_request.get("session_id") or ""),
+                "profile_id": str(existing_request.get("profile_id") or ""),
+                "parent_shadow_id": str(existing_request.get("parent_shadow_id") or ""),
+                "idempotency_key": request_key,
+                "source_hash": str(existing_request.get("source_hash") or ""),
+                "handoff_note_chars": handoff_note_char_count(existing_sections.get("handoff", "")),
+                "handoff_ready": bool(str(existing_sections.get("handoff") or "").strip()),
+                "scene_bucket_ids": existing_scene_ids,
+                "scene_count": len(existing_scene_ids),
+                "created_scene_count": 0,
+                "continue_scene_id": str(existing_request.get("continue_scene_id") or ""),
+                "ordinary_recall": False,
+                "idempotent_replay": True,
+            }
     resolved_source = str(source or "").strip()
     markdown_import = resolved_source.lower() in {"markdown", "markdown_import", "md_import"}
     sections, validation_errors = validate_window_shadow(
@@ -10109,7 +10181,11 @@ async def _close_window_commit(
             "error": "window_resolution_missing_conversation_id",
             "transport_session_id": transport_session_id,
         }
-    planned = window_shadow_store.plan(text, session_id=conversation_id)
+    planned = window_shadow_store.plan(
+        text,
+        session_id=conversation_id,
+        idempotency_key=request_key,
+    )
     parent_shadow_id = str(
         (window_session or {}).get("parent_shadow_id") or ""
     ).strip()
@@ -10145,6 +10221,7 @@ async def _close_window_commit(
                 session_id=conversation_id,
                 profile_id=safe_profile_id,
                 parent_shadow_id=parent_shadow_id,
+                idempotency_key=request_key,
                 source_date=source_date,
                 sections=sections,
             )
@@ -10192,6 +10269,7 @@ async def _close_window_commit(
         "transport_session_id": transport_session_id,
         "profile_id": safe_profile_id,
         "parent_shadow_id": parent_shadow_id,
+        "idempotency_key": request_key,
         "source_hash": str(window.get("source_hash") or planned["source_hash"]),
         "handoff_note_chars": handoff_note_char_count(sections.get("handoff", "")),
         "handoff_ready": bool(str(sections.get("handoff") or "").strip()),
@@ -10213,10 +10291,11 @@ async def close_window(
     profile_id: str = "",
     date: str = "",
     source: str = "",
+    idempotency_key: str = "",
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow，并同时保存其中明确写出的 0~N 个独立 Scene，不要在关窗后再次调用工具抽取 Scene。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符：写这一窗真正改变了什么、未完线头和我想怎样继续；下个窗口会逐字注入这段，不做二次摘要。Shadow 全文仍原样保存且不进普通召回。session_id 可以继续传客户端固定身份（默认 main），Gateway 会把它解析为当前内部窗口；下次正常聊天自动换窗并认领这篇 Shadow。profile_id 是长期身份，通常沿用配置默认值。scenes 数组中的每个元素直接是一段原文经历，不带 `## Scene` / `### scene` / `### moment`；若 Scene 写在 Shadow 的 `## 想留下的记忆` 内，`### scene` 只作为抽取标记。多条 Scene 中若有下一窗说“继续吧”时应优先下钻的未完主线，传从 1 开始的 continue_scene_index；只有一条 Scene 时会自动认领，ID 由本次事务生成并写回窗影，无需调用者预知。后来才产生的新理解用 annotate 挂回来源。已经写好的 Markdown 用 source="markdown_import" 只转成窗影，不强制补 handoff_note，也不补造 Scene。"""
+    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow，并同时保存其中明确写出的 0~N 个独立 Scene，不要在关窗后再次调用工具抽取 Scene。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符：写这一窗真正改变了什么、未完线头和我想怎样继续；下个窗口会逐字注入这段，不做二次摘要。Shadow 全文仍原样保存且不进普通召回。session_id 可以继续传客户端固定身份（默认 main），Gateway 会把它解析为当前内部窗口；下次正常聊天自动换窗并认领这篇 Shadow。客户端重试同一次关窗时必须复用同一个 idempotency_key；Brain 会返回第一次成功写入的 window_id，不会再次关闭下一窗。profile_id 是长期身份，通常沿用配置默认值。scenes 数组中的每个元素直接是一段原文经历，不带 `## Scene` / `### scene` / `### moment`；若 Scene 写在 Shadow 的 `## 想留下的记忆` 内，`### scene` 只作为抽取标记。多条 Scene 中若有下一窗说“继续吧”时应优先下钻的未完主线，传从 1 开始的 continue_scene_index；只有一条 Scene 时会自动认领，ID 由本次事务生成并写回窗影，无需调用者预知。后来才产生的新理解用 annotate 挂回来源。已经写好的 Markdown 用 source="markdown_import" 只转成窗影，不强制补 handoff_note，也不补造 Scene。"""
     _ = context
     resolved_source = str(source or "").strip().lower()
     if resolved_source in {"operit", "ob-auto-grow", "auto", "workflow", "worker"}:
@@ -10233,6 +10312,7 @@ async def close_window(
         profile_id=profile_id,
         date=date,
         source=source,
+        idempotency_key=idempotency_key,
     )
 
 
