@@ -1419,29 +1419,13 @@ class RecallPolicy:
         return tuple(dict.fromkeys(cluster))[:8], groups, False
 
     def _primary_axis_term(self, terms: list[str]) -> str:
-        keyed_terms = [
-            self._compact_entity_keyword(term)
-            for term in terms
-            if self._compact_entity_keyword(term)
-        ]
-
-        def score(item: tuple[int, str]) -> tuple[int, int, int, int, int]:
+        def score(item: tuple[int, str]) -> tuple[int, int, int, int]:
             index, term = item
             key = self._compact_entity_keyword(term)
             has_code = int(bool(re.search(r"[a-z]", key) and re.search(r"\d", key)))
             has_suffix = int(any(key.endswith(self._compact_entity_keyword(suffix)) for suffix in LOCATABLE_COMPOUND_SUFFIX_TERMS))
-            mixed_shell_residue = int(
-                bool(re.search(r"[a-z]", key) and re.search(r"[\u4e00-\u9fff]", key))
-                and not has_suffix
-                and any(
-                    other != key
-                    and other in key
-                    and bool(re.fullmatch(r"[a-z][a-z0-9_.:/-]{2,}", other))
-                    for other in keyed_terms
-                )
-            )
             effective_len = min(len(key), 14)
-            return (-mixed_shell_residue, has_code, has_suffix, effective_len, -index)
+            return (has_code, has_suffix, effective_len, -index)
 
         return max(enumerate(terms), key=score)[1]
 
