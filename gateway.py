@@ -16786,7 +16786,6 @@ class GatewayService:
             if str(label or "").strip()
         }
         if label_set & {
-            "protected_phrase",
             "source_record_exact",
             "raw_transcript_exact",
             "same_day_metadata",
