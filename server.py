@@ -12155,7 +12155,7 @@ async def api_diary_comment_create(request):
         result = diary_store.comment(
             int(request.path_params["diary_id"]),
             content=str(body.get("content") or ""),
-            author=str(body.get("author") or "user"),
+            author="user",
         )
         return JSONResponse({**result, "message": "评论添加成功"})
     except Exception as exc:
