@@ -1,6 +1,6 @@
 # External Platform Tool Guide
 
-这份文档用于把 Ombre-Brain 接给聊天平台。MCP 只注册八个日常动作；不要猜测或调用历史工具名。
+这份文档用于把 Ombre-Brain 接给聊天平台。MCP 只注册十三个日常动作；不要猜测或调用历史工具名。
 
 ## 当前 MCP 工具
 
@@ -12,6 +12,11 @@
 - `publish_narrative`：发布或修订有 Scene 来源账的 Narrative Roll。
 - `read_portrait`：显式读取已审阅或待审的 User / Relationship Portrait。
 - `publish_portrait`：带 optimistic revision 与可验证 evidence 发布 Portrait。
+- `read_diary`：按 ID、日期、标题或日期+标题统一读取日记。
+- `write_diary`：原样写日记；带 `unlock_at` 时写暗房日记。
+- `revise_diary`：修改日记并保存上一版快照。
+- `delete_diary`：确认后软删除精确 ID 的日记。
+- `comment_diary`：以 Haven 身份追加日记评论。
 
 旧桶格式、旧 Scene 投影和 Dashboard/internal HTTP 路径仍可兼容读取；旧 MCP 工具名已经退役，不能通过环境变量重新打开。
 
@@ -39,6 +44,14 @@
 - 读到已有来源后产生的新理解、修正或感受，用 annotate(source_id=..., content=..., kind=...) 挂回来源。
 - Annotation 不独立扩散，也不替代来源正文。
 - 用户前端评论不通过 MCP 暴露。
+
+日记：
+- read_diary 只按 ID、日期、标题或日期+标题读取；正文和情绪标签不作为搜索轴。
+- write_diary 原样保存正文；带 unlock_at 时写成暗房日记。
+- 暗房未到解锁时间时不返回正文，也不能修改、删除或评论。
+- revise_diary 保存上一版快照；delete_diary 需要 confirm="DELETE"。
+- comment_diary 只写 Haven 评论；小雨评论由前端写入。
+- Diary 和 Darkroom 都不进入普通记忆召回。
 
 关窗：
 - 窗口结束或准备换窗时，只调用一次 close_window。

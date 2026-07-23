@@ -15,6 +15,11 @@ DAILY_TOOL_NAMES: tuple[str, ...] = (
     "publish_narrative",
     "read_portrait",
     "publish_portrait",
+    "read_diary",
+    "write_diary",
+    "revise_diary",
+    "delete_diary",
+    "comment_diary",
 )
 
 class OmbreFastMCP(FastMCP):

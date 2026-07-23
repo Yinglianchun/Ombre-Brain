@@ -4,7 +4,7 @@
 
 先使用平台自动注入的 handoff / recalled context。已经有足够证据时不要重复调用工具。
 
-## 八个 MCP 动作
+## MCP 日常动作
 
 | 工具 | 用途 |
 | --- | --- |
@@ -16,8 +16,13 @@
 | `publish_narrative` | 发布或修订有 Scene 来源账的 Narrative Roll |
 | `read_portrait` | 显式读取已审阅或待审的 User / Relationship Portrait |
 | `publish_portrait` | 带 revision 与可验证 evidence 发布 Portrait |
+| `read_diary` | 按 ID、日期、标题或日期+标题统一读取日记 |
+| `write_diary` | 原样写日记；带 `unlock_at` 时写暗房日记 |
+| `revise_diary` | 修改日记并保留上一版快照 |
+| `delete_diary` | 软删除精确 ID 的日记 |
+| `comment_diary` | 以 Haven 身份给日记追加评论 |
 
-MCP 只注册这八个动作。旧桶、旧字段和旧读取投影继续兼容，但历史 MCP 工具名已经退役，不能通过环境变量重新打开。
+MCP 只注册以上十三个动作。旧桶、旧字段和旧读取投影继续兼容，但历史 MCP 工具名与旧 Diary MCP 的 `get/search/update/add_user_comment` 已经退役。
 
 ## 什么时候读取
 
@@ -44,6 +49,15 @@ MCP 只注册这八个动作。旧桶、旧字段和旧读取投影继续兼容�
 - Annotation 始终挂回来源，不独立显示或扩散，也不替代来源正文。
 - 没有明确来源时，不要把一句抽象结论伪装成 Annotation。
 - 用户前端评论不通过 MCP 暴露。
+
+## 日记与暗房
+
+- `read_diary` 只按 ID、日期、标题或日期+标题读取；情绪标签只展示，不参与搜索。
+- `write_diary` 逐字保存作者正文；传 `unlock_at` 时写成 `entry_type=darkroom`。
+- 暗房时间锁结束前不返回正文或评论，也不可修改、删除或评论，没有确认词或密码绕过。
+- `revise_diary` 保留上一版快照；`delete_diary` 需要精确 ID 与 `confirm="DELETE"`，且为可恢复软删除。
+- 用户评论只由前端 HTTP 路径写入；MCP 只提供 Haven 的 `comment_diary`。
+- Diary/Darkroom 都不进入普通 Scene candidate、gate、embedding recall 或扩散。
 
 ## 关闭窗口
 

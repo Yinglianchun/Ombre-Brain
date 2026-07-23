@@ -32,6 +32,12 @@ log_level: "INFO"
 # 保存 Persona State 等运行时 SQLite 状态，建议放在 buckets 同步目录外。
 # state_dir: "/path/to/ombre-brain/state"
 
+# --- Diary authored-document backend / 日记原文后端 ---
+# The SQLite file keeps ordinary Diary and timed Darkroom entries together.
+# Darkroom bodies stay unreadable until unlock_at; neither type enters recall.
+diary:
+  db_path: ""                       # empty = <state_dir>/diary.db
+
 # --- Identity / 名字口径 ---
 # These names are used in prompts and comment authors. Change this block first
 # when adapting the fork for another person/persona.

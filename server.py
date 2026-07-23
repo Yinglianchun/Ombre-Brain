@@ -71,6 +71,7 @@ from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from darkroom import DarkroomStore
+from diary_store import DiaryLockedError, DiaryNotFoundError, DiaryStore
 from diary_sources import DiarySourceImporter
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
@@ -229,6 +230,7 @@ dream_engine = DreamEngine(config)                     # Night dream worker / �
 identity_semantic_store = IdentitySemanticStore(config) # Private relationship alias index / 私有关系语义索引
 word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
 darkroom_store = DarkroomStore(config)                  # Private reflection room / 不回显正文的暗房
+diary_store = DiaryStore(config)                        # Diary + timed Darkroom authored documents / 日记与定时暗房原文
 gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
 reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
@@ -4059,6 +4061,7 @@ async def health_check(request):
                 "api_ready": bool(portrait_engine.api_key),
                 "state_path": portrait_engine.state_path,
             },
+            "diary": diary_store.stats(),
             "mcp_surface": mcp.surface_status(),
             "memory_object_writes": memory_object_write_status(config),
         })
@@ -11431,8 +11434,8 @@ async def _write_scene_memory(
 
 
 # =============================================================
-# Daily MCP façade — the eight actions advertised to chat models
-# 日常 MCP façade —— 普通聊天模型只看见这八个动作
+# Daily MCP façade — memory continuity plus authored Diary actions
+# 日常 MCP façade —— 记忆连续性与作者日记动作
 # =============================================================
 @mcp.tool()
 async def recall(
@@ -11544,6 +11547,116 @@ async def annotate(
         kind=kind,
         source="annotate",
     )
+
+
+def _diary_tool_error(exc: Exception) -> dict:
+    if isinstance(exc, DiaryLockedError):
+        return {
+            "status": "locked",
+            "diary_id": exc.diary_id,
+            "unlock_at": exc.unlock_at,
+            "body_available": False,
+        }
+    if isinstance(exc, DiaryNotFoundError):
+        return {"status": "not_found", "error": str(exc)}
+    if isinstance(exc, ValueError):
+        return {"status": "invalid", "error": str(exc)}
+    logger.warning("Diary tool failed / 日记工具失败: %s", exc)
+    return {"status": "error", "error": str(exc)}
+
+
+@mcp.tool()
+async def read_diary(
+    diary_id: int = 0,
+    date: str = "",
+    title: str = "",
+    limit: int = 20,
+) -> dict:
+    """统一读取日记。可按精确 ID、日期、标题或日期+标题读取；都不传时列最近日记。情绪标签只随结果展示，不参与搜索。尚未到 unlock_at 的暗房日记只返回门牌与解锁时间，绝不返回正文或评论。"""
+    try:
+        return diary_store.read(
+            diary_id=int(diary_id) if int(diary_id or 0) > 0 else None,
+            date=date,
+            title=title,
+            limit=limit,
+        )
+    except Exception as exc:
+        return _diary_tool_error(exc)
+
+
+@mcp.tool()
+async def write_diary(
+    content: str,
+    title: str = "",
+    date: str = "",
+    emotion_tags: list[str] | None = None,
+    unlock_at: str = "",
+) -> dict:
+    """原样写一篇作者日记；date 留空使用 Asia/Shanghai 今天。传未来的 ISO-8601 unlock_at 时写成暗房日记，在到时前任何读取、修改、删除或评论都不能取得正文。标签只保存和展示，不参与召回。"""
+    try:
+        return diary_store.create(
+            content=content,
+            title=title or None,
+            date=date,
+            emotion_tags=emotion_tags,
+            author="ai",
+            unlock_at=unlock_at,
+        )
+    except Exception as exc:
+        return _diary_tool_error(exc)
+
+
+@mcp.tool()
+async def revise_diary(
+    diary_id: int,
+    content: str | None = None,
+    title: str | None = None,
+    date: str | None = None,
+    emotion_tags: list[str] | None = None,
+    unlock_at: str | None = None,
+) -> dict:
+    """修改一篇已存在的日记并保留上一版快照。时间锁尚未结束的暗房日记不可修改，也没有密码或确认词绕过。"""
+    try:
+        return diary_store.revise(
+            diary_id,
+            content=content,
+            title=title,
+            date=date,
+            emotion_tags=emotion_tags,
+            unlock_at=unlock_at,
+        )
+    except Exception as exc:
+        return _diary_tool_error(exc)
+
+
+@mcp.tool()
+async def delete_diary(
+    diary_id: int,
+    confirm: str = "",
+) -> dict:
+    """删除一篇精确 ID 的日记。必须传 confirm="DELETE"；删除为可恢复软删除并保留上一版快照。时间锁尚未结束的暗房日记不可删除。"""
+    if str(confirm or "") != "DELETE":
+        return {
+            "status": "confirmation_required",
+            "diary_id": int(diary_id),
+            "required": "DELETE",
+        }
+    try:
+        return diary_store.delete(diary_id)
+    except Exception as exc:
+        return _diary_tool_error(exc)
+
+
+@mcp.tool()
+async def comment_diary(
+    diary_id: int,
+    content: str,
+) -> dict:
+    """以 Haven 身份给一篇日记追加评论。用户评论只由前端 HTTP 路径写入，不作为 MCP 工具暴露；时间锁尚未结束的暗房日记不可评论。"""
+    try:
+        return diary_store.comment(diary_id, content=content, author="ai")
+    except Exception as exc:
+        return _diary_tool_error(exc)
 
 
 @mcp.tool()
@@ -11889,6 +12002,190 @@ async def api_create_memory(request):
         "source": "chatgpt",
         "embedding": embedding_status,
     })
+
+
+def _diary_http_error_response(exc: Exception):
+    from starlette.responses import JSONResponse
+
+    payload = _diary_tool_error(exc)
+    status = 423 if payload.get("status") == "locked" else 404 if payload.get("status") == "not_found" else 400
+    if payload.get("status") == "error":
+        status = 500
+    return JSONResponse(payload, status_code=status)
+
+
+@mcp.custom_route("/diaries", methods=["POST"])
+async def api_diary_create(request):
+    """RiJi-compatible create route backed by Ombre's authored Diary store."""
+    from starlette.responses import JSONResponse
+
+    try:
+        body = await request.json()
+        result = diary_store.create(
+            content=str(body.get("content") or ""),
+            date=str(body.get("date") or ""),
+            title=body.get("title"),
+            emotion_tags=body.get("emotion_tags"),
+            author=str(body.get("author") or "ai"),
+            unlock_at=str(body.get("unlock_at") or ""),
+        )
+        return JSONResponse(
+            {
+                "id": result.get("id"),
+                "entry_type": result.get("entry_type"),
+                "locked": result.get("locked"),
+                "unlock_at": result.get("unlock_at"),
+                "message": "日记创建成功",
+            }
+        )
+    except Exception as exc:
+        return _diary_http_error_response(exc)
+
+
+@mcp.custom_route("/diaries/date/{date}/all", methods=["GET"])
+async def api_diaries_by_date(request):
+    from starlette.responses import JSONResponse
+
+    try:
+        result = diary_store.read(
+            date=str(request.path_params.get("date") or ""),
+            title=str(request.query_params.get("title") or ""),
+            limit=_int_between(request.query_params.get("limit"), 100, 1, 100),
+        )
+        return JSONResponse({"count": result["count"], "diaries": result["diaries"]})
+    except Exception as exc:
+        return _diary_http_error_response(exc)
+
+
+@mcp.custom_route("/diaries/date/{date}", methods=["GET"])
+async def api_diary_by_date(request):
+    from starlette.responses import JSONResponse
+
+    try:
+        result = diary_store.read(
+            date=str(request.path_params.get("date") or ""),
+            limit=1,
+        )
+        if not result.get("diaries"):
+            return JSONResponse({"detail": "未找到该日期的日记"}, status_code=404)
+        return JSONResponse(result["diaries"][0])
+    except Exception as exc:
+        return _diary_http_error_response(exc)
+
+
+@mcp.custom_route("/diaries/search", methods=["POST"])
+async def api_diary_search(request):
+    """Search date/title only. Body text and emotion tags are display data, never query axes."""
+    from starlette.responses import JSONResponse
+
+    try:
+        body = await request.json()
+        result = diary_store.search(
+            keyword=str(body.get("keyword") or ""),
+            date=str(body.get("date") or ""),
+            title=str(body.get("title") or ""),
+            start_date=str(body.get("start_date") or ""),
+            end_date=str(body.get("end_date") or ""),
+            limit=_int_between(body.get("limit"), 10, 1, 100),
+            offset=max(0, int(body.get("offset") or 0)),
+        )
+        return JSONResponse({"count": result["count"], "diaries": result["diaries"]})
+    except Exception as exc:
+        return _diary_http_error_response(exc)
+
+
+@mcp.custom_route("/diaries/{diary_id}", methods=["GET"])
+async def api_diary_detail(request):
+    from starlette.responses import JSONResponse
+
+    try:
+        result = diary_store.read(
+            diary_id=int(request.path_params["diary_id"]),
+            limit=1,
+        )
+        if not result.get("diaries"):
+            return JSONResponse({"detail": "未找到该日记"}, status_code=404)
+        return JSONResponse(result["diaries"][0])
+    except Exception as exc:
+        return _diary_http_error_response(exc)
+
+
+@mcp.custom_route("/diaries/{diary_id}", methods=["PUT"])
+async def api_diary_revise(request):
+    from starlette.responses import JSONResponse
+
+    try:
+        body = await request.json()
+        result = diary_store.revise(
+            int(request.path_params["diary_id"]),
+            content=body.get("content") if "content" in body else None,
+            date=body.get("date") if "date" in body else None,
+            title=body.get("title") if "title" in body else None,
+            emotion_tags=body.get("emotion_tags") if "emotion_tags" in body else None,
+            unlock_at=body.get("unlock_at") if "unlock_at" in body else None,
+        )
+        return JSONResponse(
+            {
+                "diary_id": result.get("id"),
+                "revision": result.get("revision"),
+                "message": "日记更新成功",
+            }
+        )
+    except Exception as exc:
+        return _diary_http_error_response(exc)
+
+
+@mcp.custom_route("/diaries/{diary_id}", methods=["DELETE"])
+async def api_diary_delete(request):
+    from starlette.responses import JSONResponse
+
+    try:
+        result = diary_store.delete(int(request.path_params["diary_id"]))
+        return JSONResponse({**result, "message": "日记删除成功"})
+    except Exception as exc:
+        return _diary_http_error_response(exc)
+
+
+@mcp.custom_route("/diaries/{diary_id}/comments", methods=["POST"])
+async def api_diary_comment_create(request):
+    from starlette.responses import JSONResponse
+
+    try:
+        body = await request.json()
+        result = diary_store.comment(
+            int(request.path_params["diary_id"]),
+            content=str(body.get("content") or ""),
+            author=str(body.get("author") or "user"),
+        )
+        return JSONResponse({**result, "message": "评论添加成功"})
+    except Exception as exc:
+        return _diary_http_error_response(exc)
+
+
+@mcp.custom_route("/diaries/{diary_id}/comments", methods=["GET"])
+async def api_diary_comments(request):
+    from starlette.responses import JSONResponse
+
+    try:
+        return JSONResponse(
+            diary_store.comments(int(request.path_params["diary_id"]))
+        )
+    except Exception as exc:
+        return _diary_http_error_response(exc)
+
+
+@mcp.custom_route("/diaries/{diary_id}/comments/{comment_id}", methods=["DELETE"])
+async def api_diary_comment_delete(request):
+    from starlette.responses import JSONResponse
+
+    try:
+        result = diary_store.delete_comment(
+            int(request.path_params["diary_id"]),
+            int(request.path_params["comment_id"]),
+        )
+        return JSONResponse({**result, "message": "评论删除成功"})
+    except Exception as exc:
+        return _diary_http_error_response(exc)
 
 
 @mcp.custom_route("/api/buckets", methods=["GET"])

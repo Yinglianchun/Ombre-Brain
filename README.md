@@ -96,7 +96,7 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 ### 自动总结
 
-Daily Reflection 可根据当天聊天、已有 auto-memory 产物和近期记忆生成日印象或候选记忆。完整日记可以留在外部 RiJi / Haven-Diary；Ombre 只提取以后真的有用的部分。
+Daily Reflection 可根据当天聊天、已有 auto-memory 产物和近期记忆生成日印象或候选记忆。完整日记与定时解锁的暗房正文保存在统一 Diary SQLite 后端；两者都不进入普通召回。只有人工确认后的具体时刻才另写为 Scene。
 
 #### 自动记忆
 
@@ -470,8 +470,13 @@ Codex 接线时注意：
 | `publish_narrative` | 发布或修订有 Scene 来源账的 Narrative Roll |
 | `read_portrait` | 显式读取已审阅 Portrait 与证据 |
 | `publish_portrait` | 带 revision 与证据发布 Portrait |
+| `read_diary` | 按 ID、日期、标题或日期+标题读取日记 |
+| `write_diary` | 原样写日记；带 `unlock_at` 时写暗房日记 |
+| `revise_diary` | 修改日记并保留上一版 |
+| `delete_diary` | 确认后软删除一篇日记 |
+| `comment_diary` | 以 Haven 身份追加日记评论 |
 
-MCP 只注册以上八个动作。旧桶格式、读取投影和 Dashboard/internal HTTP 兼容继续保留，但旧 MCP 工具名不再公布或接受调用。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
+MCP 只注册以上十三个动作。旧桶格式、读取投影和 Dashboard/internal HTTP 兼容继续保留，但旧 MCP 工具名与旧 Diary MCP 工具不再公布或接受调用。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
 
 ## 运维与验证
 
