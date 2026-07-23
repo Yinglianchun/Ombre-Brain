@@ -4036,7 +4036,7 @@ async def breath_hook(request):
             ).strip()
             query = str(request.query_params.get("query") or "").strip()
             return PlainTextResponse(
-                await breath(
+                await _recall_memory(
                     mode="handoff",
                     query=query,
                     max_tokens=max_tokens,
@@ -4596,7 +4596,6 @@ async def _shadow_memory_card_candidates(
     return [bucket for bucket in buckets if _shadow_memory_card_eligible(bucket)][:limit]
 
 
-@mcp.tool()
 async def memory_card_shadow_backfill(
     limit: int = 10,
     bucket_id: str = "",
@@ -4662,7 +4661,6 @@ async def memory_card_shadow_backfill(
     }
 
 
-@mcp.tool()
 async def memory_card_shadow_read(bucket_id: str = "", limit: int = 20) -> dict:
     """读取已保存的影子记忆卡；这些卡不参与候选、gate、扩散或注入。"""
     bucket_id = str(bucket_id or "").strip()
@@ -4950,7 +4948,6 @@ async def edge_backfill(
     )
 
 
-@mcp.tool()
 async def entity_edge_backfill(
     limit: int = 25,
     bucket_id: str = "",
@@ -8111,7 +8108,6 @@ def _reminder_public_payload(item: dict | None) -> dict:
     return {key: item.get(key) for key in keys}
 
 
-@mcp.tool()
 async def reminder_create(
     title: str,
     content: str,
@@ -8148,7 +8144,6 @@ async def reminder_create(
     return {"status": "created", "reminder": _reminder_public_payload(item)}
 
 
-@mcp.tool()
 async def reminder_list(status: str = "active", limit: int = 20) -> dict:
     """列出独立照顾备忘；status 可用 active/done/archived/all。"""
     try:
@@ -8158,7 +8153,6 @@ async def reminder_list(status: str = "active", limit: int = 20) -> dict:
     return {"count": len(items), "reminders": [_reminder_public_payload(item) for item in items]}
 
 
-@mcp.tool()
 async def reminder_update(
     reminder_id: str,
     status: str = "",
@@ -8202,8 +8196,7 @@ async def reminder_update(
 # With args: search by keyword/vector semantics. Emotion coordinates are legacy-only.
 # 有参数：按关键词/向量语义检索；情绪坐标只保留旧接口兼容。
 # =============================================================
-@mcp.tool()
-async def breath(
+async def _recall_memory(
     query: str = "",
     max_tokens: int = 10000,
     domain: str = "",
@@ -9127,12 +9120,16 @@ async def resurface(max_results: int = 1, include_archive: bool = True, max_toke
     return "=== 久未触碰的旧记忆 ===\n" + "\n---\n".join(parts)
 
 
+# Python compatibility name for internal callers and legacy tests. It is not an
+# MCP registration; chat models can only call the daily façade below.
+breath = _recall_memory
+
+
 # =============================================================
 # Tool 1.5: read_bucket — exact archive-cabinet read
 # 工具 1.5：read_bucket — 按 ID 精确读桶
 # =============================================================
-@mcp.tool()
-async def read_bucket(bucket_id: str) -> dict:
+async def _read_scene_memory(bucket_id: str) -> dict:
     """按 bucket_id 精确读取完整记忆桶；trace/comment 前先读。只读，不刷新活跃度。"""
     bucket_id = _coerce_memory_id(bucket_id)
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
@@ -9143,11 +9140,13 @@ async def read_bucket(bucket_id: str) -> dict:
     return _bucket_read_payload(bucket)
 
 
+read_bucket = _read_scene_memory
+
+
 # =============================================================
 # Tool 1.55: list_buckets_light — lightweight bucket index
 # 工具 1.55：list_buckets_light — 轻量桶索引
 # =============================================================
-@mcp.tool()
 async def list_buckets_light(
     include_archive: bool = False,
     limit: int = 500,
@@ -9175,19 +9174,20 @@ async def list_buckets_light(
 # Tool 1.56: Narrative Roll read-only index and full read
 # 工具 1.56：叙事卷只读索引与全文读取
 # =============================================================
-@mcp.tool()
 async def narrative_rolls(query: str = "", limit: int = 20) -> dict:
     """只读搜索叙事卷索引；返回标题、时间范围、状态、实体与 narrative_id，不返回正文。按卷名或实体找卷；精确日期/原话仍应读 Scene 或 raw。"""
     return narrative_roll_store.list(query=query, limit=limit)
 
 
-@mcp.tool()
-async def read_narrative_roll(narrative_id: str) -> dict:
+async def _read_narrative_memory(narrative_id: str) -> dict:
     """按 narrative_id 只读完整叙事卷：正文、当前状态、来源账、准确性边界、revision 与 linked_scene_ids 一起返回。Narrative Roll 是有来源的第一人称派生叙事，不是原始证据；精确日期和逐字原话继续下钻 Scene/raw。"""
     narrative_id = _coerce_memory_id(narrative_id)
     if not narrative_id or not MEMORY_ID_RE.fullmatch(narrative_id):
         return {"status": "invalid", "error": "invalid narrative_id"}
     return narrative_roll_store.read(narrative_id)
+
+
+read_narrative_roll = _read_narrative_memory
 
 
 @mcp.custom_route("/api/narrative-rolls", methods=["GET"])
@@ -9200,7 +9200,7 @@ async def api_narrative_rolls(request):
         return err
     narrative_id = str(request.query_params.get("narrative_id") or "").strip()
     if narrative_id:
-        result = await read_narrative_roll(narrative_id)
+        result = await _read_narrative_memory(narrative_id)
     else:
         result = await narrative_rolls(
             query=str(request.query_params.get("query") or ""),
@@ -9220,7 +9220,6 @@ async def api_narrative_rolls(request):
 # Tool 1.57: Scene-edge proposal review
 # 工具 1.57：只读查看并明确审核 Scene 边提案
 # =============================================================
-@mcp.tool()
 async def scene_edge_proposals(
     status: str = "pending",
     proposal_id: str = "",
@@ -9248,7 +9247,6 @@ async def scene_edge_proposals(
         return {"status": "error", "error": str(exc), "proposals": []}
 
 
-@mcp.tool()
 async def review_scene_edge_proposal(
     proposal_id: str,
     decision: str,
@@ -9428,13 +9426,14 @@ async def api_legacy_memory_review_apply_archive(request):
 # Tool 1.6: comment_bucket — add a ring/comment to a memory
 # 工具 1.6：comment_bucket — 给记忆追加年轮
 # =============================================================
-@mcp.tool()
-async def comment_bucket(
+async def _append_annotation(
     bucket_id: str,
     content: str,
     kind: str = "comment",
     valence: float = -1,
     arousal: float = -1,
+    *,
+    source: str = "annotate",
 ) -> dict:
     """给已有 bucket 追加年轮/补充感受；会 touch，不改正文。kind=feel 时 content 只能写“我……”第一人称正文，不写标题或任何 Markdown 分段。"""
     bucket_id = _coerce_memory_id(bucket_id)
@@ -9456,7 +9455,7 @@ async def comment_bucket(
         kind=kind or "comment",
         valence=valence if 0 <= valence <= 1 else None,
         arousal=arousal if 0 <= arousal <= 1 else None,
-        source="comment_bucket",
+        source=source,
         touch=True,
     )
     if not entry:
@@ -9473,11 +9472,28 @@ async def comment_bucket(
     }
 
 
+async def comment_bucket(
+    bucket_id: str,
+    content: str,
+    kind: str = "comment",
+    valence: float = -1,
+    arousal: float = -1,
+) -> dict:
+    """Internal compatibility wrapper for old HTTP/Python callers."""
+    return await _append_annotation(
+        bucket_id,
+        content,
+        kind=kind,
+        valence=valence,
+        arousal=arousal,
+        source="comment_bucket",
+    )
+
+
 # =============================================================
 # Tool 1.7: delete_bucket_comment — delete one AI-authored ring
 # 工具 1.7：delete_bucket_comment — 删除一条自己写的年轮
 # =============================================================
-@mcp.tool()
 async def delete_bucket_comment(bucket_id: str, comment_id: str) -> dict:
     """删除自己通过 comment_bucket 写入的一条年轮；不会删除 bucket，也不会删除小雨/dashboard 写的年轮。"""
     bucket_id = _coerce_memory_id(bucket_id)
@@ -9621,7 +9637,6 @@ async def api_bucket_comment_delete(request):
 # Tool 2: hold — Hold on to this
 # 工具 2：hold — 握住，留下来
 # =============================================================
-@mcp.tool()
 async def hold(
     content: str,
     tags: str = "",
@@ -9814,7 +9829,6 @@ async def hold(
 # Tool 2.5: darkroom — Private unfinished reflection
 # 工具 2.5：darkroom — 暗房，存放未显影的内在反思
 # =============================================================
-@mcp.tool()
 async def darkroom_enter(
     note: str,
     mode: str = "continue",
@@ -9841,7 +9855,6 @@ async def darkroom_enter(
         return {"status": "error", "error": str(exc)}
 
 
-@mcp.tool()
 async def darkroom_rooms(limit: int = 20, visibility: str = "active") -> dict:
     """只读列出暗房门牌，不返回正文；默认列 active 房间，可传 visibility="all" 看全部门牌，用 room_id 再调用 darkroom_view。"""
     try:
@@ -9850,7 +9863,6 @@ async def darkroom_rooms(limit: int = 20, visibility: str = "active") -> dict:
         return {"status": "error", "error": str(exc)}
 
 
-@mcp.tool()
 async def darkroom_delete(room_id: str, confirm: str = "") -> dict:
     """从暗房主存储删除一整间房及全部 revisions；必须传精确 room_id 和 confirm="DELETE"，并保留本地私密备份。"""
     try:
@@ -9861,7 +9873,6 @@ async def darkroom_delete(room_id: str, confirm: str = "") -> dict:
         return {"status": "not_found", "error": "room not found", "room_id": str(room_id or "")}
 
 
-@mcp.tool()
 async def darkroom_view(entry_id: str = "latest") -> dict:
     """只读查看一条已解锁的暗房内容；未到锁门时间不返回正文。"""
     try:
@@ -9956,7 +9967,7 @@ def _window_shadow_scene_records(
     """Validate canonical Scene inputs before any Shadow or bucket is written."""
     if markdown_import:
         if any(str(value or "").strip() for value in (explicit_scenes or [])):
-            return [], "markdown_import 只无损导入 Shadow，不接受 scenes；需要普通召回的场景请人工确认后另用 hold。"
+            return [], "markdown_import 只无损导入 Shadow，不接受 scenes；需要普通召回的场景请人工确认后另用 write_scene。"
         return [], ""
     inline_scenes = extract_window_shadow_scenes(shadow)
     provided = [str(value or "").strip() for value in (explicit_scenes or []) if str(value or "").strip()]
@@ -10175,7 +10186,7 @@ async def close_window(
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow，并同时保存其中明确写出的 0~N 个独立 Scene，不要在关窗后再次调用工具抽取 Scene。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符：写这一窗真正改变了什么、未完线头和我想怎样继续；下个窗口会逐字注入这段，不做二次摘要。Shadow 全文仍原样保存且不进普通召回。session_id 可以继续传客户端固定身份（默认 main），Gateway 会把它解析为当前内部窗口；下次正常聊天自动换窗并认领这篇 Shadow。profile_id 是长期身份，通常沿用配置默认值。scenes 数组中的每个元素直接是一段原文经历，不带 `## Scene` / `### scene` / `### moment`；若 Scene 写在 Shadow 的 `## 想留下的记忆` 内，`### scene` 只作为抽取标记。多条 Scene 中若有下一窗说“继续吧”时应优先下钻的未完主线，传从 1 开始的 continue_scene_index；只有一条 Scene 时会自动认领，ID 由本次事务生成并写回窗影，无需调用者预知。后来才产生的新理解用带时间的 comment_bucket 年轮。已经写好的 Markdown 用 source="markdown_import" 只转成窗影，不强制补 handoff_note，也不补造 Scene。"""
+    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow，并同时保存其中明确写出的 0~N 个独立 Scene，不要在关窗后再次调用工具抽取 Scene。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符：写这一窗真正改变了什么、未完线头和我想怎样继续；下个窗口会逐字注入这段，不做二次摘要。Shadow 全文仍原样保存且不进普通召回。session_id 可以继续传客户端固定身份（默认 main），Gateway 会把它解析为当前内部窗口；下次正常聊天自动换窗并认领这篇 Shadow。profile_id 是长期身份，通常沿用配置默认值。scenes 数组中的每个元素直接是一段原文经历，不带 `## Scene` / `### scene` / `### moment`；若 Scene 写在 Shadow 的 `## 想留下的记忆` 内，`### scene` 只作为抽取标记。多条 Scene 中若有下一窗说“继续吧”时应优先下钻的未完主线，传从 1 开始的 continue_scene_index；只有一条 Scene 时会自动认领，ID 由本次事务生成并写回窗影，无需调用者预知。后来才产生的新理解用 annotate 挂回来源。已经写好的 Markdown 用 source="markdown_import" 只转成窗影，不强制补 handoff_note，也不补造 Scene。"""
     _ = context
     resolved_source = str(source or "").strip().lower()
     if resolved_source in {"operit", "ob-auto-grow", "auto", "workflow", "worker"}:
@@ -10195,7 +10206,6 @@ async def close_window(
     )
 
 
-@mcp.tool()
 async def grow(
     content: str,
     auto: bool = False,
@@ -10239,8 +10249,11 @@ async def grow(
     return "\n".join(lines)
 
 
-@mcp.tool()
-async def window_shadow_read(window_id: str = "", limit: int = 10, include_content: bool = True) -> dict:
+async def _read_window_shadow_memory(
+    window_id: str = "",
+    limit: int = 10,
+    include_content: bool = True,
+) -> dict:
     """回看整篇窗影或列出最近窗影；完整窗影不参与普通 recall，handoff 只投影流动自我与最近关系原文。"""
     window_id = str(window_id or "").strip()
     if window_id:
@@ -10265,11 +10278,13 @@ async def window_shadow_read(window_id: str = "", limit: int = 10, include_conte
     }
 
 
+window_shadow_read = _read_window_shadow_memory
+
+
 # =============================================================
 # Tool 3.5: profile_fact — manually solidify a user/profile fact
 # 工具 3.5：profile_fact — 手动固化画像事实
 # =============================================================
-@mcp.tool()
 async def profile_fact(
     fact: str,
     evidence_bucket_id: str,
@@ -10399,7 +10414,6 @@ def _profile_fact_name(fact: str) -> str:
 # Also handles deletion (delete=True)
 # 同时承接删除功能
 # =============================================================
-@mcp.tool()
 async def trace(
     bucket_id: str,
     name: str = "",
@@ -10511,7 +10525,6 @@ async def trace(
 # Tool 5: pulse — Heartbeat, system status + memory listing
 # 工具 5：pulse — 脉搏，系统状态 + 记忆列表
 # =============================================================
-@mcp.tool()
 async def pulse(include_archive: bool = False) -> str:
     """只读查看系统状态和记忆桶摘要；用于盘点和找 read_bucket/trace 候选。"""
     try:
@@ -10590,7 +10603,6 @@ async def pulse(include_archive: bool = False) -> str:
 # 读取最近新增的表层桶（≤10个），返回给 Claude 在提示词引导下自主思考。
 # Claude then decides: resolve some, write feels, or do nothing.
 # =============================================================
-@mcp.tool()
 async def introspection(
     limit: int = 10,
     offset: int = 0,
@@ -10918,7 +10930,6 @@ async def dream() -> str:
 # Tool 5.8: import_diary_source — lossless diary evidence snapshot
 # 工具 5.8：import_diary_source — 无损日记证据快照
 # =============================================================
-@mcp.tool()
 async def import_diary_source(date: str, title: str = "") -> dict:
     """从 Haven-Diary 读取一篇日记，并逐字保存为不可变 source_record。只在需要给 Scene、Annotation 或 Narrative Roll 补逐字证据时调用；不会调用模型、不会脱水或改写、不会生成普通记忆，也不参与普通召回。相同正文重复导入会幂等返回原记录；日记正文发生修订时会新建 snapshot，保留旧版并用 supersedes_source_record_id 串联。date 必须为 YYYY-MM-DD；同日多篇时传精确 title。"""
     safe_date = str(date or "").strip()
@@ -11215,8 +11226,7 @@ async def read_portrait(scope: str = "", include_evidence_text: bool = True) -> 
     return result
 
 
-@mcp.tool()
-async def publish_portrait_patch(
+async def _publish_portrait_memory(
     scope: str,
     text: str,
     expected_revision: int,
@@ -11249,6 +11259,65 @@ async def publish_portrait_patch(
     return result
 
 
+publish_portrait_patch = _publish_portrait_memory
+
+
+async def _write_scene_memory(
+    content: str,
+    *,
+    title: str = "",
+    date: str = "",
+    domain: str = "",
+    cues: str = "",
+) -> str:
+    """Store one authored Scene without entering the retired hold policy."""
+    await decay_engine.ensure_started()
+    if not content or not content.strip():
+        return "内容为空，无法存储。"
+    scene_error = _hold_scene_contract_error(content)
+    if scene_error:
+        return f"写入被拒绝：{scene_error}"
+
+    scene_title = _authored_scene_title(content, title)
+    scene_cues = _authored_scene_cues(content, title=scene_title, explicit=cues)
+    requested_domain = [
+        item.strip() for item in str(domain or "").split(",") if item.strip()
+    ] or ["未分类"]
+    classification = normalize_write_classification(
+        memory_subject="",
+        memory_layer="",
+        tags=[],
+        content=content,
+    )
+    bucket_id, result_name, is_merged, related_bucket = await _merge_or_create(
+        content=content,
+        tags=[],
+        importance=5,
+        domain=requested_domain,
+        valence=0.5,
+        arousal=0.3,
+        name=scene_title,
+        allow_merge=False,
+        memory_subject=classification["memory_subject"],
+        memory_layer=classification["memory_layer"],
+        memory_classification_source=classification["memory_classification_source"],
+        date=str(date or "").strip(),
+        source="write_scene",
+        extra_metadata={
+            "memory_value_source": "authored_scene",
+            "write_contract": "write-scene-v1",
+            "scene_cues": scene_cues or None,
+        },
+        normalize_content=False,
+    )
+    _queue_scene_linking(bucket_id)
+    action = "合并→" if is_merged else "新建→"
+    related_note = (
+        _format_readonly_related_memory(related_bucket) if related_bucket else ""
+    )
+    return f"{action}{result_name} {','.join(requested_domain)}{related_note}"
+
+
 # =============================================================
 # Daily MCP façade — the eight actions advertised to chat models
 # 日常 MCP façade —— 普通聊天模型只看见这八个动作
@@ -11268,7 +11337,7 @@ async def recall(
     safe_mode = str(mode or "memory").strip().lower()
     if safe_mode not in {"memory", "handoff"}:
         return "mode 只能是 memory 或 handoff。"
-    return await breath(
+    return await _recall_memory(
         query=query,
         date=date,
         max_results=_int_between(max_results, 2, 1, 20),
@@ -11315,10 +11384,10 @@ async def read_memory(
 
     if safe_type == "narrative":
         if safe_id:
-            return await read_narrative_roll(safe_id)
+            return await _read_narrative_memory(safe_id)
         return narrative_roll_store.resolve_read_query(query=query, limit=limit)
     if safe_type == "shadow":
-        return await window_shadow_read(
+        return await _read_window_shadow_memory(
             window_id=safe_id,
             limit=limit,
             include_content=include_content,
@@ -11329,7 +11398,7 @@ async def read_memory(
             "reason": "scene_id_required_use_recall_for_search",
             "memory_type": "scene",
         }
-    return await read_bucket(safe_id)
+    return await _read_scene_memory(safe_id)
 
 
 @mcp.tool()
@@ -11341,17 +11410,13 @@ async def write_scene(
     cues: str = "",
 ) -> str:
     """原样写一条具体 Scene。正文就是完整经历，不加 Markdown 类型标题；工具不脱水、不改写、不合并，也不能借此写 feel、whisper、日印象或 ProfileFact。"""
-    token = _SCENE_WRITE_SOURCE.set("write_scene")
-    try:
-        return await hold(
-            content=content,
-            title=title,
-            date=date,
-            domain=domain,
-            cues=cues,
-        )
-    finally:
-        _SCENE_WRITE_SOURCE.reset(token)
+    return await _write_scene_memory(
+        content,
+        title=title,
+        date=date,
+        domain=domain,
+        cues=cues,
+    )
 
 
 @mcp.tool()
@@ -11361,10 +11426,11 @@ async def annotate(
     kind: str = "comment",
 ) -> dict:
     """给一条已有来源追加带时间 Annotation。用于后来形成的新理解、修正或有来源的感受；Annotation 始终挂回来源，不独立扩散。"""
-    return await comment_bucket(
-        bucket_id=source_id,
-        content=content,
+    return await _append_annotation(
+        source_id,
+        content,
         kind=kind,
+        source="annotate",
     )
 
 
@@ -11465,7 +11531,7 @@ async def publish_portrait(
     locked: bool = True,
 ) -> dict:
     """由当前 Haven 在 read_portrait 审阅后，带 optimistic revision 与可验证 evidence 发布 User 或 Relationship Portrait。模型候选不会自动发布。"""
-    return await publish_portrait_patch(
+    return await _publish_portrait_memory(
         scope=scope,
         text=text,
         expected_revision=expected_revision,

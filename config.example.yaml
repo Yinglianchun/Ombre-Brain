@@ -11,13 +11,6 @@
 # streamable-http: 远程使用（标准 HTTP，对隧道/CDN/代理友好）
 transport: "stdio"
 
-# --- MCP tool surface / MCP 工具面 ---
-# daily advertises only the eight ordinary memory actions. Legacy/admin tools
-# remain directly callable by exact name for existing Bridge jobs and rollback.
-# Set legacy (or OMBRE_MCP_TOOL_SURFACE=legacy) to advertise the full old table.
-mcp:
-  tool_surface: "daily"
-
 # --- Memory object write retirement / 旧记忆对象停止新增 ---
 # Old feel/whisper/daily-impression/ProfileFact data remains readable. This
 # switch exists only as a reversible compatibility escape hatch.

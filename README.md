@@ -52,9 +52,9 @@ flowchart LR
 忠实写下这件经历本身，使它以后仍能被独立理解。只保留实际发生的细节；不同 Scene 可以有不同写法。
 ```
 
-`Scene` 已经是对象类型，普通 `hold` 不再把 `## Scene`、`### scene` 或 `### moment` 套进 content。当前 AI 写好的那段正文就是场景真源，不是脱水摘要。旧 body / `moment` / `original` / `reflection` 仍兼容读取，但不再作为新写入 section；旧 `affect_anchor` 也只兼容读取。
+`Scene` 已经是对象类型，`write_scene` 不把 `## Scene`、`### scene` 或 `### moment` 套进 content。当前 AI 写好的那段正文就是场景真源，不是脱水摘要。旧 body / `moment` / `original` / `reflection` 仍兼容读取，但不再作为新写入 section；旧 `affect_anchor` 也只兼容读取。
 
-并非每轮聊天都应该写桶。重要事件、承诺进展和会影响未来的短期状态才值得写成场景；稳定偏好/边界应从证据场景固化为 `profile_fact`，普通闲聊可以只留在原文或窗影里。
+并非每轮聊天都应该写桶。重要事件、承诺进展和会影响未来的短期状态才值得写成场景；稳定偏好/边界应从证据场景进入人工审阅的 Portrait，普通闲聊可以只留在原文或窗影里。
 
 ### 3. Moment、Node 与 Edge
 
@@ -84,9 +84,9 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 ### 手动写入
 
-`hold` 只原样保存一件由当前 AI 写好的长期 Scene：content 直接传一段完整原文经历，不带 Markdown section 标题；正文忠实保留这件事里实际发生、以后理解它所需的内容，写到能独立理解即可，不套固定段落或字段。工具不调用脱水/标签模型，也不合并旧桶。`cues` 可在同一次调用中写入 0～8 个 sidecar 稀疏召回入口；Scene 向量只 embed content 原文。稳定偏好、边界和身份事实先有证据 Scene，再用 `profile_fact` 建立索引。
+`write_scene` 只原样保存一件由当前 AI 写好的长期 Scene：content 直接传一段完整原文经历，不带 Markdown section 标题；正文忠实保留这件事里实际发生、以后理解它所需的内容，写到能独立理解即可，不套固定段落或字段。工具不调用脱水/标签模型，也不合并旧桶。`cues` 可在同一次调用中写入 0～8 个 sidecar 稀疏召回入口；Scene 向量只 embed content 原文。
 
-`close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”和 0～N 个独立 Scene。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。`grow` 仅保留为兼容别名，旧 `### moment` 不会自动升格成 Scene。
+`close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”和 0～N 个独立 Scene。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。旧 `### moment` 只保留读取兼容，不会自动升格成 Scene。
 
 新窗口不等待画像模型吸收窗影，也不把 Scene 重复塞进 handoff。系统从最近一篇窗影确定性投影 **Flowing Self** 与 **Recent Relationship**；显式 Scene 只进入普通召回。完整窗影仍可回看，旧画像维护器暂时保留给 Dashboard 和兼容接口，但不再主导 handoff。
 
@@ -146,13 +146,7 @@ Favorite Memory 表示一段对 AI 留下明显主观影响、并能说明原因
 新窗口应调用：
 
 ```text
-breath(mode="handoff")
-```
-
-或：
-
-```text
-breath(is_session_start=true)
+recall(mode="handoff")
 ```
 
 handoff 是一次性的紧凑恢复，不是每轮注入。当前内容按预算组合为：
@@ -467,18 +461,16 @@ Codex 接线时注意：
 
 | 工具 | 用途 |
 | --- | --- |
-| `breath` | 浮现记忆、按 query/date 查询、执行新窗口 handoff |
+| `recall` | 按 query/date 召回，或执行相邻窗口 handoff |
+| `read_memory` | 精确读取 Scene、Window Shadow 或 Narrative Roll |
+| `write_scene` | 原样保存一件 canonical Scene |
+| `annotate` | 给已有来源追加带时间的 Annotation |
 | `close_window` | 原子保存一篇 Window Shadow 与 0～N 个 Scene |
-| `grow` | `close_window` 的旧客户端兼容别名 |
-| `hold` | 原样保存一件 canonical Scene |
-| `read_bucket` | 读取指定 bucket 原文 |
-| `comment_bucket` / `delete_bucket_comment` | 添加或删除年轮 |
-| `profile_fact` | 管理指向证据 Scene 的事实索引 |
-| `reminder_create/list/update` | 管理独立照顾备忘 |
-| `darkroom_enter/rooms/view` | 写入、列出和在解锁后读取 Darkroom |
-| `trace` / `pulse` / `introspection` | 近期轨迹、系统脉搏与内省 |
+| `publish_narrative` | 发布或修订有 Scene 来源账的 Narrative Roll |
+| `read_portrait` | 显式读取已审阅 Portrait 与证据 |
+| `publish_portrait` | 带 revision 与证据发布 Portrait |
 
-维修与回填工具不应塞进普通聊天客户端的日常提示词。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
+MCP 只注册以上八个动作。旧桶格式、读取投影和 Dashboard/internal HTTP 兼容继续保留，但旧 MCP 工具名不再公布或接受调用。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
 
 ## 运维与验证
 
