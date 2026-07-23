@@ -15082,6 +15082,36 @@ class GatewayService:
             if self._compact_lookup_key(value)
         }
 
+    def _dynamic_anchor_authored_cue_is_strong(self, cue: str, metadata: dict) -> bool:
+        """Recognize an exact authored phrase without treating every project token as hard."""
+        text = " ".join(str(cue or "").split()).strip()
+        key = self._compact_lookup_key(text)
+        if not key or self._dynamic_anchor_term_is_category(text):
+            return False
+        configured = []
+        for field in ("scene_hard_cues", "hard_scene_cues"):
+            values = metadata.get(field, []) if isinstance(metadata, dict) else []
+            if isinstance(values, str):
+                values = [values]
+            configured.extend(values or [])
+        if key in {
+            self._compact_lookup_key(value)
+            for value in configured
+            if self._compact_lookup_key(value)
+        }:
+            return True
+        cjk_count = len(re.findall(r"[\u4e00-\u9fff]", key))
+        has_latin = bool(re.search(r"[a-z]", key))
+        has_digit = bool(re.search(r"\d", key))
+        has_structure = bool(re.search(r"[_:/#@.-]", text))
+        latin_words = re.findall(r"[A-Za-z0-9]+", text)
+        return bool(
+            cjk_count >= 5
+            or (cjk_count >= 2 and has_latin and len(key) >= 6)
+            or (len(latin_words) >= 2 and len(key) >= 8)
+            or ((has_digit or has_structure) and len(key) >= 4)
+        )
+
     def _dynamic_anchor_category_terms(self) -> set[str]:
         terms = set(GENERIC_KEYWORD_MATCH_TERMS)
         word_map_cfg = self.config.get("word_map", {})
@@ -15147,10 +15177,15 @@ class GatewayService:
                         "term": cue_text,
                         "bucket_ids": set(),
                         "query_index": query_key.find(cue_key),
+                        "strong": False,
                     },
                 )
                 if bucket_id:
                     row["bucket_ids"].add(bucket_id)
+                row["strong"] = bool(
+                    row["strong"]
+                    or self._dynamic_anchor_authored_cue_is_strong(cue_text, meta)
+                )
 
         cue_terms = self._dynamic_anchor_independent_terms([
             str(row["term"])
@@ -15167,6 +15202,11 @@ class GatewayService:
             self._compact_lookup_key(term)
             for term in cue_terms
             if self._compact_lookup_key(term)
+        }
+        strong_cue_keys = {
+            key
+            for key in independent_cue_keys
+            if bool((cue_rows.get(key) or {}).get("strong"))
         }
         for cue_term in cue_terms:
             cue_key = self._compact_lookup_key(cue_term)
@@ -15242,6 +15282,11 @@ class GatewayService:
             "query": self._clip_text(query, 500),
             "category_overview": overview,
             "discriminative_terms": discriminative,
+            "strong_cue_terms": [
+                term
+                for term in discriminative
+                if self._compact_lookup_key(term) in strong_cue_keys
+            ],
             "required_terms": discriminative,
             "required_match_count": 2 if discriminative else 0,
             "category_terms": list(dict.fromkeys(category)),
@@ -15330,10 +15375,18 @@ class GatewayService:
             for term in discriminative_terms
             if self._dynamic_anchor_term_matches_text(term, cue_key)
         ]
+        matched_strong_terms = [
+            term
+            for term in plan.get("strong_cue_terms") or []
+            if term in matched_terms
+        ]
         required_match_count = max(0, int(plan.get("required_match_count") or 0))
         distinctive_anchor_match = bool(
-            required_match_count
-            and len(matched_terms) >= required_match_count
+            matched_strong_terms
+            or (
+                required_match_count
+                and len(matched_terms) >= required_match_count
+            )
         )
         missing_terms = [term for term in required_terms if term not in matched_terms]
         category_terms = list(plan.get("category_terms") or [])
@@ -15361,6 +15414,8 @@ class GatewayService:
             "dynamic_anchor_plan": plan,
             "distinctive_anchor_match": distinctive_anchor_match,
             "distinctive_anchor_terms": matched_terms,
+            "strong_authored_cue_match": bool(matched_strong_terms),
+            "strong_authored_cue_terms": matched_strong_terms,
             "distinctive_anchor_missing_terms": missing_terms,
             "anchor_coverage": round(
                 len(matched_terms) / max(len(discriminative_terms), 1),
@@ -15404,10 +15459,18 @@ class GatewayService:
             term for term in plan.get("discriminative_terms") or []
             if self._dynamic_anchor_term_matches_text(term, cue_key)
         ]
+        matched_strong_terms = [
+            term
+            for term in plan.get("strong_cue_terms") or []
+            if term in matched_terms
+        ]
         required_match_count = max(0, int(plan.get("required_match_count") or 0))
         distinctive_anchor_match = bool(
-            required_match_count
-            and len(matched_terms) >= required_match_count
+            matched_strong_terms
+            or (
+                required_match_count
+                and len(matched_terms) >= required_match_count
+            )
         )
         missing_terms = [term for term in required_terms if term not in matched_terms]
         matched_category_terms = [
@@ -15424,6 +15487,8 @@ class GatewayService:
         return {
             "distinctive_anchor_match": distinctive_anchor_match,
             "distinctive_anchor_terms": matched_terms,
+            "strong_authored_cue_match": bool(matched_strong_terms),
+            "strong_authored_cue_terms": matched_strong_terms,
             "distinctive_anchor_missing_terms": missing_terms,
             "category_overview_item": bool(
                 plan.get("category_overview")
@@ -16780,19 +16845,26 @@ class GatewayService:
             return True
         if item.get("distinctive_anchor_match"):
             return True
+        if (
+            item.get("distinctive_anchor_terms")
+            and self._safe_float(item.get("semantic_score"), 0.0)
+            >= self._safe_float(getattr(self.recall_policy, "semantic_threshold", 0.72), 0.72)
+        ):
+            return True
         label_set = {
             str(label or "").strip()
             for label in evidence_labels or []
             if str(label or "").strip()
         }
+        bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
         if label_set & {
-            "source_record_exact",
             "raw_transcript_exact",
             "same_day_metadata",
             "definition_literal_span",
         }:
             return True
-        bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+        if "source_record_exact" in label_set and self._is_source_record_bucket(bucket):
+            return True
         meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
         title = str(meta.get("name") or bucket.get("name") or "").strip()
         title_key = self._compact_lookup_key(title)
@@ -17377,7 +17449,7 @@ class GatewayService:
                 "passive_statement": True,
                 "evidence_labels": evidence_labels,
                 "hard_evidence_labels": hard_evidence_labels,
-                "required_evidence": "two_scene_cues_or_precise_literal",
+                "required_evidence": "one_strong_cue_or_two_cues_or_one_cue_plus_strong_semantic",
                 "auto": True,
             }
             return False
