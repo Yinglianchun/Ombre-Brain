@@ -11753,11 +11753,12 @@ class GatewayService:
             strong_explicit_edge
             and self._diffusion_explicit_edge_can_bridge_axis(query_plan)
         )
-        strong_local_chain = (
+        topic_supported_local_chain = (
             bool(row.get("chain_bundle"))
             and path_len <= 2
             and confidence >= 0.85
             and not self._axis_lite_has_technical_axis(query_plan)
+            and bool(row.get("has_topic_evidence"))
         )
         if (
             getattr(query_plan, "activated_axis_groups", ()) or ()
@@ -11766,7 +11767,7 @@ class GatewayService:
                 has_caution_path
                 or has_source_record_topic_evidence
                 or explicit_edge_axis_bypass
-                or strong_local_chain
+                or topic_supported_local_chain
                 or self._semantic_neighbor_has_strong_confidence(row)
             ):
                 return False, "activated_axis_mismatch"
@@ -11779,7 +11780,7 @@ class GatewayService:
                 or explicit_edge_axis_bypass
             ):
                 return False, "activated_axis_mismatch"
-        if strong_local_chain:
+        if topic_supported_local_chain:
             return True, ""
         if why in {"same_topic", "date_neighbor"}:
             return True, ""
