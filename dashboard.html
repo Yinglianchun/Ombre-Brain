@@ -4893,6 +4893,18 @@ function bucketKind(bucket) {
   return String(bucket.kind || bucketMetadataView(bucket).kind || '').trim();
 }
 
+function bucketObjectKind(bucket) {
+  if (!bucket) return 'legacy_bucket';
+  var meta = bucket.metadata && typeof bucket.metadata === 'object' ? bucket.metadata : {};
+  var explicit = String(bucket.object_kind || meta.object_kind || '').trim();
+  if (explicit) return explicit;
+  if (String(meta.memory_value_source || '') === 'authored_scene') return 'scene';
+  var storageType = String(bucket.type || meta.type || '').trim();
+  if (storageType === 'feel') return 'feel';
+  if (storageType === 'diary_source') return 'diary_source';
+  return 'legacy_bucket';
+}
+
 function bucketStatusView(bucket) {
   return String(bucket.status_view || bucketMetadataView(bucket).status_view || '').trim();
 }
@@ -6918,9 +6930,10 @@ async function showDetail(id) {
       '</div>' +
       '<div class="detail-meta">' +
         '<div class="field"><label>ID</label>' + esc(id) + '</div>' +
-        '<div class="field"><label>类型</label>' + esc(meta.type || 'dynamic') + '</div>' +
+        '<div class="field"><label>类型</label>' + esc(bucketObjectKind(Object.assign({}, b, { metadata: meta }))) + '</div>' +
+        '<div class="field"><label>兼容存储</label>' + esc(meta.type || 'dynamic') + '</div>' +
         '<div class="field"><label>主域</label>' + esc(bucketCanonicalDomainFullLabel(b) || '—') + '</div>' +
-        '<div class="field"><label>记忆类型</label>' + esc(b.kind || view.kind || '—') + '</div>' +
+        '<div class="field"><label>内容类别</label>' + esc(b.kind || view.kind || '—') + '</div>' +
         '<div class="field"><label>状态视图</label>' + esc(b.status_view || view.status_view || '—') + '</div>' +
         '<div class="field"><label>标记</label>' + esc(((b.flags || view.flags || []) || []).join(', ') || '—') + '</div>' +
         '<div class="field"><label>域</label>' + esc((meta.domain || []).join(', ')) + '</div>' +

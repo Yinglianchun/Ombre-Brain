@@ -163,6 +163,7 @@ from utils import (
     bucket_content_for_recall,
     bucket_text_for_embedding,
     count_tokens_approx,
+    generate_scene_id,
     LOCAL_TZ,
     local_date_key,
     load_config,
@@ -3080,6 +3081,7 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "anchor",
         "source",
         "memory_value_source",
+        "object_kind",
         "write_contract",
         "scene_cues",
         "confidence",
@@ -3104,7 +3106,7 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "active",
         "deprecated",
     ]
-    object_type = "scene" if _is_canonical_scene_bucket(bucket) else "legacy_bucket"
+    object_type = _bucket_object_kind(bucket)
     return {
         "id": bucket["id"],
         "object_type": object_type,
@@ -3123,6 +3125,7 @@ def _bucket_summary_payload(bucket: dict) -> dict:
         "id": bucket.get("id", ""),
         "name": meta.get("name", bucket.get("id", "")),
         "type": meta.get("type", "dynamic"),
+        "object_kind": _bucket_object_kind(bucket),
         "domain": meta.get("domain", []),
         "tags": meta.get("tags", []),
         "facets": meta.get("facets", []),
@@ -3160,6 +3163,7 @@ def _bucket_light_payload(bucket: dict) -> dict:
         "bucket_id": bucket.get("id", ""),
         "name": meta.get("name", bucket.get("id", "")),
         "type": meta.get("type", "dynamic"),
+        "object_kind": _bucket_object_kind(bucket),
         "domain": meta.get("domain", []),
         "tags": meta.get("tags", []),
         "facets": meta.get("facets", []),
@@ -3311,12 +3315,31 @@ def _is_canonical_scene_bucket(bucket: dict | None) -> bool:
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
     if meta.get("type") == "feel" or _is_daily_impression_feel_bucket(bucket):
         return False
+    if str(meta.get("object_kind") or "").strip().lower() == "scene":
+        return True
     if str(meta.get("memory_value_source") or "") == "authored_scene":
         return True
     return any(
         moment.get("section") == "scene"
         for moment in parse_bucket_moments(bucket, _recall_relevance_options())
     )
+
+
+def _bucket_object_kind(bucket: dict | None) -> str:
+    if not isinstance(bucket, dict):
+        return "legacy_bucket"
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    explicit = str(meta.get("object_kind") or "").strip().lower()
+    if explicit:
+        return explicit
+    if _is_canonical_scene_bucket(bucket):
+        return "scene"
+    bucket_type = str(meta.get("type") or "").strip().lower()
+    if bucket_type == "feel":
+        return "feel"
+    if bucket_type == "diary_source":
+        return "diary_source"
+    return "legacy_bucket"
 
 
 def _bucket_edges_for_recall(bucket_map: dict[str, dict]) -> list[dict]:
@@ -4989,6 +5012,7 @@ async def _merge_or_create(
     memory_classification_source: str = "",
     date: str = "",
     source: str = "",
+    bucket_id: str = "",
     extra_metadata: dict | None = None,
     normalize_content: bool = True,
 ) -> tuple[str, str, bool, dict | None]:
@@ -5052,6 +5076,7 @@ async def _merge_or_create(
         valence=valence,
         arousal=arousal,
         name=name or None,
+        bucket_id=bucket_id or None,
         date=date or None,
         source=source or None,
         extra_metadata={
@@ -9777,6 +9802,7 @@ async def hold(
             valence=valence,
             arousal=arousal,
             name=suggested_name or None,
+            bucket_id=generate_scene_id(),
             bucket_type="permanent",
             pinned=True,
             date=event_date or None,
@@ -9788,6 +9814,7 @@ async def hold(
                     classification["memory_classification_source"],
                 ),
                 "memory_value_source": "authored_scene",
+                "object_kind": "scene",
                 "write_contract": scene_write_contract,
                 "scene_cues": scene_cues or None,
             },
@@ -9812,8 +9839,10 @@ async def hold(
         memory_classification_source=classification["memory_classification_source"],
         date=event_date,
         source=scene_write_source,
+        bucket_id=generate_scene_id(),
         extra_metadata={
             "memory_value_source": "authored_scene",
+            "object_kind": "scene",
             "write_contract": scene_write_contract,
             "scene_cues": scene_cues or None,
         },
@@ -9946,6 +9975,7 @@ async def _write_window_shadow_scene(
             "window_shadow_index": index,
             "scene_source_hash": WindowShadowStore.source_hash(scene_content),
             "memory_value_source": "authored_scene",
+            "object_kind": "scene",
             "write_contract": "close-window-scene-v2",
             "scene_cues": scene_cues or None,
             **_memory_classification_metadata(
@@ -11303,8 +11333,10 @@ async def _write_scene_memory(
         memory_classification_source=classification["memory_classification_source"],
         date=str(date or "").strip(),
         source="write_scene",
+        bucket_id=generate_scene_id(),
         extra_metadata={
             "memory_value_source": "authored_scene",
+            "object_kind": "scene",
             "write_contract": "write-scene-v1",
             "scene_cues": scene_cues or None,
         },
@@ -11796,6 +11828,7 @@ async def api_buckets(request):
                 "id": b["id"],
                 "name": meta.get("name", b["id"]),
                 "type": meta.get("type", "dynamic"),
+                "object_kind": _bucket_object_kind(b),
                 "domain": meta.get("domain", []),
                 "tags": meta.get("tags", []),
                 "facets": meta.get("facets", []),

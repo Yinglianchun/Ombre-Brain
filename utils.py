@@ -776,6 +776,12 @@ def generate_bucket_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+def generate_scene_id() -> str:
+    """Generate a native Scene ID distinct from legacy bucket IDs."""
+
+    return f"scene_{uuid.uuid4().hex}"
+
+
 def strip_wikilinks(text: str) -> str:
     """
     Remove Obsidian wikilink brackets: [[word]] → word
