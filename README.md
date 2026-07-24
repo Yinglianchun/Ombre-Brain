@@ -84,9 +84,9 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 ### 手动写入
 
-`write_scene` 只原样保存一件由当前 AI 写好的长期 Scene：content 直接传一段完整原文经历，不带 Markdown section 标题；正文忠实保留这件事里实际发生、以后理解它所需的内容，写到能独立理解即可，不套固定段落或字段。工具不调用脱水/标签模型，也不合并旧桶。`cues` 可在同一次调用中写入 0～8 个 sidecar 稀疏召回入口；Scene 向量只 embed content 原文。
+`write_scene` 只原样保存一件由当前 AI 写好的长期 Scene：content 直接传一段完整原文经历，不带 Markdown section 标题；正文忠实保留这件事里实际发生、以后理解它所需的内容，写到能独立理解即可，不套固定段落或字段。工具不调用脱水/标签模型，也不合并旧桶。当前作者必须在同一次调用中亲自写 1～8 个 `cues`，回答“以后提到什么时，我希望这段记忆回来”；系统不从 title、引句或正文补造。cues 只进 sidecar 稀疏索引，Scene 向量仍只 embed content 原文。
 
-`close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”和 0～N 个独立 Scene。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。旧 `### moment` 只保留读取兼容，不会自动升格成 Scene。
+`close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”和 0～N 个独立 Scene。`scenes[]` 每项必须同时带 `content` 与当前作者亲自写的 `cues`，可选 `title`；Shadow 内联 Scene 使用 `### scene | cue 一 | cue 二`，裸 `### scene` 会被拒绝。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。旧 `### moment` 只保留读取兼容，不会自动升格成 Scene。
 
 新窗口不等待画像模型吸收窗影，也不把 Scene 重复塞进 handoff。系统从最近一篇窗影确定性投影 **Flowing Self** 与 **Recent Relationship**；显式 Scene 只进入普通召回。完整窗影仍可回看，旧画像维护器暂时保留给 Dashboard 和兼容接口，但不再主导 handoff。
 

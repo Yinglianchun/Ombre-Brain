@@ -53,6 +53,7 @@ import secrets
 import time
 from contextvars import ContextVar
 from typing import Literal
+from typing_extensions import NotRequired, TypedDict
 from base64 import b64decode
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -195,6 +196,15 @@ logger = logging.getLogger("ombre_brain")
 MEMORY_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 MEMORY_CARD_SHADOW_VERSION = "shadow-card-v1"
 HANDOFF_RECENT_CONTINUITY_MAX_AGE_HOURS = 72
+
+
+class CloseWindowSceneInput(TypedDict):
+    """One Scene authored together with its own sparse recall entrances."""
+
+    content: str
+    cues: str | list[str]
+    title: NotRequired[str]
+
 
 # Read-only runtime observability for the Dashboard. It never stores injected
 # prose; only the route and source ids of the latest handoff request.
@@ -2726,17 +2736,9 @@ def _authored_scene_title(content: str, explicit_title: str = "") -> str:
     return title[:48] if title else ""
 
 
-def _authored_scene_cues(content: str, *, title: str = "", explicit: object = None) -> list[str]:
-    """Build a small cue sidecar without summarizing or changing the Scene text."""
-    values: list[str] = []
-    values.extend(normalize_scene_cues(explicit))
-    if title and not re.fullmatch(r"(?:窗影)?(?:时刻|场景)\d+", title):
-        values.append(title)
-
-    text = strip_wikilinks(str(content or ""))
-    for quoted in re.findall(r"[“\"]([^“”\"\n]{2,80})[”\"]", text):
-        values.append(quoted)
-    return normalize_scene_cues(values)
+def _authored_scene_cues(explicit: object) -> list[str]:
+    """Keep only cues deliberately supplied by the Scene's current author."""
+    return normalize_scene_cues(explicit)
 
 
 def _normalize_memory_sections_for_write(content: str) -> str:
@@ -9722,7 +9724,7 @@ async def hold(
     domain: str = "",
     cues: str = "",
 ) -> str:
-    """原样保存一件由当前 AI 写好的长期 Scene，不调用模型脱水、改写、命名或同步打标。普通 content 直接写一段完整原文经历，不要添加 `## Scene`、`### scene`、`### moment` 或 sibling section。Scene 对象本身就是类型和普通召回单位。多个场景分别调用 hold。cues 可用 `|` 或换行传 0～8 个未来可能自然出现的召回入口；它们只写入稀疏 sidecar 索引，不进入正文或 Scene 原文向量，也不会彼此扩散。若部署启用 Scene linker，写入返回后可异步生成待审关系边提案；提案必须引用两端 content 原句，不改正文、不自动写正式边。有来源的新理解用 comment_bucket/annotate 挂回来源。feel、whisper、daily impression 与 ProfileFact 默认拒绝新增；旧数据仍可读取。date/title/domain、valence/arousal 仅为旧客户端兼容。"""
+    """原样保存一件由当前 AI 写好的长期 Scene，不调用模型脱水、改写、命名或同步打标。普通 content 直接写一段完整原文经历，不要添加 `## Scene`、`### scene`、`### moment` 或 sibling section。Scene 对象本身就是类型和普通召回单位。多个场景分别调用 hold。cues 必须由当前作者亲自写 1～8 个未来可能自然出现的召回入口，回答“以后提到什么时希望这段记忆回来”；系统不从 title、引句或正文补造。它们只写入稀疏 sidecar 索引，不进入正文或 Scene 原文向量，也不会彼此扩散。若部署启用 Scene linker，写入返回后可异步生成待审关系边提案；提案必须引用两端 content 原句，不改正文、不自动写正式边。有来源的新理解用 comment_bucket/annotate 挂回来源。feel、whisper、daily impression 与 ProfileFact 默认拒绝新增；旧数据仍可读取。date/title/domain、valence/arousal 仅为旧客户端兼容。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -9812,7 +9814,12 @@ async def hold(
         return await create_whisper_bucket()
 
     scene_title = _authored_scene_title(content, title)
-    scene_cues = _authored_scene_cues(content, title=scene_title, explicit=cues)
+    scene_cues = _authored_scene_cues(cues)
+    if not scene_cues:
+        return (
+            "写入被拒绝：新 Scene 必须由当前作者亲自写至少一个 cues，"
+            "说明以后提到什么时希望这段记忆被召回；不会从标题、引句或正文自动生成。"
+        )
     scene_write_source = _SCENE_WRITE_SOURCE.get()
     if scene_write_source not in {"hold_scene", "write_scene"}:
         scene_write_source = "hold_scene"
@@ -9980,17 +9987,21 @@ async def _write_window_shadow_scene(
     """Copy one authored scene into an ordinary recall bucket without rewriting it."""
     window_id = str(window.get("window_id") or "").strip()
     bucket_id = f"{window_id}_scene_{index}"
+    scene_content = str(scene.get("content") or "").strip()
+    scene_cues = _authored_scene_cues(scene.get("cues"))
+    if not scene_cues:
+        raise ValueError(f"Scene {index} 缺少 authored cues")
     existing = await bucket_mgr.get(bucket_id)
     if existing:
         existing_meta = existing.get("metadata", {}) if isinstance(existing.get("metadata"), dict) else {}
         if (
             str(existing_meta.get("window_shadow_id") or "") != window_id
             or str(existing_meta.get("scene_source_hash") or "")
-            != WindowShadowStore.source_hash(str(scene.get("content") or "").strip())
+            != WindowShadowStore.source_hash(scene_content)
+            or _authored_scene_cues(existing_meta.get("scene_cues")) != scene_cues
         ):
             raise ValueError(f"scene bucket id collision: {bucket_id}")
         return bucket_id, "existing"
-    scene_content = str(scene.get("content") or "").strip()
     contract_error = _hold_scene_contract_error(scene_content)
     if contract_error:
         raise ValueError(contract_error)
@@ -10002,7 +10013,6 @@ async def _write_window_shadow_scene(
         content=scene_content,
     )
     name = str(scene.get("title") or f"窗影场景{index}").strip()
-    scene_cues = _authored_scene_cues(scene_content, title=name)
     await bucket_mgr.create(
         content=scene_content,
         tags=tags,
@@ -10035,41 +10045,59 @@ async def _write_window_shadow_scene(
 
 def _window_shadow_scene_records(
     shadow: str,
-    explicit_scenes: list[str] | None,
+    explicit_scenes: list[CloseWindowSceneInput] | None,
     *,
     markdown_import: bool = False,
-) -> tuple[list[dict[str, str]], str]:
+) -> tuple[list[dict], str]:
     """Validate canonical Scene inputs before any Shadow or bucket is written."""
     if markdown_import:
-        if any(str(value or "").strip() for value in (explicit_scenes or [])):
+        if explicit_scenes:
             return [], "markdown_import 只无损导入 Shadow，不接受 scenes；需要普通召回的场景请人工确认后另用 write_scene。"
         return [], ""
     inline_scenes = extract_window_shadow_scenes(shadow)
-    provided = [str(value or "").strip() for value in (explicit_scenes or []) if str(value or "").strip()]
+    provided = list(explicit_scenes or [])
     if inline_scenes and provided:
         return [], "Scene 请只选一种写法：放进窗影的 `## 想留下的记忆`，或通过 scenes 参数传入，不能两边重复。"
     if inline_scenes:
         records = inline_scenes
     else:
-        records = [
-            {
-                "title": _authored_scene_title(content) or f"窗影场景{index}",
-                "content": content,
-                "source_text": content,
-            }
-            for index, content in enumerate(provided, start=1)
-        ]
+        records = []
+        for index, value in enumerate(provided, start=1):
+            if not isinstance(value, dict):
+                return [], (
+                    f"Scene {index} 必须同时传 content 与 cues；"
+                    "旧的纯字符串 scenes 不再创建 canonical Scene。"
+                )
+            content = str(value.get("content") or "").strip()
+            records.append(
+                {
+                    "title": _authored_scene_title(
+                        content,
+                        str(value.get("title") or ""),
+                    ) or f"窗影场景{index}",
+                    "content": content,
+                    "source_text": content,
+                    "cues": _authored_scene_cues(value.get("cues")),
+                }
+            )
     for index, record in enumerate(records, start=1):
         error = _hold_scene_contract_error(str(record.get("content") or ""))
         if error:
             return [], f"Scene {index} 格式不合格：{error}"
+        scene_cues = _authored_scene_cues(record.get("cues"))
+        if not scene_cues:
+            return [], (
+                f"Scene {index} 缺少有效 cues：请由当前作者写明以后提到什么时"
+                "希望这段记忆被召回；标题、引句和正文不会被拿来补造 cues。"
+            )
+        record["cues"] = scene_cues
     return records, ""
 
 
 async def _close_window_commit(
     shadow: str,
     *,
-    scenes: list[str] | None = None,
+    scenes: list[CloseWindowSceneInput] | None = None,
     continue_scene_index: int = 0,
     session_id: str = "",
     profile_id: str = "",
@@ -10289,7 +10317,7 @@ async def _close_window_commit(
 @mcp.tool()
 async def close_window(
     shadow: str,
-    scenes: list[str] | None = None,
+    scenes: list[CloseWindowSceneInput] | None = None,
     session_id: str = "",
     profile_id: str = "",
     date: str = "",
@@ -10298,7 +10326,7 @@ async def close_window(
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow，并同时保存其中明确写出的 0~N 个独立 Scene，不要在关窗后再次调用工具抽取 Scene。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符：写这一窗真正改变了什么、未完线头和我想怎样继续；下个窗口会逐字注入这段，不做二次摘要。Shadow 全文仍原样保存且不进普通召回。session_id 可以继续传客户端固定身份（默认 main），Gateway 会把它解析为当前内部窗口；下次正常聊天自动换窗并认领这篇 Shadow。客户端重试同一次关窗时必须复用同一个 idempotency_key；Brain 会返回第一次成功写入的 window_id，不会再次关闭下一窗。profile_id 是长期身份，通常沿用配置默认值。scenes 数组中的每个元素直接是一段原文经历，不带 `## Scene` / `### scene` / `### moment`；若 Scene 写在 Shadow 的 `## 想留下的记忆` 内，`### scene` 只作为抽取标记。多条 Scene 中若有下一窗说“继续吧”时应优先下钻的未完主线，传从 1 开始的 continue_scene_index；只有一条 Scene 时会自动认领，ID 由本次事务生成并写回窗影，无需调用者预知。后来才产生的新理解用 annotate 挂回来源。已经写好的 Markdown 用 source="markdown_import" 只转成窗影，不强制补 handoff_note，也不补造 Scene。"""
+    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow，并同时保存其中明确写出的 0~N 个独立 Scene，不要在关窗后再次调用工具抽取 Scene。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符：写这一窗真正改变了什么、未完线头和我想怎样继续；下个窗口会逐字注入这段，不做二次摘要。Shadow 全文仍原样保存且不进普通召回。session_id 可以继续传客户端固定身份（默认 main），Gateway 会把它解析为当前内部窗口；下次正常聊天自动换窗并认领这篇 Shadow。客户端重试同一次关窗时必须复用同一个 idempotency_key；Brain 会返回第一次成功写入的 window_id，不会再次关闭下一窗。profile_id 是长期身份，通常沿用配置默认值。scenes 每项必须由当前作者同时传 content 与至少一个 cues，可选 title；cues 写“以后提到什么时，我希望这段记忆回来”，不是摘要，系统也不会从 title、引句或正文代写。若 Scene 写在 Shadow 的 `## 想留下的记忆` 内，使用 `### scene | cue 一 | cue 二`，heading 只作抽取与 cues 标记，不进入 Scene 正文。多条 Scene 中若有下一窗说“继续吧”时应优先下钻的未完主线，传从 1 开始的 continue_scene_index；只有一条 Scene 时会自动认领，ID 由本次事务生成并写回窗影，无需调用者预知。后来才产生的新理解用 annotate 挂回来源。已经写好的 Markdown 用 source="markdown_import" 只转成窗影，不强制补 handoff_note，也不补造 Scene。"""
     _ = context
     resolved_source = str(source or "").strip().lower()
     if resolved_source in {"operit", "ob-auto-grow", "auto", "workflow", "worker"}:
@@ -11381,7 +11409,7 @@ async def _write_scene_memory(
     title: str = "",
     date: str = "",
     domain: str = "",
-    cues: str = "",
+    cues: str | list[str] = "",
 ) -> str:
     """Store one authored Scene without entering the retired hold policy."""
     await decay_engine.ensure_started()
@@ -11392,7 +11420,12 @@ async def _write_scene_memory(
         return f"写入被拒绝：{scene_error}"
 
     scene_title = _authored_scene_title(content, title)
-    scene_cues = _authored_scene_cues(content, title=scene_title, explicit=cues)
+    scene_cues = _authored_scene_cues(cues)
+    if not scene_cues:
+        return (
+            "写入被拒绝：新 Scene 必须由当前作者亲自写至少一个 cues，"
+            "说明以后提到什么时希望这段记忆被召回；不会从标题、引句或正文自动生成。"
+        )
     requested_domain = [
         item.strip() for item in str(domain or "").split(",") if item.strip()
     ] or ["未分类"]
@@ -11519,12 +11552,12 @@ async def read_memory(
 @mcp.tool()
 async def write_scene(
     content: str,
+    cues: str | list[str],
     title: str = "",
     date: str = "",
     domain: str = "",
-    cues: str = "",
 ) -> str:
-    """原样写一条具体 Scene。正文就是完整经历，不加 Markdown 类型标题；工具不脱水、不改写、不合并，也不能借此写 feel、whisper、日印象或 ProfileFact。"""
+    """原样写一条具体 Scene。正文就是完整经历，不加 Markdown 类型标题；cues 必须由当前作者亲自写至少一个，回答“以后提到什么时，我希望这段记忆回来”。系统不从 title、引句或正文生成 cues。工具不脱水、不改写、不合并，也不能借此写 feel、whisper、日印象或 ProfileFact。"""
     return await _write_scene_memory(
         content,
         title=title,

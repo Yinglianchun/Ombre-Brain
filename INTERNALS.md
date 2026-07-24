@@ -61,7 +61,8 @@
 - **对话启动流程**：breath() → dream() → breath(domain="feel") → 开始对话
 
 **新 Scene 写入**
-- `hold` / `close_window` 的同步写入不调用 LLM：纯 Scene 正文先落盘，标题、显式 tags 与 scene_cues 作为 sidecar 元数据；向量只 embed content
+- `write_scene` / `close_window` 的同步写入不调用 LLM：纯 Scene 正文先落盘，标题、显式 tags 与 scene_cues 作为 sidecar 元数据；向量只 embed content
+- 每条新 canonical Scene 必须由当前作者显式给出至少一个 cue，表达“以后提到什么时希望这段记忆回来”；title、引句和正文都不作 cue 兜底
 - 自动 enrich 只写 `metadata_proposals.sqlite` 待审 sidecar，不自动修改 tags / importance / confidence / embedding / edges
 - 可选 Scene linker 在写入返回后异步运行，按顺序故障转移多个独立模型；两端逐字证据校验通过的结果先只写 `scene_edge_proposals.sqlite`。只读审核工具不改图；只有带精确确认词的单条接受操作在重验 Scene hash、active 状态与证据后，才在同一 SQLite 事务中写正式 `scene_edges` 并接受 proposal。它永不写旧 `memory_edges.jsonl`
 - 脱水、日记拆分和旧自动摘记只保留给专项导入/旧兼容路径
@@ -96,7 +97,7 @@
 - valence/arousal 参数仅兼容读取，不参与普通排序
 
 **`hold`** — 主要模式：
-- **普通模式**（`feel=False`，默认）：当前 AI 先写一段完整 Scene 原文，content 不带 `## Scene` / `### scene` / `### moment`，可带 sidecar `cues` → 工具只校验、原样新建；向量只取 content，不调用模型、不自动合并
+- **普通模式**（`feel=False`，默认）：当前 AI 先写一段完整 Scene 原文，content 不带 `## Scene` / `### scene` / `### moment`，并亲自写至少一个 sidecar `cues` → 工具只校验、原样新建；向量只取 content，不调用模型、不自动合并
 - **Whisper 模式**（`whisper=True`）：无源碎碎念/悄悄话，独立保存为 `type=feel + whisper`，可用 `breath(domain="whisper")` 读取。
 - **旧兼容 Feel 路径**（`feel=True`）：不建议新调用。带 `source_bucket` 时转为年轮 comment；不带源桶时转为 whisper。
 
@@ -134,7 +135,7 @@
 
 **`close_window`** — Window Shadow：
 - 整篇第一人称窗影原样写入独立 SQLite，不进普通候选池
-- 可选“想留下的记忆”中的 `### scene` 只作 Shadow 抽取标记，落库时去掉；`scenes[]` 直接传纯正文；不调用 LLM
+- “想留下的记忆”内联格式为 `### scene | cue 一 | cue 二`，heading 落库时去掉；`scenes[]` 每项传 `content`、至少一个 authored `cues` 与可选 `title`；不调用 LLM
 - 写前完整校验，任一 Scene 失败就补偿删除本次新建 Scene 与 Shadow；成功后才排 embedding
 - `grow` 仅为旧客户端兼容别名，不把旧 `### moment` 提升成 Scene
 

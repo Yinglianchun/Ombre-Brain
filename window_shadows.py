@@ -160,11 +160,36 @@ def _moment_title(heading: str, block: str, index: int) -> str:
     return f"窗影时刻{index}"
 
 
+def _scene_heading_cues(heading: str) -> list[str]:
+    """Read only explicitly authored pipe-delimited cues from a Scene marker."""
+    match = re.match(
+        r"^(?:scene|场景)\s*[|｜]\s*(.+)$",
+        str(heading or "").strip(),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return []
+    cues = []
+    seen = set()
+    for raw in re.split(r"[|｜]+", match.group(1)):
+        cue = re.sub(r"\s+", " ", raw).strip(
+            " \t\r\n-—*•、，,。.!！?？:：;；\"'“”‘’"
+        )
+        key = re.sub(r"[\s\W_]+", "", cue.lower())
+        if len(key) < 2 or key in seen:
+            continue
+        seen.add(key)
+        cues.append(cue[:80].rstrip())
+        if len(cues) >= 8:
+            break
+    return cues
+
+
 def extract_window_shadow_scenes(
     content: str,
     *,
     allow_legacy_moment: bool = False,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Copy explicit Scene blocks from the optional scene layer; never rewrite them."""
     sections = parse_window_shadow(content)
     text = sections.get("moments", "")
@@ -181,7 +206,8 @@ def extract_window_shadow_scenes(
         body = text[match.end():end].strip()
         if not body:
             continue
-        title = _moment_title(match.group(2), body, index)
+        scene_cues = _scene_heading_cues(match.group(2))
+        title = _moment_title("scene" if scene_cues else match.group(2), body, index)
         source_text = text[match.start():end].strip()
         heading_key = _normalize_heading(match.group(2))
         legacy_moment = allow_legacy_moment and (
@@ -199,6 +225,7 @@ def extract_window_shadow_scenes(
                 # the canonical Scene extractor returns the plain body.
                 "content": source_text if legacy_moment else body,
                 "source_text": source_text,
+                "cues": scene_cues,
             }
         )
     return moments

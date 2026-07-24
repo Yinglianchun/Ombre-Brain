@@ -40,7 +40,7 @@ MCP 只注册以上十三个动作。旧桶、旧字段和旧读取投影继续�
 - `content` 是完整原文经历，不加 `## Scene`、`### scene`、`### moment` 或固定模板。
 - 每次只写一个 Scene；多个场景分别调用。
 - 工具不调用模型改写、不脱水、不合并。
-- 可选 `cues` 是 0～8 个稀疏 sidecar 入口；它们不进入正文或 Scene 原文向量。
+- `cues` 必须由正在写 Scene 的你亲自给出 1～8 个，回答“以后提到什么时，我希望这段记忆回来”。它不是摘要；不要从 title、引句或正文机械提取。cues 只进稀疏 sidecar，不进入正文或 Scene 原文向量。
 - 旧 feel、whisper、日印象和 ProfileFact 仍可读取，但不再通过 MCP 新建。
 
 ## 追加 Annotation
@@ -65,7 +65,8 @@ MCP 只注册以上十三个动作。旧桶、旧字段和旧读取投影继续�
 
 - `shadow` 是当前窗口亲自写下的完整第一人称 Window Shadow。
 - 必须包含 `## 给下个窗口的我`，写真实变化、未完线头和希望怎样继续。
-- `scenes` 只放以后应由普通召回重新遇见的 0～N 个具体经历；没有就不硬凑。
+- `scenes` 只放以后应由普通召回重新遇见的 0～N 个具体经历；没有就不硬凑。每项写成 `{"content": "完整经历", "cues": ["自然召回入口"], "title": "可选标题"}`，其中 cues 必须亲自写。
+- 若把 Scene 直接写在 Shadow 的“想留下的记忆”里，使用 `### scene | cue 一 | cue 二`；裸 `### scene` 不会创建 canonical Scene。
 - 多条 Scene 中若有“继续吧”应优先下钻的未完主线，传从 1 开始的 `continue_scene_index`。
 - 任一 Scene 写失败时，本次 Shadow 与新 Scene 整组撤回。
 - Shadow 全文不进入普通候选、gate 或扩散。

@@ -37,7 +37,7 @@
 - 只有具体、长期有用、以后需要独立理解的经历才调用 write_scene。
 - content 是完整原文经历，不加 `## Scene`、`### scene`、`### moment` 或固定模板。
 - 每次只写一个 Scene；多个场景分别写。
-- 工具不调用模型改写、不脱水、不合并；可选 cues 只作为稀疏 sidecar 召回入口。
+- 工具不调用模型改写、不脱水、不合并；当前作者必须亲自写 1～8 个 cues，回答“以后提到什么时，希望这段记忆回来”。系统不从 title、引句或正文生成 cues。
 - 旧 feel、whisper、日印象和 ProfileFact 仍可被读取，但不再通过 MCP 新建。
 
 追加理解：
@@ -56,7 +56,8 @@
 关窗：
 - 窗口结束或准备换窗时，只调用一次 close_window。
 - shadow 是当前窗口亲自写下的完整第一人称 Window Shadow；必须包含 `## 给下个窗口的我`。
-- scenes 只放以后应由普通召回重新遇见的 0～N 个具体经历；没有就传空。
+- scenes 只放以后应由普通召回重新遇见的 0～N 个具体经历；没有就传空。每项同时传 content、至少一个 authored cues 与可选 title。
+- Shadow 内联 Scene 使用 `### scene | cue 一 | cue 二`；裸 `### scene` 不创建 canonical Scene。
 - 任一 Scene 写失败时，本次 Shadow 与新 Scene 整组撤回。
 - Shadow 全文不进入普通候选、gate 或扩散；handoff 只读取相邻窗口连续性。
 - 用户日记、整段聊天和批量摘要不属于 Window Shadow。
