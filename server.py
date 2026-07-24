@@ -9663,7 +9663,7 @@ async def comment_bucket(
 # 工具 1.7：delete_bucket_comment — 删除一条自己写的年轮
 # =============================================================
 async def delete_bucket_comment(bucket_id: str, comment_id: str) -> dict:
-    """删除自己通过 comment_bucket 写入的一条年轮；不会删除 bucket，也不会删除小雨/dashboard 写的年轮。"""
+    """删除你通过 comment_bucket 写入的一条年轮；不会删除 bucket，也不会删除用户通过 Dashboard 写的年轮。"""
     bucket_id = _coerce_memory_id(bucket_id)
     comment_id = _coerce_memory_id(comment_id)
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
@@ -10858,7 +10858,7 @@ async def close_window(
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """关窗时调用一次：原样保存第一人称 Window Shadow；Bridge 管醒来，窗影管沉淀。可写五段：`## 这一窗之后，什么留在了我身上`、`## 我的思考与声音哪里变得更具体`、`## 我对小雨和我们新懂了什么`、`## 最近发生的事`、`## 还需要关心的事`。要保存普通 Scene，再写 `## 想留下的记忆`，并用 `### scene | 标题：作者标题 | cue：以后提到什么时召回`。同一次关窗及重试复用同一 idempotency_key；失败时按响应里的 rejected_draft 与 fix_scope 局部修正。"""
+    """保存一篇 Window Shadow，并抽取内联 Scene。shadow 可写五段：`这一窗之后，什么留在了我身上`、`我的思考与声音哪里变得更具体`、`我对你和我们新懂了什么`、`最近发生的事`、`还需要关心的事`。Scene 放在 `## 想留下的记忆` 下，写成 `### scene | 标题：作者标题 | cue：以后提到什么时召回`。session_id/profile_id/date/source 填来源；idempotency_key 在重试时复用；失败稿重试按响应填写 rejected_draft_*；continue_scene_index 选择续接 Scene。"""
     _ = context
     return await _close_window_commit(
         shadow,
@@ -11644,7 +11644,7 @@ async def reflect(period: str = "daily", force: bool = False) -> dict:
 
 
 async def portrait_maintain(force: bool = False, scope: str = "") -> dict:
-    """整理每日 portrait state 与 stable candidates。模型不能发布 Stable；Stable 只接受当前 Haven 审阅证据后的本人定稿。不会写 profile_fact、anchor、pinned、protected 或 Core Memory。"""
+    """整理每日 portrait state 与 stable candidates。模型不能发布 Stable；Stable 只接受你审阅证据后的本人定稿。不会写 profile_fact、anchor、pinned、protected 或 Core Memory。"""
     await decay_engine.ensure_started()
     force_scopes = [str(scope or "").strip()] if str(scope or "").strip() else []
     return await portrait_engine.maintain_daily(
@@ -11879,7 +11879,7 @@ async def _resolved_portrait_evidence(rows: object, *, include_text: bool) -> li
 
 @mcp.tool()
 async def read_portrait(scope: str = "", include_evidence_text: bool = True) -> dict:
-    """读取 Haven 已审阅或待审的 User / Relationship Portrait。返回完整 stable、revision、source、证据、候选与历史；source=model 只代表候选材料，不代表已发布。scope 可为 user、relationship 或留空读取两者。明确审阅画像时使用，不要把 Current Self 画像重新造一份。"""
+    """读取 Portrait。scope 传 user、relationship 或留空读取两者；include_evidence_text 控制是否带证据正文。"""
     result = portrait_engine.read_reviewed_portrait(scope=scope)
     if str(result.get("status") or "") != "ok":
         return result
@@ -11900,7 +11900,7 @@ async def _publish_portrait_memory(
     evidence: list[dict] | None = None,
     locked: bool = True,
 ) -> dict:
-    """由当前 Haven 亲手发布一版 User 或 Relationship Portrait。必须先 read_portrait，传 expected_revision，并给出 Scene、Narrative Roll 或 Window Shadow evidence。Relationship 可直接引用窗影；User 引用窗影时工具会沿 linked_scene_ids 回到 Scene，避免把一次观察冒充小雨事实。模型候选不会自动发布。"""
+    """由你亲手发布一版 User 或 Relationship Portrait。必须先 read_portrait，传 expected_revision，并给出 Scene、Narrative Roll 或 Window Shadow evidence。Relationship 可直接引用窗影；User 引用窗影时工具会沿 linked_scene_ids 回到 Scene，避免把一次观察冒充用户事实。模型候选不会自动发布。"""
     safe_scope = str(scope or "").strip().lower()
     normalized, source_dates, resolved, errors = await _resolve_portrait_publication_evidence(
         safe_scope,
@@ -12395,7 +12395,7 @@ async def _set_scene_status_memory(
 @mcp.tool()
 async def recall(
     query: str = "",
-    mode: str = "memory",
+    mode: Literal["memory", "handoff"] = "memory",
     date: str = "",
     max_results: int = 2,
     max_tokens: int = 3000,
@@ -12403,7 +12403,7 @@ async def recall(
     previous_session_id: str = "",
     parent_shadow_id: str = "",
 ) -> str:
-    """普通召回与显式相邻窗口交接的统一入口。mode="memory" 按 query/date 找 Scene 与受限叙事投影；mode="handoff" 优先读取直接父 Window Shadow 亲写的最近事件与还需要关心的事，旧 handoff_note 只作兼容；父窗没有事件层时依次回退到新鲜后台 Recent Continuity、少量 raw_events 原文。Bridge 默认不调用这一模式。不会把 Portrait 自动塞进启动包；明确画像问题仍由现有显式门槛处理。"""
+    """查找 Scene 或读取相邻窗口交接。query/date 填记忆线索；mode 选 memory 或 handoff；max_results/max_tokens 控制结果；交接时可传 session_id、previous_session_id 或 parent_shadow_id。"""
     safe_mode = str(mode or "memory").strip().lower()
     if safe_mode not in {"memory", "handoff"}:
         return "mode 只能是 memory 或 handoff。"
@@ -12427,7 +12427,7 @@ async def read_memory(
     limit: int = 20,
     include_content: bool = True,
 ) -> dict:
-    """统一精确读取 Scene、Window Shadow 或 Narrative Roll。有 memory_id 时可由 scene id、window_*、narrative_* 推断类型；只有 query 时必须显式传 memory_type，绝不因同名猜测类型。memory_type="narrative" 且 query="叙事卷" 列目录，精确卷名或别名一次返回完整卷，模糊或冲突查询只返回候选。语义找 Scene 请用 recall。"""
+    """精确读取记忆对象。memory_id 填对象 ID；memory_type 选 scene、shadow 或 narrative；按叙事卷名称读取时用 query；limit 控制列表数量，include_content 控制是否返回正文。"""
     safe_id = _coerce_memory_id(memory_id)
     safe_type = str(memory_type or "").strip().lower()
     if safe_type in {"scene", "memory", "bucket"}:
@@ -12479,7 +12479,7 @@ async def write_scene(
     date: str = "",
     domain: str = "",
 ) -> str:
-    """原样写一条具体 Scene。正文就是完整经历，不加 Markdown 类型标题；cues 必须由当前作者亲自写至少一个，回答“以后提到什么时，我希望这段记忆回来”。系统不从 title、引句或正文生成 cues。工具不脱水、不改写、不合并，也不能借此写 feel、whisper、日印象或 ProfileFact。"""
+    """保存一条 Scene。content 写完整经历；cues 写 1～8 个“以后提到什么时召回”的入口；title、date、domain 可选。"""
     return await _write_scene_memory(
         content,
         title=title,
@@ -12497,7 +12497,7 @@ async def edit_scene(
     content: str | None = None,
     cues: str | list[str] | None = None,
 ) -> dict:
-    """原位修改一条 authored Scene。先用 read_memory 读取 scene_id，并把返回的 metadata.updated_at 原样传为 expected_updated_at；只修改显式传入的 title、content、cues，未传字段保持不变。旧版本全文保存在 Scene revision history；原 ID、创建时间、来源证据与窗影关联不变。不能用于 Window Shadow、Narrative Roll、旧桶或不可变 source record。"""
+    """修改一条 Scene。scene_id 填 Scene ID；expected_updated_at 填 read_memory 返回的 metadata.updated_at；title、content、cues 只传需要修改的项。"""
     return await _edit_scene_memory(
         scene_id,
         expected_updated_at=expected_updated_at,
@@ -12513,7 +12513,7 @@ async def set_scene_status(
     status: Literal["active", "archived"],
     expected_updated_at: str,
 ) -> dict:
-    """先 read_memory，再带 metadata.updated_at 归档或恢复 authored Scene。归档不删除正文，仍可精确读取；恢复不重写证据。"""
+    """归档或恢复一条 Scene。scene_id 填 Scene ID；status 选 active 或 archived；expected_updated_at 填 read_memory 返回的 metadata.updated_at。"""
     return await _set_scene_status_memory(
         scene_id,
         status=status,
@@ -12527,7 +12527,7 @@ async def annotate(
     content: str,
     kind: str = "comment",
 ) -> dict:
-    """给一条已有来源追加带时间 Annotation。用于后来形成的新理解、修正或有来源的感受；Annotation 始终挂回来源，不独立扩散。"""
+    """给已有记忆追加 Annotation。source_id 填来源 ID；content 写新增理解或修正；kind 可选。"""
     return await _append_annotation(
         source_id,
         content,
@@ -12559,7 +12559,7 @@ async def read_diary(
     title: str = "",
     limit: int = 20,
 ) -> dict:
-    """统一读取日记。可按精确 ID、日期、标题或日期+标题读取；都不传时列最近日记。情绪标签只随结果展示，不参与搜索。尚未到 unlock_at 的暗房日记只返回门牌与解锁时间，绝不返回正文或评论。"""
+    """读取日记。diary_id、date、title 可单独或组合填写；都不填时列最近日记；limit 控制数量。"""
     try:
         return diary_store.read(
             diary_id=int(diary_id) if int(diary_id or 0) > 0 else None,
@@ -12579,7 +12579,7 @@ async def write_diary(
     emotion_tags: list[str] | None = None,
     unlock_at: str = "",
 ) -> dict:
-    """原样写一篇作者日记；date 留空使用 Asia/Shanghai 今天。传未来的 ISO-8601 unlock_at 时写成暗房日记，在到时前任何读取、修改、删除或评论都不能取得正文。标签只保存和展示，不参与召回。"""
+    """写一篇日记。content 写正文；title、date、emotion_tags 可选；unlock_at 填未来的 ISO-8601 时间时写成暗房日记。"""
     try:
         return diary_store.create(
             content=content,
@@ -12602,7 +12602,7 @@ async def revise_diary(
     emotion_tags: list[str] | None = None,
     unlock_at: str | None = None,
 ) -> dict:
-    """修改一篇已存在的日记并保留上一版快照。时间锁尚未结束的暗房日记不可修改，也没有密码或确认词绕过。"""
+    """修改一篇日记。diary_id 填日记 ID；content、title、date、emotion_tags、unlock_at 只传需要修改的项。"""
     try:
         return diary_store.revise(
             diary_id,
@@ -12621,7 +12621,7 @@ async def delete_diary(
     diary_id: int,
     confirm: str = "",
 ) -> dict:
-    """删除一篇精确 ID 的日记。必须传 confirm="DELETE"；删除为可恢复软删除并保留上一版快照。时间锁尚未结束的暗房日记不可删除。"""
+    """软删除一篇日记。diary_id 填日记 ID；confirm 必须填 DELETE。"""
     if str(confirm or "") != "DELETE":
         return {
             "status": "confirmation_required",
@@ -12639,7 +12639,7 @@ async def comment_diary(
     diary_id: int,
     content: str,
 ) -> dict:
-    """以 Haven 身份给一篇日记追加评论。用户评论只由前端 HTTP 路径写入，不作为 MCP 工具暴露；时间锁尚未结束的暗房日记不可评论。"""
+    """给一篇日记追加你的评论。diary_id 填日记 ID；content 写评论正文。"""
     try:
         return diary_store.comment(diary_id, content=content, author="ai")
     except Exception as exc:
@@ -12664,7 +12664,7 @@ async def publish_narrative(
     publication_status: str = "reviewed",
     lifecycle: str = "active",
 ) -> dict:
-    """由当前 Haven 亲手发布、修订或封卷一份 Narrative Roll。document 必须是完整第一人称有来源 Markdown，至少列出两条 canonical Scene 及其逐字正文 hash；query_cues 是这一卷自己携带的审阅后路由提示，不存在全局主题词表；expected_revision=0 创建，之后必须带当前 revision。工具只保存传入原文并版本化，不调用模型、不改 Scene。"""
+    """发布或修订 Narrative Roll。narrative_id/title/document 填卷信息；source_scene_ids 填来源 Scene；expected_revision 创建时填 0、修订时填当前 revision；其余参数填写别名、实体、cues、时间范围和状态。"""
     exact_document = str(document or "")
     linked_ids = narrative_roll_store.source_scene_ids(exact_document, source_scene_ids)
     resolved_sources: list[dict] = []
@@ -12742,7 +12742,7 @@ async def publish_portrait(
     evidence: list[dict] | None = None,
     locked: bool = True,
 ) -> dict:
-    """由当前 Haven 在 read_portrait 审阅后，带 optimistic revision 与可验证 evidence 发布 User 或 Relationship Portrait。模型候选不会自动发布。"""
+    """发布 Portrait。scope 选 user 或 relationship；text 写正文；expected_revision 填 read_portrait 返回的 revision；evidence 填来源，locked 控制锁定状态。"""
     return await _publish_portrait_memory(
         scope=scope,
         text=text,

@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from identity import identity_names
+
 
 _SCENE_ID_RE = re.compile(r"\bscene_mig2_[A-Za-z0-9]+\b")
 _NARRATIVE_ID_RE = re.compile(r"^narrative_[A-Za-z0-9_.:-]{1,96}$")
@@ -67,14 +69,15 @@ def _query_requests_exact_evidence(query: str) -> bool:
 class NarrativeRollStore:
     """Registry for sourced, manually authored Narrative Projection arcs.
 
-    The Markdown document remains the exact human/Haven-authored artifact.  The
+    The Markdown document remains the exact author-supplied artifact.  The
     registry supplies routing metadata and optimistic revisions; it never turns
     an arc into Scene evidence or an ordinary bucket.  Publication writes only
-    text supplied by the current Haven and never invokes a model.
+    text supplied by the current author and never invokes a model.
     """
 
     def __init__(self, config: dict | None = None):
         config = config or {}
+        self.identity = identity_names(config)
         roll_cfg = config.get("narrative_rolls", {})
         if not isinstance(roll_cfg, dict):
             roll_cfg = {}
@@ -500,7 +503,7 @@ class NarrativeRollStore:
             "document_sha256": document_hash,
             "linked_scene_ids": linked_scene_ids,
             "published_at": published_at,
-            "published_by": "haven_manual",
+            "published_by": f"{self.identity['ai_name']}_manual",
             "history": history,
         }
         if current_index is None:

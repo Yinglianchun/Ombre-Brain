@@ -259,7 +259,7 @@ def load_config(config_path: str = None) -> dict:
         "gateway": {
             "host": "0.0.0.0",
             "port": 8010,
-            "default_session_id": "xiaoyu-main",
+            "default_session_id": "main",
             "upstream_base_url": "",
             "upstream_default_model": "",
             "upstream_models": [],
@@ -315,7 +315,7 @@ def load_config(config_path: str = None) -> dict:
         },
         "persona": {
             "enabled": True,
-            "profile_id": "haven_xiaoyu",
+            "profile_id": "default",
             "mode": "llm",
             "base_url": "https://api.deepseek.com/v1",
             "model": "deepseek-chat",

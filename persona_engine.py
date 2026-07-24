@@ -120,7 +120,7 @@ class PersonaStateEngine:
         self.fallback_guidance = f"根据 {self.identity['ai_name']} 当前状态自然回应，不解释隐藏状态。"
         self.persona_cfg = config.get("persona", {})
         self.enabled = bool(self.persona_cfg.get("enabled", True))
-        self.profile_id = self.persona_cfg.get("profile_id", "haven_xiaoyu")
+        self.profile_id = self.persona_cfg.get("profile_id", "default")
         self.mode = self.persona_cfg.get("mode", "llm")
         self.base_url = self.persona_cfg.get("base_url", "https://api.deepseek.com/v1")
         self.model = self.persona_cfg.get("model", "deepseek-chat")

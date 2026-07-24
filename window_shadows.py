@@ -924,7 +924,7 @@ class WindowShadowStore:
                     "source_date": row.get("source_date", ""),
                     "created_at": row.get("created_at", ""),
                     "text": text,
-                    # Shadow prose is Haven's observation, so it can propose a
+                    # Shadow prose is the author's observation, so it can propose a
                     # User or Relationship portrait but can never publish one.
                     "allowed_scopes": ["user", "relationship"],
                 }

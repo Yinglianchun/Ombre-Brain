@@ -803,7 +803,7 @@ portrait:
 # reviewed Markdown and verifies its Scene sources. It is not a bucket pool.
 narrative_rolls:
   registry_path: ""                    # empty = state_dir/narrative_rolls/registry.json; keep private narrative data out of Git
-  documents_dir: ""                   # empty = registry sibling revisions/; immutable Haven-authored revision files
+  documents_dir: ""                   # empty = registry sibling revisions/; immutable author-supplied revision files
   shadow_admission_enabled: true   # keep candidate/admission evidence in recall debug
   live_injection_enabled: true     # strong gate injects one authored body; weak/ambiguous matches stay out
   ambiguity_margin: 10             # tied strong rolls remain index-only and do not inject a body

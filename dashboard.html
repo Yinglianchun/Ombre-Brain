@@ -3722,7 +3722,7 @@
     <div class="profile-toolbar">
       <div>
         <h2>Portrait State</h2>
-        <p>后台每天整理画像候选；Stable 只由当前 Haven 审阅证据后亲自定稿，并在 breath/handoff 开场恢复。</p>
+        <p>后台每天整理画像候选；Stable 只由当前作者审阅证据后亲自定稿，并在 breath/handoff 开场恢复。</p>
       </div>
       <div class="profile-actions">
         <button type="button" onclick="refreshPortraitView()">刷新</button>
@@ -4281,8 +4281,8 @@ let bucketSortMode = 'time';
 let bucketSortDescending = true;
 let bucketBulkMode = false;
 let selectedBucketIds = new Set();
-let dashboardCommentAuthor = 'Rain';
-let dashboardAiAuthor = 'Haven';
+let dashboardCommentAuthor = 'User';
+let dashboardAiAuthor = 'AI';
 let reflectionSelectedDate = formatLocalDate(new Date());
 let reflectionCurrentMonth = monthStart(new Date());
 let configSnapshot = null;
@@ -5214,7 +5214,7 @@ async function loadDreams() {
       return;
     }
     content.innerHTML = '<div class="dream-list">' + records.map(function(record) {
-      var aiName = record.ai_name || dashboardAiAuthor || 'Haven';
+      var aiName = record.ai_name || dashboardAiAuthor || 'AI';
       var title = formatDreamDate(record) + ' ' + esc(aiName) + ' 做了一个梦';
       if (!record.has_body) {
         return '<div class="dream-row"><div class="dream-row-static">' +
@@ -5616,7 +5616,7 @@ function renderPortraitEditorPanel(scope) {
       '<h2>' + esc(portraitScopeLabel(scope)) + '</h2>' +
       '<div class="portrait-editor-note">' + esc(isPersona
         ? '原始核心保持第一人称原文且不会被后台改写；这里只编辑它后来长出的“现在的我”。'
-        : '主页面只展示 stable。这里负责由当前 Haven 编辑、锁定和检查候选依据。') + '</div>' +
+        : '主页面只展示 stable。这里负责由当前作者编辑、锁定和检查候选依据。') + '</div>' +
     '</div>' +
     '<div class="portrait-editor-meta">' + meta.map(function(part) {
       return '<span class="profile-chip">' + esc(part) + '</span>';

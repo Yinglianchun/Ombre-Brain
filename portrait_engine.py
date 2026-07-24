@@ -348,7 +348,7 @@ class DailyPortraitMaintainer:
             self._demote_initial_old_recent(normalized_patch, materials)
         self._seed_missing_mid_terms(normalized_patch, state)
         # Automatic/model runs are candidate-only. Stable heads advance only
-        # through an authored/manual patch after the current Haven reviews the
+        # through an authored/manual patch after the current author reviews the
         # candidate and its evidence.
         for item in normalized_patch.get("rewrite_stable", []) or []:
             rejected.append(
@@ -1007,7 +1007,7 @@ class DailyPortraitMaintainer:
         source_dates: Any = None,
         locked: bool = True,
     ) -> dict:
-        """Publish one Haven-authored User/Relationship head with provenance."""
+        """Publish one author-supplied User/Relationship head with provenance."""
         state = self.load_state()
         scope = str(scope or "").strip().lower()
         if scope not in REVIEWED_PORTRAIT_SCOPES:
