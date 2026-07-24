@@ -11,6 +11,7 @@
 | `recall` | 按 query/date 召回 Scene；新窗口缺少自动交接时用 `mode="handoff"` |
 | `read_memory` | 精确读取 Scene、Window Shadow 或 Narrative Roll |
 | `write_scene` | 原样保存一件具体、长期有用的 canonical Scene |
+| `edit_scene` | 先读后改，原位修订一条 authored Scene |
 | `annotate` | 给已有来源追加带时间的新理解、修正或感受 |
 | `close_window` | 原子保存完整第一人称 Window Shadow 与 0～N 个 Scene |
 | `publish_narrative` | 发布或修订有 Scene 来源账的 Narrative Roll |
@@ -22,7 +23,7 @@
 | `delete_diary` | 软删除精确 ID 的日记 |
 | `comment_diary` | 以 Haven 身份给日记追加评论 |
 
-MCP 只注册以上十三个动作。旧桶、旧字段和旧读取投影继续兼容，但历史 MCP 工具名与旧 Diary MCP 的 `get/search/update/add_user_comment` 已经退役。
+MCP 只注册以上十四个动作。旧桶、旧字段和旧读取投影继续兼容，但历史 MCP 工具名与旧 Diary MCP 的 `get/search/update/add_user_comment` 已经退役。
 
 ## 什么时候读取
 
@@ -37,6 +38,7 @@ MCP 只注册以上十三个动作。旧桶、旧字段和旧读取投影继续�
 ## 写 Scene
 
 - 只有具体、长期有用、以后需要独立理解的经历才调用 `write_scene`。
+- 修改已有 Scene 时先 `read_memory`，再调用 `edit_scene(scene_id=..., expected_updated_at=...)`；只传真正要改的 title、content 或 cues。不要用 `annotate` 冒充正文修订，也不要重写成一条新 Scene。
 - `content` 是完整原文经历，不加 `## Scene`、`### scene`、`### moment` 或固定模板。
 - 每次只写一个 Scene；多个场景分别调用。
 - 工具不调用模型改写、不脱水、不合并。

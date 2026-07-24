@@ -1939,6 +1939,35 @@ def _recent_continuity_fallback_status(
     }
 
 
+def _window_shadow_scene_source_valid(bucket: dict) -> bool:
+    """Verify a current or deliberately revised Scene against its original Shadow text."""
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    expected_hash = str(meta.get("scene_source_hash") or "").strip()
+    if not expected_hash:
+        return False
+    current_content = str(bucket.get("content") or "").strip()
+    if expected_hash == WindowShadowStore.source_hash(current_content):
+        return True
+    history = meta.get("scene_revision_history")
+    if not isinstance(history, list):
+        return False
+    for snapshot in history:
+        if not isinstance(snapshot, dict):
+            continue
+        try:
+            revision = int(snapshot.get("revision") or 0)
+        except (TypeError, ValueError):
+            revision = 0
+        if revision != 1:
+            continue
+        original_content = str(snapshot.get("content") or "").strip()
+        return bool(
+            original_content
+            and expected_hash == WindowShadowStore.source_hash(original_content)
+        )
+    return False
+
+
 def _window_shadow_scene_index(
     shadow_projection: dict,
     all_buckets: list[dict],
@@ -1987,10 +2016,7 @@ def _window_shadow_scene_index(
             continue
         if str(meta.get("window_shadow_id") or "").strip() != window_id:
             continue
-        expected_hash = str(meta.get("scene_source_hash") or "").strip()
-        if not expected_hash or expected_hash != WindowShadowStore.source_hash(
-            str(bucket.get("content") or "").strip()
-        ):
+        if not _window_shadow_scene_source_valid(bucket):
             continue
         title = re.sub(r"\s+", " ", str(meta.get("name") or scene_id)).strip()[:48]
         cues = normalize_scene_cues(meta.get("scene_cues"), limit=1, max_chars=80)
@@ -3122,6 +3148,13 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "object_kind",
         "write_contract",
         "scene_cues",
+        "scene_revision",
+        "scene_revision_history",
+        "last_edit_source",
+        "window_shadow_id",
+        "window_shadow_session_id",
+        "window_shadow_index",
+        "scene_source_hash",
         "confidence",
         "period",
         "date",
@@ -11890,6 +11923,202 @@ async def _write_scene_memory(
     return f"{action}{result_name} {','.join(requested_domain)}{related_note}"
 
 
+async def _edit_scene_memory(
+    scene_id: str,
+    *,
+    expected_updated_at: str,
+    title: str | None = None,
+    content: str | None = None,
+    cues: str | list[str] | None = None,
+) -> dict:
+    """Edit one authored Scene in place while retaining its prior revisions."""
+    scene_id = _coerce_memory_id(scene_id)
+    if not scene_id or not MEMORY_ID_RE.fullmatch(scene_id):
+        return {"status": "invalid", "reason": "invalid_scene_id"}
+
+    bucket = await bucket_mgr.get(scene_id)
+    if not bucket:
+        return {"status": "not_found", "scene_id": scene_id}
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    if not (
+        str(meta.get("object_kind") or "").strip().lower() == "scene"
+        or str(meta.get("memory_value_source") or "").strip() == "authored_scene"
+    ):
+        return {
+            "status": "invalid",
+            "reason": "not_authored_scene",
+            "scene_id": scene_id,
+        }
+    if bool(meta.get("source_record_immutable", False)):
+        return {
+            "status": "invalid",
+            "reason": "immutable_source_record",
+            "scene_id": scene_id,
+        }
+
+    def revision_token(value: object) -> str:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value or "").strip()
+
+    expected_version = revision_token(expected_updated_at)
+    current_updated_at = revision_token(meta.get("updated_at"))
+    if not expected_version:
+        return {
+            "status": "invalid",
+            "reason": "expected_updated_at_required",
+            "scene_id": scene_id,
+            "current_updated_at": current_updated_at,
+        }
+    if expected_version != current_updated_at:
+        return {
+            "status": "conflict",
+            "reason": "scene_changed_since_read",
+            "scene_id": scene_id,
+            "expected_updated_at": expected_version,
+            "current_updated_at": current_updated_at,
+        }
+    if title is None and content is None and cues is None:
+        return {
+            "status": "invalid",
+            "reason": "no_scene_fields_supplied",
+            "scene_id": scene_id,
+        }
+
+    updates: dict = {}
+    changed_fields: list[str] = []
+    if title is not None:
+        authored_title = str(title).strip()
+        if not authored_title:
+            return {
+                "status": "invalid",
+                "reason": "scene_title_required",
+                "scene_id": scene_id,
+            }
+        if len(authored_title) > 48:
+            return {
+                "status": "invalid",
+                "reason": "scene_title_too_long",
+                "scene_id": scene_id,
+                "max_chars": 48,
+            }
+        if authored_title != str(meta.get("name") or ""):
+            updates["name"] = authored_title
+            changed_fields.append("title")
+
+    if content is not None:
+        authored_content = str(content)
+        scene_error = _hold_scene_contract_error(authored_content)
+        if scene_error:
+            return {
+                "status": "invalid",
+                "reason": "invalid_scene_content",
+                "scene_id": scene_id,
+                "error": scene_error,
+            }
+        if authored_content != str(bucket.get("content") or ""):
+            updates["content"] = authored_content
+            changed_fields.append("content")
+
+    if cues is not None:
+        authored_cues = _authored_scene_cues(cues)
+        if not authored_cues:
+            return {
+                "status": "invalid",
+                "reason": "scene_cues_required",
+                "scene_id": scene_id,
+            }
+        current_cues = _authored_scene_cues(meta.get("scene_cues"))
+        if authored_cues != current_cues:
+            changed_fields.append("cues")
+            updates.setdefault("extra_metadata", {})["scene_cues"] = authored_cues
+
+    if not changed_fields:
+        return {
+            "status": "unchanged",
+            "scene_id": scene_id,
+            "updated_at": current_updated_at,
+            "scene": _bucket_read_payload(bucket),
+        }
+
+    try:
+        current_revision = max(1, int(meta.get("scene_revision") or 1))
+    except (TypeError, ValueError):
+        current_revision = 1
+    history = meta.get("scene_revision_history")
+    history = list(history) if isinstance(history, list) else []
+    history.append(
+        {
+            "revision": current_revision,
+            "saved_at": now_iso(),
+            "updated_at": current_updated_at,
+            "title": str(meta.get("name") or ""),
+            "content": str(bucket.get("content") or ""),
+            "cues": _authored_scene_cues(meta.get("scene_cues")),
+        }
+    )
+    if len(history) > 20:
+        history = [history[0], *history[-19:]]
+    edit_metadata = updates.setdefault("extra_metadata", {})
+    edit_metadata.update(
+        {
+            "scene_revision": current_revision + 1,
+            "scene_revision_history": history[-20:],
+            "last_edit_source": "edit_scene",
+        }
+    )
+
+    before_bucket = bucket
+    ok = await bucket_mgr.update(scene_id, **updates)
+    if not ok:
+        return {
+            "status": "error",
+            "reason": "scene_update_failed",
+            "scene_id": scene_id,
+        }
+    updated_bucket = await bucket_mgr.get(scene_id)
+    if not updated_bucket:
+        return {
+            "status": "error",
+            "reason": "scene_missing_after_update",
+            "scene_id": scene_id,
+        }
+
+    embedding_queued = _queue_embedding_refresh_if_changed(
+        scene_id,
+        before_bucket,
+        updated_bucket,
+    )
+    moment_reindexed = False
+    try:
+        memory_moment_store.upsert_bucket(updated_bucket)
+        moment_reindexed = True
+    except Exception as exc:
+        logger.warning("Edited Scene moment reindex failed / Scene 修订后 moment 重建失败: %s", exc)
+    entity_edges_refreshed = False
+    try:
+        _refresh_entity_edges_for_bucket(updated_bucket)
+        entity_edges_refreshed = True
+    except Exception as exc:
+        logger.warning("Edited Scene entity reindex failed / Scene 修订后实体索引失败: %s", exc)
+
+    return {
+        "status": "updated",
+        "scene_id": scene_id,
+        "revision": current_revision + 1,
+        "changed_fields": changed_fields,
+        "previous_updated_at": current_updated_at,
+        "updated_at": revision_token(
+            (updated_bucket.get("metadata") or {}).get("updated_at")
+        ),
+        "embedding_refresh": "queued" if embedding_queued else "skipped",
+        "moment_reindexed": moment_reindexed,
+        "entity_edges_refreshed": entity_edges_refreshed,
+        "scene_linking_queued": _queue_scene_linking(scene_id),
+        "scene": _bucket_read_payload(updated_bucket),
+    }
+
+
 # =============================================================
 # Daily MCP façade — memory continuity plus authored Diary actions
 # 日常 MCP façade —— 记忆连续性与作者日记动作
@@ -11987,6 +12216,24 @@ async def write_scene(
         title=title,
         date=date,
         domain=domain,
+        cues=cues,
+    )
+
+
+@mcp.tool()
+async def edit_scene(
+    scene_id: str,
+    expected_updated_at: str,
+    title: str | None = None,
+    content: str | None = None,
+    cues: str | list[str] | None = None,
+) -> dict:
+    """原位修改一条 authored Scene。先用 read_memory 读取 scene_id，并把返回的 metadata.updated_at 原样传为 expected_updated_at；只修改显式传入的 title、content、cues，未传字段保持不变。旧版本全文保存在 Scene revision history；原 ID、创建时间、来源证据与窗影关联不变。不能用于 Window Shadow、Narrative Roll、旧桶或不可变 source record。"""
+    return await _edit_scene_memory(
+        scene_id,
+        expected_updated_at=expected_updated_at,
+        title=title,
+        content=content,
         cues=cues,
     )
 

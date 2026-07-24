@@ -1,12 +1,13 @@
 # External Platform Tool Guide
 
-这份文档用于把 Ombre-Brain 接给聊天平台。MCP 只注册十三个日常动作；不要猜测或调用历史工具名。
+这份文档用于把 Ombre-Brain 接给聊天平台。MCP 只注册十四个日常动作；不要猜测或调用历史工具名。
 
 ## 当前 MCP 工具
 
 - `recall`：普通记忆召回，或相邻窗口 handoff。
 - `read_memory`：精确读取 Scene、Window Shadow 或 Narrative Roll。
 - `write_scene`：原样保存一件具体、长期有用的 Scene。
+- `edit_scene`：先读后改，原位修订一条 authored Scene。
 - `annotate`：给已有来源追加带时间的理解、修正或感受。
 - `close_window`：原子保存一篇 Window Shadow 与 0～N 个 Scene。
 - `publish_narrative`：发布或修订有 Scene 来源账的 Narrative Roll。
@@ -35,6 +36,7 @@
 
 写 Scene：
 - 只有具体、长期有用、以后需要独立理解的经历才调用 write_scene。
+- 已有 Scene 的标题、正文或 cues 要修订时，先用 read_memory 取得 scene_id 与 metadata.updated_at，再调用 edit_scene；只传需要改变的字段。版本冲突时重新读取，不拿 Annotation 或新 Scene 冒充编辑。
 - content 是完整原文经历，不加 `## Scene`、`### scene`、`### moment` 或固定模板。
 - 每次只写一个 Scene；多个场景分别写。
 - 工具不调用模型改写、不脱水、不合并；当前作者必须亲自写 1～8 个 cues，回答“以后提到什么时，希望这段记忆回来”。系统不从 title、引句或正文生成 cues。

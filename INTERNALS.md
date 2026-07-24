@@ -80,6 +80,7 @@
 | `breath` | query, max_tokens, domain, valence, arousal, max_results | 检索/浮现记忆 |
 | `hold` | content, cues, tags, importance, pinned, feel, whisper, source_bucket, valence, arousal | 原样保存一段纯 Scene 正文；旧 section 仅兼容读取 |
 | `close_window` | shadow, idempotency_key, rejected_draft_source_hash, rejected_draft_section_patch, read_rejected_draft, continue_scene_index | 保存整窗窗影并只抽取内联 Scene；失败稿分库等待同 key 重试 |
+| `edit_scene` | scene_id, expected_updated_at, title?, content?, cues? | 带乐观并发检查地原位修订 authored Scene；旧版本留在 revision history |
 | `grow` | content | `close_window` 兼容别名；不提升旧 `### moment` |
 | `comment_bucket` | bucket_id, content, kind, valence, arousal | 给源 bucket 追加年轮 |
 | `trace` | bucket_id, name, domain, valence, arousal, importance, tags, resolved, pinned, anchor, digested, content, delete | 修改元数据/内容/删除 |

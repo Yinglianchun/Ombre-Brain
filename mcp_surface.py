@@ -10,6 +10,7 @@ DAILY_TOOL_NAMES: tuple[str, ...] = (
     "recall",
     "read_memory",
     "write_scene",
+    "edit_scene",
     "annotate",
     "close_window",
     "publish_narrative",
