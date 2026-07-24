@@ -1,43 +1,45 @@
 # ============================================================
-# Module: MCP Server Entry Point (server.py)
-# 模块：MCP 服务器主入口
+# Module: Authored Memory + Diary MCP Entry Point (server.py)
+# 模块：作者记忆与日记 MCP 主入口
 #
-# Starts the Ombre Brain MCP service and registers memory
-# operation tools for Claude to call.
-# 启动 Ombre Brain MCP 服务，注册记忆操作工具供 Claude 调用。
+# Starts the unified Ombre memory/Diary service and exposes the current
+# daily MCP façade to any connected client.
+# 启动统一的 Ombre 记忆/日记服务，并向已连接客户端暴露当前日常 MCP 门面。
 #
 # Core responsibilities:
 # 核心职责：
-#   - Initialize config, bucket manager, dehydrator, decay engine
-#     初始化配置、记忆桶管理器、脱水器、衰减引擎
-#   - Expose MCP tools:
-#     暴露 MCP 工具：
-#       breath — Surface unresolved memories or search by keyword
-#                浮现未解决记忆 或 按关键词检索
-#       resurface — Surface dormant memories without touching them
-#                   只读浮现久未触碰的旧记忆
-#       comment_bucket — Add a ring comment to a memory
-#                        给记忆追加年轮
-#       delete_bucket_comment — Delete one Haven-authored ring comment
-#                               删除一条 Haven 自己写的年轮
-#       hold   — Store a single memory
-#                存储单条记忆
-#       grow   — Store one complete first-person window shadow and copy explicit moments
-#                保存整窗第一人称窗影，并拆出独立场景记忆
-#       trace  — Modify metadata / resolved / delete
-#                修改元数据 / resolved 标记 / 删除
-#       pulse  — System status + bucket listing
-#                系统状态 + 所有桶列表
-#       reflect — Daily relationship weather
-#                 日关系天气
-#       introspection — Read recent memories for waking self-reflection
-#                       读取最近记忆供清醒自省
+#   - Initialize canonical authored-memory stores, Diary storage, legacy
+#     read compatibility, indexes, and background maintenance engines.
+#     初始化作者记忆主存储、日记存储、旧数据读取兼容、索引与后台维护引擎。
+#   - Expose the 14-tool daily façade:
+#     暴露 14 把日常工具：
+#       recall / read_memory
+#         Recall Scenes or explicitly read handoff; read exact Scene,
+#         Window Shadow, or Narrative Roll objects.
+#         召回 Scene 或显式读取 handoff；精确读取 Scene、窗影或叙事卷。
+#       write_scene / edit_scene / annotate / close_window
+#         Author and revise Scenes, append sourced later understanding,
+#         and atomically settle one Window Shadow plus inline Scenes.
+#         亲写与修订 Scene、追加有来源的后来理解，并原子沉淀一篇窗影及内联 Scene。
+#       publish_narrative / read_portrait / publish_portrait
+#         Publish sourced narrative revisions and review/publish portraits.
+#         发布有来源的叙事修订，并审阅或发布画像。
+#       read_diary / write_diary / revise_diary / delete_diary / comment_diary
+#         Read and author Diary or Darkroom entries with revision, soft
+#         deletion, time-lock, and comment boundaries.
+#         读写日记与暗房，遵守版本、软删除、时间锁和评论边界。
+#   - Keep Bridge wake-up context separate from authored Window Shadows.
+#     Other clients opt into adjacent continuity with recall(mode="handoff").
+#     Bridge 负责醒来，窗影负责沉淀；其他客户端用 recall(mode="handoff") 显式交接。
+#   - Keep retired bucket-era tools out of the daily MCP surface while
+#     preserving read/migration compatibility for historical data.
+#     旧记忆桶工具不再暴露到日常 MCP，历史数据只保留读取与迁移兼容。
 #
 # Startup:
 # 启动方式：
 #   Local:  python server.py
 #   Remote: OMBRE_TRANSPORT=streamable-http python server.py
-#   Docker: docker-compose up
+#   Docker: docker compose -f compose.hk.yml up -d
 # ============================================================
 
 import os
