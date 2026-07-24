@@ -201,14 +201,6 @@ MEMORY_CARD_SHADOW_VERSION = "shadow-card-v1"
 HANDOFF_RECENT_CONTINUITY_MAX_AGE_HOURS = 72
 
 
-class CloseWindowSceneInput(TypedDict):
-    """One Scene authored together with its own sparse recall entrances."""
-
-    content: str
-    cues: str | list[str]
-    title: NotRequired[str]
-
-
 class CloseWindowShadowPatchInput(TypedDict):
     """Explicit section-body replacements for one stored rejected Shadow draft."""
 
@@ -9996,7 +9988,6 @@ async def darkroom_release(entry_id: str = "latest", reason: str = "") -> dict:
 # =============================================================
 def _close_window_request_snapshot(
     *,
-    scenes: list[CloseWindowSceneInput] | None,
     continue_scene_index: int,
     session_id: str,
     profile_id: str,
@@ -10004,14 +9995,7 @@ def _close_window_request_snapshot(
     source: str,
 ) -> dict:
     """Keep the rejected call parameters beside, but separate from, its exact Shadow."""
-    try:
-        safe_scenes = _json_lib.loads(
-            _json_lib.dumps(list(scenes or []), ensure_ascii=False)
-        )
-    except (TypeError, ValueError):
-        safe_scenes = []
     return {
-        "scenes": safe_scenes,
         "continue_scene_index": continue_scene_index,
         "session_id": str(session_id or ""),
         "profile_id": str(profile_id or ""),
@@ -10183,6 +10167,12 @@ async def _write_window_shadow_scene(
     window_id = str(window.get("window_id") or "").strip()
     bucket_id = f"{window_id}_scene_{index}"
     scene_content = str(scene.get("content") or "").strip()
+    scene_title = _authored_scene_title(
+        scene_content,
+        str(scene.get("title") or ""),
+    )
+    if not scene_title:
+        raise ValueError(f"Scene {index} 缺少 authored title")
     scene_cues = _authored_scene_cues(scene.get("cues"))
     if not scene_cues:
         raise ValueError(f"Scene {index} 缺少 authored cues")
@@ -10193,6 +10183,7 @@ async def _write_window_shadow_scene(
             str(existing_meta.get("window_shadow_id") or "") != window_id
             or str(existing_meta.get("scene_source_hash") or "")
             != WindowShadowStore.source_hash(scene_content)
+            or str(existing_meta.get("name") or "").strip() != scene_title
             or _authored_scene_cues(existing_meta.get("scene_cues")) != scene_cues
         ):
             raise ValueError(f"scene bucket id collision: {bucket_id}")
@@ -10207,7 +10198,6 @@ async def _write_window_shadow_scene(
         tags=tags,
         content=scene_content,
     )
-    name = str(scene.get("title") or f"窗影场景{index}").strip()
     await bucket_mgr.create(
         content=scene_content,
         tags=tags,
@@ -10215,7 +10205,7 @@ async def _write_window_shadow_scene(
         domain=["未分类"],
         valence=0.5,
         arousal=0.3,
-        name=name,
+        name=scene_title,
         bucket_id=bucket_id,
         source="window_shadow",
         date=str(window.get("source_date") or "") or None,
@@ -10226,7 +10216,7 @@ async def _write_window_shadow_scene(
             "scene_source_hash": WindowShadowStore.source_hash(scene_content),
             "memory_value_source": "authored_scene",
             "object_kind": "scene",
-            "write_contract": "close-window-scene-v2",
+            "write_contract": "close-window-scene-v3",
             "scene_cues": scene_cues or None,
             **_memory_classification_metadata(
                 classification["memory_subject"],
@@ -10240,51 +10230,39 @@ async def _write_window_shadow_scene(
 
 def _window_shadow_scene_records(
     shadow: str,
-    explicit_scenes: list[CloseWindowSceneInput] | None,
     *,
     markdown_import: bool = False,
 ) -> tuple[list[dict], str]:
     """Validate canonical Scene inputs before any Shadow or bucket is written."""
     if markdown_import:
-        if explicit_scenes:
-            return [], "markdown_import 只无损导入 Shadow，不接受 scenes；需要普通召回的场景请人工确认后另用 write_scene。"
         return [], ""
-    inline_scenes = extract_window_shadow_scenes(shadow)
-    provided = list(explicit_scenes or [])
-    if inline_scenes and provided:
-        return [], "Scene 请只选一种写法：放进窗影的 `## 想留下的记忆`，或通过 scenes 参数传入，不能两边重复。"
-    if inline_scenes:
-        records = inline_scenes
-    else:
-        records = []
-        for index, value in enumerate(provided, start=1):
-            if not isinstance(value, dict):
-                return [], (
-                    f"Scene {index} 必须同时传 content 与 cues；"
-                    "旧的纯字符串 scenes 不再创建 canonical Scene。"
-                )
-            content = str(value.get("content") or "").strip()
-            records.append(
-                {
-                    "title": _authored_scene_title(
-                        content,
-                        str(value.get("title") or ""),
-                    ) or f"窗影场景{index}",
-                    "content": content,
-                    "source_text": content,
-                    "cues": _authored_scene_cues(value.get("cues")),
-                }
-            )
+    records = extract_window_shadow_scenes(shadow)
     for index, record in enumerate(records, start=1):
+        marker_errors = record.pop("marker_errors", [])
+        if marker_errors:
+            return [], (
+                f"Scene {index} 标记格式不合格："
+                + "；".join(str(value) for value in marker_errors)
+            )
         error = _hold_scene_contract_error(str(record.get("content") or ""))
         if error:
             return [], f"Scene {index} 格式不合格：{error}"
+        scene_title = _authored_scene_title(
+            str(record.get("content") or ""),
+            str(record.get("title") or ""),
+        )
+        if not scene_title:
+            return [], (
+                f"Scene {index} 缺少 authored title："
+                "请在标记中写 `标题：…`，系统不会从正文补造。"
+            )
         scene_cues = _authored_scene_cues(record.get("cues"))
         if not scene_cues:
             return [], (
                 f"Scene {index} 缺少有效 cues：请由当前作者写明以后提到什么时"
                 "希望这段记忆被召回；标题、引句和正文不会被拿来补造 cues。"
             )
+        record["title"] = scene_title
         record["cues"] = scene_cues
     return records, ""
 
@@ -10292,7 +10270,6 @@ def _window_shadow_scene_records(
 async def _close_window_commit(
     shadow: str,
     *,
-    scenes: list[CloseWindowSceneInput] | None = None,
     rejected_draft_section_patch: CloseWindowShadowPatchInput | None = None,
     continue_scene_index: int = 0,
     session_id: str = "",
@@ -10309,7 +10286,6 @@ async def _close_window_commit(
     text = str(shadow or "")
     request_key = str(idempotency_key or "").strip()
     request_snapshot = _close_window_request_snapshot(
-        scenes=scenes,
         continue_scene_index=continue_scene_index,
         session_id=session_id,
         profile_id=profile_id,
@@ -10570,15 +10546,9 @@ async def _close_window_commit(
         )
     scene_records, scene_error = _window_shadow_scene_records(
         text,
-        scenes,
         markdown_import=markdown_import,
     )
     if scene_error:
-        fix_scope = (
-            ["request.scenes"]
-            if "不能两边重复" in scene_error
-            else ["shadow.moments", "request.scenes"]
-        )
         return _close_window_rejection(
             status="invalid",
             reason="invalid_scene",
@@ -10586,7 +10556,7 @@ async def _close_window_commit(
             shadow=text,
             idempotency_key=request_key,
             request=request_snapshot,
-            validation={"fix_scope": fix_scope},
+            validation={"fix_scope": ["shadow.moments"]},
         )
     try:
         requested_continue_scene_index = int(continue_scene_index or 0)
@@ -10594,7 +10564,7 @@ async def _close_window_commit(
         return _close_window_rejection(
             status="invalid",
             reason="invalid_continue_scene_index",
-            error="continue_scene_index 必须是 scenes 中从 1 开始的序号，或留空/传 0。",
+            error="continue_scene_index 必须是窗影内联 Scene 中从 1 开始的序号，或留空/传 0。",
             shadow=text,
             idempotency_key=request_key,
             request=request_snapshot,
@@ -10774,7 +10744,6 @@ async def _close_window_commit(
 @mcp.tool()
 async def close_window(
     shadow: str,
-    scenes: list[CloseWindowSceneInput] | None = None,
     rejected_draft_section_patch: CloseWindowShadowPatchInput | None = None,
     session_id: str = "",
     profile_id: str = "",
@@ -10786,11 +10755,10 @@ async def close_window(
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow 与 0~N 个独立 Scene。客户端必须为一次关窗生成并在所有重试中复用同一个 idempotency_key；第一次成功后同 key 永远返回原成功结果。若校验或事务失败，返回的 status 仍是 invalid/error，并把原 Shadow 逐字保存到独立 rejected-draft store：它不是 canonical Window Shadow，不进 handoff、普通召回、bucket 或 embedding。下一次同 key必须修 last_error 指向的段落或参数：可逐字复用 rejected_draft.shadow 后修改，也可传 rejected_draft_section_patch 仅替换 fix_scope 允许的 section 正文；局部修复时 shadow 留空并必须传 rejected_draft_source_hash。若调用者丢失上次响应，可传 read_rejected_draft=true 与原 idempotency_key 取回，shadow 可传空字符串。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符。scenes 每项必须同时传 content 与至少一个当前作者亲写的 cues，可选 title；系统不从 title、引句或正文代写。Shadow 内联 Scene 使用 `### scene | cue 一 | cue 二`，不可再同时传 scenes。多条 Scene 的未完主线用 continue_scene_index；只有一条时自动认领。source="markdown_import" 只无损导入窗影，不补造 Scene。"""
+    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow，并只从 Shadow 的“想留下的记忆”中抽取 0~N 个作者明确标记的 Scene；没有单独的 scenes 写入口。客户端必须为一次关窗生成并在所有重试中复用同一个 idempotency_key；第一次成功后同 key 永远返回原成功结果。若校验或事务失败，返回的 status 仍是 invalid/error，并把原 Shadow 逐字保存到独立 rejected-draft store：它不是 canonical Window Shadow，不进 handoff、普通召回、bucket 或 embedding。下一次同 key 必须修 last_error 指向的段落或参数：可逐字复用 rejected_draft.shadow 后修改，也可传 rejected_draft_section_patch 仅替换 fix_scope 允许的 section 正文；局部修复时 shadow 留空并必须传 rejected_draft_source_hash。若调用者丢失上次响应，可传 read_rejected_draft=true 与原 idempotency_key 取回，shadow 可传空字符串。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符。需要普通召回的 Scene 必须内联写成 `### scene | 标题：作者标题 | cue：自然召回入口`，可继续追加 1~8 个 `| cue：…`；标题和 cues 都由当前作者亲自写，heading 只作抽取与 metadata，不进入 Scene 正文。多条 Scene 的未完主线用 continue_scene_index；只有一条时自动认领。source="markdown_import" 只无损导入窗影，不补造 Scene。"""
     _ = context
     return await _close_window_commit(
         shadow,
-        scenes=scenes,
         rejected_draft_section_patch=rejected_draft_section_patch,
         continue_scene_index=continue_scene_index,
         session_id=session_id,

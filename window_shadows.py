@@ -239,19 +239,52 @@ def _moment_title(heading: str, block: str, index: int) -> str:
     return f"窗影时刻{index}"
 
 
-def _scene_heading_cues(heading: str) -> list[str]:
-    """Read only explicitly authored pipe-delimited cues from a Scene marker."""
+def _scene_heading_metadata(heading: str) -> tuple[str, list[str], list[str]]:
+    """Read an authored title and cues from one canonical Scene marker."""
     match = re.match(
         r"^(?:scene|场景)\s*[|｜]\s*(.+)$",
         str(heading or "").strip(),
         flags=re.IGNORECASE,
     )
     if not match:
-        return []
+        return "", [], [
+            "必须写成 `### scene | 标题：… | cue：…`",
+        ]
+    title = ""
     cues = []
     seen = set()
+    errors = []
     for raw in re.split(r"[|｜]+", match.group(1)):
-        cue = re.sub(r"\s+", " ", raw).strip(
+        token = re.sub(r"\s+", " ", raw).strip(
+            " \t\r\n-—*•"
+        )
+        title_match = re.match(
+            r"^(?:title|标题|名字|名称)\s*[:：=]\s*(.+)$",
+            token,
+            flags=re.IGNORECASE,
+        )
+        if title_match:
+            value = title_match.group(1).strip()
+            if title:
+                errors.append("只能写一个 `标题：…`")
+            elif not value:
+                errors.append("`标题：` 后不能为空")
+            elif len(value) > 48:
+                errors.append("标题不能超过 48 个字符")
+            else:
+                title = value
+            continue
+        cue_match = re.match(
+            r"^cue\s*[:：=]\s*(.+)$",
+            token,
+            flags=re.IGNORECASE,
+        )
+        if not cue_match:
+            errors.append(
+                f"`{token}` 必须显式写成 `标题：…` 或 `cue：…`"
+            )
+            continue
+        cue = cue_match.group(1).strip(
             " \t\r\n-—*•、，,。.!！?？:：;；\"'“”‘’"
         )
         key = re.sub(r"[\s\W_]+", "", cue.lower())
@@ -261,7 +294,11 @@ def _scene_heading_cues(heading: str) -> list[str]:
         cues.append(cue[:80].rstrip())
         if len(cues) >= 8:
             break
-    return cues
+    if not title:
+        errors.append("缺少当前作者写的 `标题：…`")
+    if not cues:
+        errors.append("缺少至少一个当前作者写的 `cue：…`")
+    return title, cues, errors
 
 
 def extract_window_shadow_scenes(
@@ -285,8 +322,6 @@ def extract_window_shadow_scenes(
         body = text[match.end():end].strip()
         if not body:
             continue
-        scene_cues = _scene_heading_cues(match.group(2))
-        title = _moment_title("scene" if scene_cues else match.group(2), body, index)
         source_text = text[match.start():end].strip()
         heading_key = _normalize_heading(match.group(2))
         legacy_moment = allow_legacy_moment and (
@@ -295,6 +330,14 @@ def extract_window_shadow_scenes(
             or heading_key == "时刻"
             or heading_key.startswith("时刻")
         )
+        if legacy_moment:
+            title = _moment_title(match.group(2), body, index)
+            scene_cues = []
+            marker_errors = []
+        else:
+            title, scene_cues, marker_errors = _scene_heading_metadata(
+                match.group(2)
+            )
         moments.append(
             {
                 "title": title,
@@ -305,6 +348,7 @@ def extract_window_shadow_scenes(
                 "content": source_text if legacy_moment else body,
                 "source_text": source_text,
                 "cues": scene_cues,
+                "marker_errors": marker_errors,
             }
         )
     return moments

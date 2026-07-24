@@ -42,7 +42,7 @@ def _shadow(handoff: str, *, inline_scene: bool = False) -> str:
     if inline_scene:
         text += (
             "\n\n## 想留下的记忆\n"
-            "### scene | 提到 close_window 失败稿 | 问为什么不能整篇重写\n"
+            "### scene | 标题：失败稿仍由作者局部修复 | cue：提到 close_window 失败稿 | cue：问为什么不能整篇重写\n"
             "第一次校验失败后，原稿仍应逐字留给同一次关窗重试。"
         )
     return text
@@ -77,6 +77,7 @@ async def main() -> None:
         assert "rejected_draft_source_hash" in close_schema
         assert "read_rejected_draft" in close_schema
         assert "rejected_draft_section_patch" in close_schema
+        assert "scenes" not in close_schema
 
         request_key = "bridge:rejected-draft:text-fix"
         first_shadow = _shadow("我会继续。")
@@ -158,28 +159,23 @@ async def main() -> None:
             "我会沿着原稿继续，只修请求参数。" * 20,
             inline_scene=True,
         )
-        duplicate = await server._close_window_commit(
+        invalid_index = await server._close_window_commit(
             inline_shadow,
             idempotency_key=parameter_key,
-            scenes=[
-                {
-                    "content": "这条外部 Scene 与窗影内联 Scene 重复。",
-                    "cues": ["提到重复 Scene 参数"],
-                }
-            ],
+            continue_scene_index=2,
         )
-        assert duplicate["status"] == "invalid"
-        assert duplicate["reason"] == "invalid_scene"
-        assert duplicate["rejected_draft"]["shadow"] == inline_shadow
-        assert duplicate["rejected_draft"]["validation"]["fix_scope"] == [
-            "request.scenes"
+        assert invalid_index["status"] == "invalid"
+        assert invalid_index["reason"] == "invalid_continue_scene_index"
+        assert invalid_index["rejected_draft"]["shadow"] == inline_shadow
+        assert invalid_index["rejected_draft"]["validation"]["fix_scope"] == [
+            "request.continue_scene_index"
         ]
 
         changed_parameter_retry = await server._close_window_commit(
             inline_shadow + "\n这行不该被添加。",
             idempotency_key=parameter_key,
-            scenes=None,
-            rejected_draft_source_hash=duplicate["rejected_draft"]["source_hash"],
+            continue_scene_index=1,
+            rejected_draft_source_hash=invalid_index["rejected_draft"]["source_hash"],
         )
         assert changed_parameter_retry["status"] == "invalid"
         assert (
@@ -191,7 +187,7 @@ async def main() -> None:
         parameter_retry = await server._close_window_commit(
             inline_shadow,
             idempotency_key=parameter_key,
-            scenes=None,
+            continue_scene_index=1,
         )
         assert parameter_retry["status"] == "created"
         assert parameter_retry["scene_count"] == 1
@@ -205,8 +201,8 @@ async def main() -> None:
             "我会沿着原稿继续，只修失败的 Scene 段落。" * 15,
             inline_scene=True,
         ).replace(
-            "### scene | 提到 close_window 失败稿 | 问为什么不能整篇重写",
-            "### scene",
+            "### scene | 标题：失败稿仍由作者局部修复 | cue：提到 close_window 失败稿 | cue：问为什么不能整篇重写",
+            "### scene | 标题：这条 Scene 还缺少 cue",
         )
         no_cues = await server._close_window_commit(
             no_cues_shadow,
@@ -216,7 +212,6 @@ async def main() -> None:
         assert no_cues["reason"] == "invalid_scene"
         assert no_cues["rejected_draft"]["validation"]["fix_scope"] == [
             "shadow.moments",
-            "request.scenes",
         ]
 
         disallowed_patch = await server._close_window_commit(
@@ -234,7 +229,7 @@ async def main() -> None:
             rejected_draft_source_hash=no_cues["rejected_draft"]["source_hash"],
             rejected_draft_section_patch={
                 "moments": (
-                    "### scene | 提到 close_window 失败稿 | 问局部修复如何保留原稿\n"
+                    "### scene | 标题：失败稿只修 Scene 段落 | cue：提到 close_window 失败稿 | cue：问局部修复如何保留原稿\n"
                     "第一次校验失败后，服务端只替换获准修改的 Scene 段落。"
                 )
             },

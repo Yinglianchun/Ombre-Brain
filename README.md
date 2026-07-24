@@ -86,7 +86,7 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 `write_scene` 只原样保存一件由当前 AI 写好的长期 Scene：content 直接传一段完整原文经历，不带 Markdown section 标题；正文忠实保留这件事里实际发生、以后理解它所需的内容，写到能独立理解即可，不套固定段落或字段。工具不调用脱水/标签模型，也不合并旧桶。当前作者必须在同一次调用中亲自写 1～8 个 `cues`，回答“以后提到什么时，我希望这段记忆回来”；系统不从 title、引句或正文补造。cues 只进 sidecar 稀疏索引，Scene 向量仍只 embed content 原文。
 
-`close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”和 0～N 个独立 Scene。`scenes[]` 每项必须同时带 `content` 与当前作者亲自写的 `cues`，可选 `title`；Shadow 内联 Scene 使用 `### scene | cue 一 | cue 二`，裸 `### scene` 会被拒绝。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。旧 `### moment` 只保留读取兼容，不会自动升格成 Scene。
+`close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”，并只从 Shadow 的“想留下的记忆”中抽取 0～N 个独立 Scene；它没有平行 `scenes[]` 写入口。每条 Scene 使用 `### scene | 标题：作者标题 | cue：自然召回入口`，可继续追加 1～8 个 `| cue：…`。标题与 cues 都由当前作者亲自写，只进入 metadata；heading 不进入 Scene 正文。裸 `### scene`、未显式标注标题/cue 的旧格式都会被拒绝。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。旧 `### moment` 只保留读取兼容，不会自动升格成 Scene。
 
 `close_window` 的失败稿与成功 Shadow 分库：带 `idempotency_key` 的 `invalid` / `error` 请求会把原 Shadow 逐字写入 `window_shadow_rejected_drafts.sqlite`，响应返回 `rejected_draft.shadow`、`source_hash`、原请求参数与 `fix_scope`。失败稿不进入 `window_shadows.sqlite`、handoff、普通召回、bucket 或 embedding。重试同 key 时，参数-only 修复必须保持 Shadow 逐字不变；文本修复必须传上一稿的 `rejected_draft_source_hash`，而且只能改变 `fix_scope` 指定的 section。`read_rejected_draft=true` 可显式取回未完成失败稿。成功后草稿删除；之后同 key 永远返回第一次成功写入，不接受覆盖。
 
