@@ -136,16 +136,14 @@ from memory_object_policy import (
 from mcp_surface import OmbreFastMCP
 from recall_policy import RecallPolicy, diffusion_seed_topic_term_has_specific_residue
 from window_shadows import (
-    HANDOFF_NOTE_MAX_CHARS,
-    HANDOFF_NOTE_MIN_CHARS,
     WindowShadowRejectedDraftStore,
     WindowShadowStore,
     extract_window_shadow_moments,
     extract_window_shadow_scenes,
-    handoff_note_char_count,
     is_bare_window_continue_query,
     validate_window_shadow,
     replace_window_shadow_sections,
+    window_shadow_section_char_count,
     window_shadow_outside_sections,
 )
 from memory_nodes import MemoryNodeStore
@@ -208,6 +206,8 @@ class CloseWindowShadowPatchInput(TypedDict):
     voice: NotRequired[str]
     relationship: NotRequired[str]
     interaction: NotRequired[str]
+    recent_events: NotRequired[str]
+    care_items: NotRequired[str]
     handoff: NotRequired[str]
     moments: NotRequired[str]
 
@@ -1774,8 +1774,10 @@ def _latest_window_shadow_handoff_projection(
         return {}
     return {
         **projection,
-        # This is the current Haven's authored note to the next window. It is
-        # never summarized or truncated here.
+        # New Shadows carry authored events and current care items. The old note
+        # remains readable only as a compatibility source for explicit handoff.
+        "recent_events": str(projection.get("recent_events") or "").strip(),
+        "care_items": str(projection.get("care_items") or "").strip(),
         "handoff_note": str(projection.get("handoff_note") or "").strip(),
         "flowing_self": _trim_handoff_text_to_token_budget(
             projection.get("flowing_self", ""), self_max_tokens
@@ -2141,7 +2143,6 @@ async def _build_handoff_breath(
             window_session.get("previous_conversation_id") or ""
         ).strip()
 
-    current_focus = str(portrait_sections.get("current_focus") or "").strip()
     recent_continuity_status = _recent_continuity_fallback_status(portrait_sections)
     self_anchor = _format_handoff_self_anchor(all_buckets, limit=1)
     anchors = _format_handoff_anchors(all_buckets, limit=2)
@@ -2152,39 +2153,52 @@ async def _build_handoff_breath(
         parent_shadow_id=resolved_parent_shadow_id,
         allow_latest_fallback=not declared_window and not resolved_parent_shadow_id,
     )
-    projected_handoff_note = str(shadow_projection.get("handoff_note") or "").strip()
-    handoff_note_chars = handoff_note_char_count(projected_handoff_note)
-    handoff_note_valid = bool(
-        projected_handoff_note
-        and HANDOFF_NOTE_MIN_CHARS <= handoff_note_chars <= HANDOFF_NOTE_MAX_CHARS
+    raw_recent_events = str(shadow_projection.get("recent_events") or "").strip()
+    recent_events = _trim_handoff_text_to_token_budget(raw_recent_events, 650)
+    raw_care_items = str(shadow_projection.get("care_items") or "").strip()
+    care_items = _trim_handoff_text_to_token_budget(raw_care_items, 260)
+    legacy_handoff_note = str(shadow_projection.get("handoff_note") or "").strip()
+    shadow_continuity = recent_events or legacy_handoff_note
+    shadow_continuity_section = (
+        "recent_events"
+        if recent_events
+        else "legacy_handoff_note"
+        if legacy_handoff_note
+        else ""
     )
-    handoff_note = projected_handoff_note if handoff_note_valid else ""
     scene_index = (
         _window_shadow_scene_index(shadow_projection, all_buckets, limit=3)
-        if handoff_note
+        if shadow_projection
         else {"text": "", "items": [], "continue_scene_id": "", "linked_count": 0, "omitted_count": 0}
     )
     continued_scene = (
         _window_shadow_continue_scene(query, scene_index, all_buckets)
-        if handoff_note
+        if shadow_projection
         else {"text": "", "scene_id": "", "injected": False, "reason": "no_window_shadow"}
     )
     recent_continuity = (
         ""
-        if handoff_note
+        if shadow_continuity
         else str(recent_continuity_status.get("text") or "").strip()
+    )
+    current_focus = (
+        ""
+        if shadow_continuity
+        else str(portrait_sections.get("current_focus") or "").strip()
     )
     emergency_raw = (
         {}
-        if handoff_note or recent_continuity
+        if shadow_continuity or recent_continuity
         else _emergency_raw_handoff_projection(
             session_id=session_id,
             previous_session_id=resolved_previous_session_id,
         )
     )
     handoff_route = (
-        "window_shadow"
-        if handoff_note
+        "window_shadow_recent_events"
+        if recent_events
+        else "window_shadow_legacy_handoff"
+        if legacy_handoff_note
         else "recent_continuity"
         if recent_continuity
         else "raw_events"
@@ -2200,8 +2214,28 @@ async def _build_handoff_breath(
             "previous_session_id": resolved_previous_session_id,
             "parent_shadow_id": resolved_parent_shadow_id,
             "window_shadow_id": str(shadow_projection.get("window_id") or ""),
-            "window_shadow_handoff_note_valid": handoff_note_valid,
-            "window_shadow_handoff_note_chars": handoff_note_chars,
+            "window_shadow_continuity_section": shadow_continuity_section,
+            "window_shadow_recent_events_available": bool(raw_recent_events),
+            "window_shadow_recent_events_chars": window_shadow_section_char_count(
+                raw_recent_events
+            ),
+            "window_shadow_recent_events_truncated": bool(
+                raw_recent_events and recent_events != raw_recent_events
+            ),
+            "window_shadow_care_items_available": bool(raw_care_items),
+            "window_shadow_care_items_chars": window_shadow_section_char_count(
+                raw_care_items
+            ),
+            "window_shadow_care_items_truncated": bool(
+                raw_care_items and care_items != raw_care_items
+            ),
+            "window_shadow_legacy_handoff_available": bool(legacy_handoff_note),
+            "window_shadow_legacy_handoff_chars": window_shadow_section_char_count(
+                legacy_handoff_note
+            ),
+            "window_shadow_legacy_handoff_used": bool(
+                shadow_continuity_section == "legacy_handoff_note"
+            ),
             "linked_scene_ids": [
                 str(item.get("scene_id") or "")
                 for item in scene_index.get("items", [])
@@ -2222,19 +2256,25 @@ async def _build_handoff_breath(
         }
     )
 
+    shadow_continuity_title = (
+        "Recent Events From Previous Window"
+        if recent_events
+        else "Legacy Previous-Window Note"
+    )
     sections = [
         (SELF_ANCHOR_TAG, self_core, 100, False),
-        # A valid handoff_note is short by contract. Reserve it before every
-        # optional section and preserve the current Haven's exact wording.
-        ("Previous Window Shadow", handoff_note, 650, False, True),
+        # Explicit handoff reads the exact parent's authored event layer without
+        # model rewriting. The startup projection may only budget-trim it.
+        (shadow_continuity_title, shadow_continuity, 650, False),
+        ("Things That Still Need Care", care_items, 260, False),
         # Metadata-only down-drill entrances from the same verified parent Shadow.
         # Scene prose is never copied into the startup package.
         ("Linked Scene Index", str(scene_index.get("text") or ""), 240, True, True),
         # A bare first-turn `继续吧` reads exactly the authored primary Scene.
         # It is deliberately preserved whole and never diffused or summarized.
         ("Continued Scene", str(continued_scene.get("text") or ""), 1200, False, True),
-        ("Current Focus", current_focus, 90, True),
-        ("Recent Continuity", recent_continuity, 520, True),
+        ("Generated Current Focus Fallback", current_focus, 90, True),
+        ("Generated Recent Continuity Fallback", recent_continuity, 520, True),
         ("Emergency Recent Events", str(emergency_raw.get("text") or ""), 520, True),
         ("照顾备忘", care_memos, 180, True),
         ("Optional Anchors", anchors, 90, True),
@@ -2242,7 +2282,7 @@ async def _build_handoff_breath(
     intro = "\n".join([
         "=== Handoff Context ===",
         "Use this compact private block to restore identity and life context in a new window. "
-        "Do not treat it as a broad memory dump; use breath(query=...) for concrete events.",
+        "Do not treat it as a broad memory dump; use recall(query=...) for concrete events.",
     ])
     if debug:
         sections.append(
@@ -2257,8 +2297,16 @@ async def _build_handoff_breath(
                 f"window_previous_conversation_id: {resolved_previous_session_id}\n"
                 f"parent_shadow_id: {resolved_parent_shadow_id}\n"
                 f"window_shadow_id: {shadow_projection.get('window_id', '')}\n"
-                f"window_shadow_handoff_note_valid: {handoff_note_valid}\n"
-                f"window_shadow_handoff_note_chars: {handoff_note_chars}\n"
+                f"window_shadow_continuity_section: {shadow_continuity_section}\n"
+                f"window_shadow_recent_events_available: {bool(raw_recent_events)}\n"
+                f"window_shadow_recent_events_chars: {window_shadow_section_char_count(raw_recent_events)}\n"
+                f"window_shadow_recent_events_truncated: {bool(raw_recent_events and recent_events != raw_recent_events)}\n"
+                f"window_shadow_care_items_available: {bool(raw_care_items)}\n"
+                f"window_shadow_care_items_chars: {window_shadow_section_char_count(raw_care_items)}\n"
+                f"window_shadow_care_items_truncated: {bool(raw_care_items and care_items != raw_care_items)}\n"
+                f"window_shadow_legacy_handoff_available: {bool(legacy_handoff_note)}\n"
+                f"window_shadow_legacy_handoff_chars: {window_shadow_section_char_count(legacy_handoff_note)}\n"
+                f"window_shadow_legacy_handoff_used: {shadow_continuity_section == 'legacy_handoff_note'}\n"
                 f"linked_scene_ids: {','.join(str(item.get('scene_id') or '') for item in scene_index.get('items', []))}\n"
                 f"continue_scene_id: {scene_index.get('continue_scene_id', '')}\n"
                 f"linked_scene_omitted_count: {scene_index.get('omitted_count', 0)}\n"
@@ -8331,7 +8379,7 @@ async def _recall_memory(
     previous_session_id: str = "",
     parent_shadow_id: str = "",
 ) -> str:
-    """只读检索记忆。查主题用 query；valence/arousal 仅兼容旧调用且不参与普通排序。新窗口轻交接用 mode="handoff"：session_id 若来自 Gateway 的开窗登记，会精确读取它的 parent Shadow；也可显式传 parent_shadow_id。连续性只走一个槽位：优先逐字注入上一窗手写 handoff_note；缺影时读取 72 小时内的 Recent Continuity；两者都不可用时，previous_session_id 可指定从哪一窗的 raw_events 原文尾部生成确定性救生包。直接父窗影若带 continue_scene_id，且新窗口第一句 query 只是“继续吧 / 接着来 / 然后呢”等裸续接词，会额外逐字读取这一条 Scene 全文；带具体对象的“继续做……”不触发，也不进行图扩散。整个 fallback 不调用模型总结。date 或 query 里的日期可查当天普通记忆；domain="feel"/"whisper" 读私密通道，domain="daily_impression" 才读日印象。日期支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日。"""
+    """只读检索记忆。查主题用 query；valence/arousal 仅兼容旧调用且不参与普通排序。轻交接用 mode="handoff"：session_id 若来自 Gateway 的开窗登记，会精确读取它的 parent Shadow；也可显式传 parent_shadow_id。连续性只走一个事件槽位：优先读取上一窗亲写的 `最近发生的事`，并可附带 `还需要关心的事`；旧 Shadow 的 handoff_note 只作兼容。父窗缺少事件层时读取 72 小时内的后台 Recent Continuity；两者都不可用时，previous_session_id 可指定从哪一窗的 raw_events 原文尾部生成确定性救生包。直接父窗影若带 continue_scene_id，且第一句 query 只是“继续吧 / 接着来 / 然后呢”等裸续接词，会额外逐字读取这一条 Scene 全文；带具体对象的“继续做……”不触发，也不进行图扩散。handoff 调用本身不现场请求模型。date 或 query 里的日期可查当天普通记忆；domain="feel"/"whisper" 读私密通道，domain="daily_impression" 才读日印象。日期支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日。"""
     await decay_engine.ensure_started()
     max_results = _int_between(max_results, 20, 1, 50)
     max_tokens = _int_between(max_tokens, 10000, 0, 20000)
@@ -10129,6 +10177,8 @@ def _close_window_retry_text_scope_error(draft: dict, shadow: str) -> str:
             "shadow.voice",
             "shadow.relationship",
             "shadow.interaction",
+            "shadow.recent_events",
+            "shadow.care_items",
             "shadow.moments",
         }
     }
@@ -10312,7 +10362,6 @@ async def _close_window_commit(
     idempotency_key: str = "",
     rejected_draft_source_hash: str = "",
     read_rejected_draft: bool = False,
-    require_handoff_note: bool = True,
 ) -> dict:
     """Compensating transaction for one append-only Shadow and zero or more Scenes."""
     await decay_engine.ensure_started()
@@ -10348,8 +10397,17 @@ async def _close_window_commit(
                 "parent_shadow_id": str(existing_request.get("parent_shadow_id") or ""),
                 "idempotency_key": request_key,
                 "source_hash": str(existing_request.get("source_hash") or ""),
-                "handoff_note_chars": handoff_note_char_count(existing_sections.get("handoff", "")),
-                "handoff_ready": bool(str(existing_sections.get("handoff") or "").strip()),
+                "recent_events_chars": window_shadow_section_char_count(
+                    existing_sections.get("recent_events", "")
+                ),
+                "legacy_handoff_note_chars": window_shadow_section_char_count(
+                    existing_sections.get("handoff", "")
+                ),
+                "handoff_ready": bool(
+                    str(existing_sections.get("recent_events") or "").strip()
+                    or str(existing_sections.get("care_items") or "").strip()
+                    or str(existing_sections.get("handoff") or "").strip()
+                ),
                 "scene_bucket_ids": existing_scene_ids,
                 "scene_count": len(existing_scene_ids),
                 "created_scene_count": 0,
@@ -10551,14 +10609,9 @@ async def _close_window_commit(
             validation={"fix_scope": ["request.source"]},
         )
     markdown_import = resolved_source.lower() in {"markdown", "markdown_import", "md_import"}
-    sections, validation_errors = validate_window_shadow(
-        text,
-        require_handoff_note=require_handoff_note and not markdown_import,
-    )
+    sections, validation_errors = validate_window_shadow(text)
     if validation_errors:
         fix_scope = []
-        if any(value.startswith("handoff_note_") or value == "missing_handoff_note" for value in validation_errors):
-            fix_scope.append("shadow.handoff")
         if "missing_window_delta" in validation_errors:
             fix_scope.append("shadow.window_delta")
         if "self_section_needs_first_person" in validation_errors:
@@ -10761,8 +10814,17 @@ async def _close_window_commit(
         "parent_shadow_id": parent_shadow_id,
         "idempotency_key": request_key,
         "source_hash": str(window.get("source_hash") or planned["source_hash"]),
-        "handoff_note_chars": handoff_note_char_count(sections.get("handoff", "")),
-        "handoff_ready": bool(str(sections.get("handoff") or "").strip()),
+        "recent_events_chars": window_shadow_section_char_count(
+            sections.get("recent_events", "")
+        ),
+        "legacy_handoff_note_chars": window_shadow_section_char_count(
+            sections.get("handoff", "")
+        ),
+        "handoff_ready": bool(
+            str(sections.get("recent_events") or "").strip()
+            or str(sections.get("care_items") or "").strip()
+            or str(sections.get("handoff") or "").strip()
+        ),
         "scene_bucket_ids": scene_bucket_ids,
         "scene_count": len(scene_bucket_ids),
         "created_scene_count": len(created_scene_ids),
@@ -10788,7 +10850,7 @@ async def close_window(
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow，并只从 Shadow 的“想留下的记忆”中抽取 0~N 个作者明确标记的 Scene；没有单独的 scenes 写入口。客户端必须为一次关窗生成并在所有重试中复用同一个 idempotency_key；第一次成功后同 key 永远返回原成功结果。若校验或事务失败，返回的 status 仍是 invalid/error，并把原 Shadow 逐字保存到独立 rejected-draft store：它不是 canonical Window Shadow，不进 handoff、普通召回、bucket 或 embedding。下一次同 key 必须修 last_error 指向的段落或参数：可逐字复用 rejected_draft.shadow 后修改，也可传 rejected_draft_section_patch 仅替换 fix_scope 允许的 section 正文；局部修复时 shadow 留空并必须传 rejected_draft_source_hash。若调用者丢失上次响应，可传 read_rejected_draft=true 与原 idempotency_key 取回，shadow 可传空字符串。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符。需要普通召回的 Scene 必须内联写成 `### scene | 标题：作者标题 | cue：自然召回入口`，可继续追加 1~8 个 `| cue：…`；标题和 cues 都由当前作者亲自写，heading 只作抽取与 metadata，不进入 Scene 正文。多条 Scene 的未完主线用 continue_scene_index；只有一条时自动认领。source="markdown_import" 只无损导入窗影，不补造 Scene。"""
+    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow，并只从 Shadow 的“想留下的记忆”中抽取 0~N 个作者明确标记的 Scene；没有单独的 scenes 写入口。Bridge 自己负责新窗口醒来，Window Shadow 只负责沉淀这一窗发生的变化；新稿不再写 `## 给下个窗口的我`，也没有 250–400 字限制。需要为其他客户端保留相邻连续性时，可在 Shadow 中亲自写 `## 最近发生的事`（建议每条写成 `- YYYY-MM-DD｜事件`）和可选的 `## 还需要关心的事`，之后由 `recall(mode="handoff")` 显式读取；旧 Shadow 的 handoff_note 只保留兼容读取。客户端必须为一次关窗生成并在所有重试中复用同一个 idempotency_key；第一次成功后同 key 永远返回原成功结果。若校验或事务失败，返回的 status 仍是 invalid/error，并把原 Shadow 逐字保存到独立 rejected-draft store：它不是 canonical Window Shadow，不进 handoff、普通召回、bucket 或 embedding。下一次同 key 必须修 last_error 指向的段落或参数：可逐字复用 rejected_draft.shadow 后修改，也可传 rejected_draft_section_patch 仅替换 fix_scope 允许的 section 正文；局部修复时 shadow 留空并必须传 rejected_draft_source_hash。若调用者丢失上次响应，可传 read_rejected_draft=true 与原 idempotency_key 取回，shadow 可传空字符串。需要普通召回的 Scene 必须内联写成 `### scene | 标题：作者标题 | cue：自然召回入口`，可继续追加 1~8 个 `| cue：…`；标题和 cues 都由当前作者亲自写，heading 只作抽取与 metadata，不进入 Scene 正文。多条 Scene 的未完主线用 continue_scene_index；只有一条时自动认领。source="markdown_import" 只无损导入窗影，不补造 Scene。"""
     _ = context
     return await _close_window_commit(
         shadow,
@@ -10829,7 +10891,6 @@ async def grow(
         session_id=session_id,
         date=date,
         source=source,
-        require_handoff_note=False,
     )
     if result.get("status") in {"invalid", "error"}:
         return str(result.get("error") or result.get("reason") or "窗影保存失败。")
@@ -12134,7 +12195,7 @@ async def recall(
     previous_session_id: str = "",
     parent_shadow_id: str = "",
 ) -> str:
-    """普通召回与相邻窗口交接的统一入口。mode="memory" 按 query/date 找 Scene 与受限叙事投影；mode="handoff" 读取 self anchor、直接父 Window Shadow 和未完线头。不会把 Portrait 自动塞进启动包；明确画像问题仍由现有显式门槛处理。"""
+    """普通召回与显式相邻窗口交接的统一入口。mode="memory" 按 query/date 找 Scene 与受限叙事投影；mode="handoff" 优先读取直接父 Window Shadow 亲写的最近事件与还需要关心的事，旧 handoff_note 只作兼容；父窗没有事件层时依次回退到新鲜后台 Recent Continuity、少量 raw_events 原文。Bridge 默认不调用这一模式。不会把 Portrait 自动塞进启动包；明确画像问题仍由现有显式门槛处理。"""
     safe_mode = str(mode or "memory").strip().lower()
     if safe_mode not in {"memory", "handoff"}:
         return "mode 只能是 memory 或 handoff。"
@@ -12529,9 +12590,16 @@ async def _portrait_state_payload() -> dict:
         "recent_continuity": str(handoff_sections.get("recent_continuity") or ""),
         "recent_continuity_status": recent_continuity_status,
         "handoff_policy": {
-            "order": ["window_shadow", "recent_continuity", "raw_events"],
+            "order": [
+                "window_shadow_recent_events",
+                "window_shadow_legacy_handoff",
+                "recent_continuity",
+                "raw_events",
+            ],
             "recent_continuity_max_age_hours": HANDOFF_RECENT_CONTINUITY_MAX_AGE_HOURS,
-            "window_shadow_section": "handoff_note",
+            "window_shadow_section": "recent_events",
+            "window_shadow_optional_section": "care_items",
+            "legacy_window_shadow_section": "handoff_note",
         },
         "last_handoff": dict(_last_handoff_status),
         "window_shadow_stats": window_shadow_stats,

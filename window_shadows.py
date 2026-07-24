@@ -11,14 +11,21 @@ from typing import Any
 from identity import identity_names
 
 
-WINDOW_SHADOW_VERSION = "window-shadow-v3"
+WINDOW_SHADOW_VERSION = "window-shadow-v4"
 WINDOW_SHADOW_REJECTED_DRAFT_VERSION = "window-shadow-rejected-draft-v1"
-HANDOFF_NOTE_MIN_CHARS = 250
-HANDOFF_NOTE_MAX_CHARS = 400
 
 
 _HEADING_RE = re.compile(r"(?m)^(#{2,6})\s+(.+?)\s*$")
-_SECTION_KEYS = ("self", "voice", "relationship", "interaction", "handoff", "moments")
+_SECTION_KEYS = (
+    "self",
+    "voice",
+    "relationship",
+    "interaction",
+    "recent_events",
+    "care_items",
+    "handoff",
+    "moments",
+)
 _BARE_CONTINUE_QUERY_RE = re.compile(
     r"^(?:(?:好|嗯|唔|行|可以|可|那|那么|好呀|好耶|嗯嗯))?"
     r"(?:(?:我们)?(?:继续|接着(?:来|说)?|然后呢))"
@@ -49,10 +56,23 @@ def _section_key(heading: str) -> str:
         return "voice"
     if "怎么思考" in key or "怎么说话" in key or "语言的指纹" in key:
         return "voice"
+    if (
+        "最近发生的事" in key
+        or "最近发生了什么" in key
+        or "最近事件" in key
+        or key in {"recentevents", "recentwindowevents"}
+    ):
+        return "recent_events"
     if "仍在发生" in key or "仍悬着" in key or "值得带走" in key:
-        return "interaction"
-    if "线头" in key and ("亮着" in key or "还在" in key):
-        return "interaction"
+        return "care_items"
+    if "线头" in key and ("亮着" in key or "还在" in key or "未完" in key):
+        return "care_items"
+    if key in {"未完线头", "还亮着的线头", "openthreads", "unfinishedthreads"}:
+        return "care_items"
+    if "还需要关心的事" in key or "需要关心的事" in key:
+        return "care_items"
+    if key in {"careitems", "thingstocareabout"}:
+        return "care_items"
     if "怎么相处" in key or "相处方式" in key:
         return "interaction"
     if "给下个窗口的我" in key or "交给下个窗口" in key or "handoffnote" in key:
@@ -158,8 +178,13 @@ def replace_window_shadow_sections(
     return "".join(output), []
 
 
-def handoff_note_char_count(content: str) -> int:
+def window_shadow_section_char_count(content: str) -> int:
     return len(re.sub(r"\s+", "", str(content or "").strip()))
+
+
+def handoff_note_char_count(content: str) -> int:
+    """Compatibility alias for old callers; no length contract remains."""
+    return window_shadow_section_char_count(content)
 
 
 def is_bare_window_continue_query(content: str) -> bool:
@@ -174,28 +199,25 @@ def is_bare_window_continue_query(content: str) -> bool:
 
 def validate_window_shadow(
     content: str,
-    *,
-    require_handoff_note: bool = False,
 ) -> tuple[dict[str, str], list[str]]:
     sections = parse_window_shadow(content)
     errors = []
-    if not any(sections.get(key) for key in ("self", "voice", "relationship", "interaction")):
+    if not any(
+        sections.get(key)
+        for key in (
+            "self",
+            "voice",
+            "relationship",
+            "interaction",
+            "recent_events",
+            "care_items",
+        )
+    ):
         errors.append("missing_window_delta")
     if sections.get("self") and "我" not in sections["self"]:
         errors.append("self_section_needs_first_person")
     if sections.get("voice") and "我" not in sections["voice"]:
         errors.append("voice_section_needs_first_person")
-    if require_handoff_note:
-        handoff_note = str(sections.get("handoff") or "").strip()
-        if not handoff_note:
-            errors.append("missing_handoff_note")
-        else:
-            note_chars = handoff_note_char_count(handoff_note)
-            if note_chars < HANDOFF_NOTE_MIN_CHARS or note_chars > HANDOFF_NOTE_MAX_CHARS:
-                errors.append(
-                    f"handoff_note_chars_out_of_range:{note_chars}:"
-                    f"{HANDOFF_NOTE_MIN_CHARS}-{HANDOFF_NOTE_MAX_CHARS}"
-                )
     return sections, errors
 
 
@@ -376,6 +398,10 @@ def project_window_shadow_handoff(
         return "\n\n".join(parts).strip()
 
     return {
+        "recent_events": str(values.get("recent_events") or "").strip(),
+        "care_items": str(values.get("care_items") or "").strip(),
+        # Old Shadows keep their authored note readable for explicit handoff.
+        # New close_window calls no longer require or advertise this section.
         "handoff_note": str(values.get("handoff") or "").strip(),
         "flowing_self": render(
             (

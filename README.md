@@ -88,11 +88,11 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 `edit_scene` 原位修订一条 authored Scene。调用者必须先 `read_memory`，再把读到的 `metadata.updated_at` 原样作为 `expected_updated_at`；版本不一致时返回 conflict，绝不覆盖较新的修改。只修改显式传入的 title、content、cues，旧版本全文保存在 Scene 自己的 revision history 中；Scene ID、created、source、source refs、窗影关联和 comments 都不变。窗影抽取 Scene 的 `scene_source_hash` 永远指向 revision 1；正文修订后，handoff 会沿 revision history 验回原窗影证据，而不让新正文冒充原始摘录。标题、正文或 cues 变化后刷新 embedding、moment 与 entity 索引，并重新排队 Scene link proposal。它不接受 Window Shadow、Narrative Roll、旧 bucket 或 immutable source record。
 
-`close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”，并只从 Shadow 的“想留下的记忆”中抽取 0～N 个独立 Scene；它没有平行 `scenes[]` 写入口。每条 Scene 使用 `### scene | 标题：作者标题 | cue：自然召回入口`，可继续追加 1～8 个 `| cue：…`。标题与 cues 都由当前作者亲自写，只进入 metadata；heading 不进入 Scene 正文。裸 `### scene`、未显式标注标题/cue 的旧格式都会被拒绝。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。旧 `### moment` 只保留读取兼容，不会自动升格成 Scene。
+`close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”。Bridge 负责新窗口醒来，窗影只沉淀这一窗的变化：新稿不再要求 `## 给下个窗口的我`，也没有 250～400 字限制；相邻连续性可写成 `## 最近发生的事`（建议 `- YYYY-MM-DD｜事件`）与可选的 `## 还需要关心的事`。它只从 Shadow 的“想留下的记忆”中抽取 0～N 个独立 Scene，没有平行 `scenes[]` 写入口。每条 Scene 使用 `### scene | 标题：作者标题 | cue：自然召回入口`，可继续追加 1～8 个 `| cue：…`。标题与 cues 都由当前作者亲自写，只进入 metadata；heading 不进入 Scene 正文。裸 `### scene`、未显式标注标题/cue 的旧格式都会被拒绝。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。旧 `### moment` 只保留读取兼容，不会自动升格成 Scene。
 
 `close_window` 的失败稿与成功 Shadow 分库：带 `idempotency_key` 的 `invalid` / `error` 请求会把原 Shadow 逐字写入 `window_shadow_rejected_drafts.sqlite`，响应返回 `rejected_draft.shadow`、`source_hash`、原请求参数与 `fix_scope`。失败稿不进入 `window_shadows.sqlite`、handoff、普通召回、bucket 或 embedding。重试同 key 时，参数-only 修复必须保持 Shadow 逐字不变；文本修复必须传上一稿的 `rejected_draft_source_hash`，而且只能改变 `fix_scope` 指定的 section。`read_rejected_draft=true` 可显式取回未完成失败稿。成功后草稿删除；之后同 key 永远返回第一次成功写入，不接受覆盖。
 
-新窗口不等待画像模型吸收窗影，也不把 Scene 重复塞进 handoff。系统从最近一篇窗影确定性投影 **Flowing Self** 与 **Recent Relationship**；显式 Scene 只进入普通召回。完整窗影仍可回看，旧画像维护器暂时保留给 Dashboard 和兼容接口，但不再主导 handoff。
+Bridge 的换窗路径不调用 Ombre handoff。其他客户端需要交接时显式调用 `recall(mode="handoff")`：优先读取直接父窗影亲写的最近事件，可附带还需要关心的事；旧窗影的 handoff note 只作兼容。父窗没有事件层时，才读取 72 小时内的后台 Recent Continuity，并明确标成 generated fallback；再失败才返回少量 raw_events 原文。生成 fallback 不写回 canonical Shadow、Scene 或普通召回。handoff 调用本身不现场请求模型，显式 Scene 也不会重复塞进交接包；只有裸“继续吧”会按 `continue_scene_id` 精确读取一条 Scene。
 
 已经写好的第一人称窗影 Markdown 可以通过 `close_window(source="markdown_import")` 无损导入。导入路径只产生 handoff 投影，不从旧摘要补造普通 Scene。
 

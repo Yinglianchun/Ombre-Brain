@@ -24,7 +24,7 @@ def main() -> None:
         request_key = "haven_bridge:test-window"
         first, created = store.write(
             "## 这一窗之后，什么留在了我身上\n我记得第一版。\n\n"
-            "## 给下个窗口的我\n" + "我会沿着这一扇窗继续。" * 30,
+            "## 最近发生的事\n- 2026-07-24｜第一版窗影被成功保存。",
             session_id="conversation-one",
             idempotency_key=request_key,
         )
@@ -32,7 +32,7 @@ def main() -> None:
             raise AssertionError("first idempotent Shadow was not created")
         replay, replay_created = store.write(
             "## 这一窗之后，什么留在了我身上\n我在重试里写了不同文字。\n\n"
-            "## 给下个窗口的我\n" + "这份文字不应覆盖第一次成功写入。" * 25,
+            "## 最近发生的事\n- 2026-07-24｜这份文字不应覆盖第一次成功写入。",
             session_id="conversation-two",
             idempotency_key=request_key,
         )

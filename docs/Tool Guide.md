@@ -57,7 +57,9 @@
 
 关窗：
 - 窗口结束或准备换窗时，只调用一次 close_window。
-- shadow 是当前窗口亲自写下的完整第一人称 Window Shadow；必须包含 `## 给下个窗口的我`。
+- shadow 是当前窗口亲自写下的完整第一人称 Window Shadow；Bridge 管醒来，Shadow 管沉淀，不再要求 `## 给下个窗口的我` 或 250～400 字长度。
+- 需要让其他客户端手动交接时，可写 `## 最近发生的事`（建议一行一个 `- YYYY-MM-DD｜事件`）与可选的 `## 还需要关心的事`，再由 `recall(mode="handoff")` 显式读取。
+- 父窗没有最近事件时，handoff 才使用明确标注为 generated fallback 的后台 Recent Continuity；再失败才退少量 raw_events，生成内容不写回 canonical memory。
 - 同一次关窗的首次调用和所有重试复用同一个 idempotency_key。
 - close_window 没有独立 scenes 参数；只从 Shadow 的“想留下的记忆”中抽取作者明确写下的 Scene，没有就不写。
 - Shadow 内联 Scene 使用 `### scene | 标题：作者标题 | cue：自然召回入口`，可追加 1～8 个 cue。标题与 cues 只进 metadata，heading 不进入正文；裸 marker 或未标字段的旧格式会被拒绝。

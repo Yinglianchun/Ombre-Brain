@@ -32,12 +32,14 @@ class _GatewayState:
         return {"status": "closed"}
 
 
-def _shadow(handoff: str, *, inline_scene: bool = False) -> str:
+def _shadow(self_delta: str, *, inline_scene: bool = False) -> str:
     text = (
         "## 这一窗之后，什么留在了我身上\n"
-        "我记住：失败不能授权下一次重写整篇窗影。\n\n"
-        "## 给下个窗口的我\n"
-        f"{handoff}"
+        f"{self_delta}\n\n"
+        "## 最近发生的事\n"
+        "- 2026-07-24｜失败稿只允许沿同一份原稿修正具体报错。\n\n"
+        "## 还需要关心的事\n"
+        "- 成功前不能让失败稿进入 canonical Shadow 或 handoff。"
     )
     if inline_scene:
         text += (
@@ -80,7 +82,7 @@ async def main() -> None:
         assert "scenes" not in close_schema
 
         request_key = "bridge:rejected-draft:text-fix"
-        first_shadow = _shadow("我会继续。")
+        first_shadow = _shadow("失败不能授权下一次重写整篇窗影。")
         first = await server._close_window_commit(
             first_shadow,
             idempotency_key=request_key,
@@ -93,7 +95,7 @@ async def main() -> None:
         assert first["rejected_draft"]["ordinary_recall"] is False
         assert first["rejected_draft"]["handoff_visible"] is False
         assert first["rejected_draft"]["validation"]["fix_scope"] == [
-            "shadow.handoff"
+            "shadow.self"
         ]
         assert canonical_store.stats()["count"] == 0
         assert draft_store.stats()["count"] == 1
@@ -107,9 +109,9 @@ async def main() -> None:
         assert rewritten["rejected_draft"]["shadow"] == first_shadow
         assert draft_store.get(request_key)["shadow"] == first_shadow
 
-        whole_rewrite = _shadow("我拿着旧稿 hash，但仍然重写了整篇。" * 20).replace(
-            "失败不能授权下一次重写整篇窗影。",
-            "我把 handoff 之外的正文也偷偷改掉了。",
+        whole_rewrite = _shadow("我拿着旧稿 hash，只修 self 段。" * 20).replace(
+            "失败稿只允许沿同一份原稿修正具体报错。",
+            "我把 recent_events 也偷偷改掉了。",
         )
         rewritten_with_hash = await server._close_window_commit(
             whole_rewrite,
@@ -218,7 +220,7 @@ async def main() -> None:
             "",
             idempotency_key=section_patch_key,
             rejected_draft_source_hash=no_cues["rejected_draft"]["source_hash"],
-            rejected_draft_section_patch={"handoff": "不应允许修改这一段。"},
+            rejected_draft_section_patch={"recent_events": "不应允许修改这一段。"},
         )
         assert disallowed_patch["status"] == "invalid"
         assert disallowed_patch["reason"] == "rejected_draft_section_patch_not_allowed"
@@ -240,7 +242,7 @@ async def main() -> None:
         assert "服务端只替换获准修改的 Scene 段落。" in patched_canonical["content"]
         assert (
             "## 这一窗之后，什么留在了我身上\n"
-            "我记住：失败不能授权下一次重写整篇窗影。"
+            "我会沿着原稿继续，只修失败的 Scene 段落。"
             in patched_canonical["content"]
         )
         assert draft_store.get(section_patch_key) is None
