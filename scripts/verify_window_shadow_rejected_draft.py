@@ -76,6 +76,7 @@ async def main() -> None:
         close_schema = tools["close_window"].inputSchema["properties"]
         assert "rejected_draft_source_hash" in close_schema
         assert "read_rejected_draft" in close_schema
+        assert "rejected_draft_section_patch" in close_schema
 
         request_key = "bridge:rejected-draft:text-fix"
         first_shadow = _shadow("我会继续。")
@@ -198,6 +199,56 @@ async def main() -> None:
         assert draft_store.get(parameter_key) is None
         assert canonical_store.stats()["count"] == 2
         assert draft_store.stats()["count"] == 0
+
+        section_patch_key = "bridge:rejected-draft:section-patch"
+        no_cues_shadow = _shadow(
+            "我会沿着原稿继续，只修失败的 Scene 段落。" * 15,
+            inline_scene=True,
+        ).replace(
+            "### scene | 提到 close_window 失败稿 | 问为什么不能整篇重写",
+            "### scene",
+        )
+        no_cues = await server._close_window_commit(
+            no_cues_shadow,
+            idempotency_key=section_patch_key,
+        )
+        assert no_cues["status"] == "invalid"
+        assert no_cues["reason"] == "invalid_scene"
+        assert no_cues["rejected_draft"]["validation"]["fix_scope"] == [
+            "shadow.moments",
+            "request.scenes",
+        ]
+
+        disallowed_patch = await server._close_window_commit(
+            "",
+            idempotency_key=section_patch_key,
+            rejected_draft_source_hash=no_cues["rejected_draft"]["source_hash"],
+            rejected_draft_section_patch={"handoff": "不应允许修改这一段。"},
+        )
+        assert disallowed_patch["status"] == "invalid"
+        assert disallowed_patch["reason"] == "rejected_draft_section_patch_not_allowed"
+
+        section_patched = await server._close_window_commit(
+            "",
+            idempotency_key=section_patch_key,
+            rejected_draft_source_hash=no_cues["rejected_draft"]["source_hash"],
+            rejected_draft_section_patch={
+                "moments": (
+                    "### scene | 提到 close_window 失败稿 | 问局部修复如何保留原稿\n"
+                    "第一次校验失败后，服务端只替换获准修改的 Scene 段落。"
+                )
+            },
+        )
+        assert section_patched["status"] == "created"
+        assert section_patched["scene_count"] == 1
+        patched_canonical = canonical_store.get(section_patched["window_id"])
+        assert "服务端只替换获准修改的 Scene 段落。" in patched_canonical["content"]
+        assert (
+            "## 这一窗之后，什么留在了我身上\n"
+            "我记住：失败不能授权下一次重写整篇窗影。"
+            in patched_canonical["content"]
+        )
+        assert draft_store.get(section_patch_key) is None
 
     print("rejected Window Shadow draft contract verified")
 

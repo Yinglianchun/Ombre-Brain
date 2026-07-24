@@ -61,6 +61,26 @@ async def main() -> None:
     assert records[0]["cues"] == ["提到 close_window", "问内联 Scene 的 cues"]
 
     records, error = server._window_shadow_scene_records(
+        (
+            f"{shadow}\n\n"
+            "## 想留下的记忆\n"
+            "### scene | 提到第一条 Scene | 问第一条 cues\n"
+            "第一条 Scene 原文。\n\n"
+            "### scene | 提到第二条 Scene | 问第二条 cues\n"
+            "第二条 Scene 原文。\n\n"
+            "## 这扇窗还亮着的线头\n"
+            "我还要继续验证换窗。\n\n"
+            "## 给下个窗口的我\n"
+            f"{'我会沿着这扇窗留下的线头继续。' * 20}"
+        ),
+        None,
+    )
+    assert error == ""
+    assert len(records) == 2
+    assert records[1]["content"] == "第二条 Scene 原文。"
+    assert records[1]["cues"] == ["提到第二条 Scene", "问第二条 cues"]
+
+    records, error = server._window_shadow_scene_records(
         shadow,
         [{"content": "没有 authored cues 的 Scene。", "title": "不能顶替 cue"}],
     )

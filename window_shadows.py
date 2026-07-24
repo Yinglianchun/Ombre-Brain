@@ -51,6 +51,8 @@ def _section_key(heading: str) -> str:
         return "voice"
     if "仍在发生" in key or "仍悬着" in key or "值得带走" in key:
         return "interaction"
+    if "线头" in key and ("亮着" in key or "还在" in key):
+        return "interaction"
     if "怎么相处" in key or "相处方式" in key:
         return "interaction"
     if "给下个窗口的我" in key or "交给下个窗口" in key or "handoffnote" in key:
@@ -110,6 +112,50 @@ def window_shadow_outside_sections(
         cursor = end
     output.append(text[cursor:])
     return "".join(output)
+
+
+def replace_window_shadow_sections(
+    content: str,
+    replacements: dict[str, str],
+) -> tuple[str, list[str]]:
+    """Replace only recognized section bodies while preserving every heading and byte outside them."""
+    text = str(content or "")
+    requested = {
+        str(key or "").strip(): str(value or "")
+        for key, value in (replacements or {}).items()
+        if str(key or "").strip() in _SECTION_KEYS
+    }
+    if not requested:
+        return text, []
+    matches = list(_HEADING_RE.finditer(text))
+    top_rows: list[tuple[re.Match[str], str]] = []
+    for match in matches:
+        key = _section_key(match.group(2))
+        if key:
+            top_rows.append((match, key))
+    seen: set[str] = set()
+    duplicate: set[str] = set()
+    for _, key in top_rows:
+        if key in seen:
+            duplicate.add(key)
+        seen.add(key)
+    unavailable = sorted((set(requested) - seen) | (set(requested) & duplicate))
+    if unavailable:
+        return text, unavailable
+    output: list[str] = []
+    cursor = 0
+    for index, (match, key) in enumerate(top_rows):
+        if key not in requested:
+            continue
+        end = top_rows[index + 1][0].start() if index + 1 < len(top_rows) else len(text)
+        prefix = text[cursor:match.end()]
+        output.append(prefix)
+        separator = "" if prefix.endswith(("\n", "\r")) else "\n"
+        replacement = requested[key].strip()
+        output.append(f"{separator}{replacement}\n\n" if replacement else separator)
+        cursor = end
+    output.append(text[cursor:])
+    return "".join(output), []
 
 
 def handoff_note_char_count(content: str) -> int:

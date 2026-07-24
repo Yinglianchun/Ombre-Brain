@@ -145,6 +145,7 @@ from window_shadows import (
     handoff_note_char_count,
     is_bare_window_continue_query,
     validate_window_shadow,
+    replace_window_shadow_sections,
     window_shadow_outside_sections,
 )
 from memory_nodes import MemoryNodeStore
@@ -206,6 +207,17 @@ class CloseWindowSceneInput(TypedDict):
     content: str
     cues: str | list[str]
     title: NotRequired[str]
+
+
+class CloseWindowShadowPatchInput(TypedDict):
+    """Explicit section-body replacements for one stored rejected Shadow draft."""
+
+    self: NotRequired[str]
+    voice: NotRequired[str]
+    relationship: NotRequired[str]
+    interaction: NotRequired[str]
+    handoff: NotRequired[str]
+    moments: NotRequired[str]
 
 
 # Read-only runtime observability for the Dashboard. It never stores injected
@@ -10281,6 +10293,7 @@ async def _close_window_commit(
     shadow: str,
     *,
     scenes: list[CloseWindowSceneInput] | None = None,
+    rejected_draft_section_patch: CloseWindowShadowPatchInput | None = None,
     continue_scene_index: int = 0,
     session_id: str = "",
     profile_id: str = "",
@@ -10394,9 +10407,23 @@ async def _close_window_commit(
             "ordinary_recall": False,
             "rejected_draft_saved": False,
         }
+    section_patch = (
+        dict(rejected_draft_section_patch)
+        if isinstance(rejected_draft_section_patch, dict)
+        else {}
+    )
+    if section_patch and not previous_draft:
+        return {
+            "status": "invalid",
+            "reason": "rejected_draft_not_found",
+            "error": "局部修复必须对应一份已保存的 close_window 失败稿。",
+            "idempotency_key": request_key,
+            "canonical": False,
+            "ordinary_recall": False,
+            "rejected_draft_saved": False,
+        }
     if previous_draft:
         previous_hash = str(previous_draft.get("source_hash") or "").lower()
-        current_hash = WindowShadowRejectedDraftStore.source_hash(text)
         if expected_draft_hash and not hmac.compare_digest(
             expected_draft_hash,
             previous_hash,
@@ -10407,6 +10434,64 @@ async def _close_window_commit(
                 reason="rejected_draft_source_hash_mismatch",
                 error="失败稿基线已变化；请重新取回 rejected_draft.shadow 后再修具体报错。",
             )
+        if section_patch:
+            if not expected_draft_hash:
+                return _close_window_existing_draft_response(
+                    previous_draft,
+                    status="invalid",
+                    reason="rejected_draft_source_hash_required",
+                    error="局部修复必须传 rejected_draft_source_hash，确认修改的是当前失败稿。",
+                )
+            previous_shadow = str(previous_draft.get("shadow") or "")
+            if text.strip() and not hmac.compare_digest(
+                text.encode("utf-8"),
+                previous_shadow.encode("utf-8"),
+            ):
+                return _close_window_existing_draft_response(
+                    previous_draft,
+                    status="invalid",
+                    reason="rejected_draft_section_patch_conflicts_shadow",
+                    error="使用局部修复时，shadow 请留空或逐字复用 rejected_draft.shadow。",
+                )
+            validation = previous_draft.get("validation")
+            fix_scope = (
+                validation.get("fix_scope")
+                if isinstance(validation, dict)
+                and isinstance(validation.get("fix_scope"), list)
+                else []
+            )
+            allowed_sections = {
+                str(value).removeprefix("shadow.")
+                for value in fix_scope
+                if str(value).startswith("shadow.")
+            }
+            requested_sections = {str(value or "").strip() for value in section_patch}
+            disallowed_sections = sorted(requested_sections - allowed_sections)
+            if disallowed_sections:
+                return _close_window_existing_draft_response(
+                    previous_draft,
+                    status="invalid",
+                    reason="rejected_draft_section_patch_not_allowed",
+                    error=(
+                        "这次失败稿不允许局部修改这些 section："
+                        + ", ".join(disallowed_sections)
+                    ),
+                )
+            text, unavailable_sections = replace_window_shadow_sections(
+                previous_shadow,
+                {str(key): str(value or "") for key, value in section_patch.items()},
+            )
+            if unavailable_sections:
+                return _close_window_existing_draft_response(
+                    previous_draft,
+                    status="invalid",
+                    reason="rejected_draft_section_patch_unavailable",
+                    error=(
+                        "失败稿中找不到唯一可替换的 section："
+                        + ", ".join(unavailable_sections)
+                    ),
+                )
+        current_hash = WindowShadowRejectedDraftStore.source_hash(text)
         if not text.strip():
             return _close_window_existing_draft_response(
                 previous_draft,
@@ -10690,6 +10775,7 @@ async def _close_window_commit(
 async def close_window(
     shadow: str,
     scenes: list[CloseWindowSceneInput] | None = None,
+    rejected_draft_section_patch: CloseWindowShadowPatchInput | None = None,
     session_id: str = "",
     profile_id: str = "",
     date: str = "",
@@ -10700,11 +10786,12 @@ async def close_window(
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow 与 0~N 个独立 Scene。客户端必须为一次关窗生成并在所有重试中复用同一个 idempotency_key；第一次成功后同 key 永远返回原成功结果。若校验或事务失败，返回的 status 仍是 invalid/error，并把原 Shadow 逐字保存到独立 rejected-draft store：它不是 canonical Window Shadow，不进 handoff、普通召回、bucket 或 embedding。下一次同 key 必须以 rejected_draft.shadow 为底稿，只修 last_error 指向的段落或参数；Shadow 文本有改动时传 rejected_draft_source_hash。若调用者丢失上次响应，可传 read_rejected_draft=true 与原 idempotency_key 取回，shadow 可传空字符串。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符。scenes 每项必须同时传 content 与至少一个当前作者亲写的 cues，可选 title；系统不从 title、引句或正文代写。Shadow 内联 Scene 使用 `### scene | cue 一 | cue 二`，不可再同时传 scenes。多条 Scene 的未完主线用 continue_scene_index；只有一条时自动认领。source="markdown_import" 只无损导入窗影，不补造 Scene。"""
+    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow 与 0~N 个独立 Scene。客户端必须为一次关窗生成并在所有重试中复用同一个 idempotency_key；第一次成功后同 key 永远返回原成功结果。若校验或事务失败，返回的 status 仍是 invalid/error，并把原 Shadow 逐字保存到独立 rejected-draft store：它不是 canonical Window Shadow，不进 handoff、普通召回、bucket 或 embedding。下一次同 key必须修 last_error 指向的段落或参数：可逐字复用 rejected_draft.shadow 后修改，也可传 rejected_draft_section_patch 仅替换 fix_scope 允许的 section 正文；局部修复时 shadow 留空并必须传 rejected_draft_source_hash。若调用者丢失上次响应，可传 read_rejected_draft=true 与原 idempotency_key 取回，shadow 可传空字符串。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符。scenes 每项必须同时传 content 与至少一个当前作者亲写的 cues，可选 title；系统不从 title、引句或正文代写。Shadow 内联 Scene 使用 `### scene | cue 一 | cue 二`，不可再同时传 scenes。多条 Scene 的未完主线用 continue_scene_index；只有一条时自动认领。source="markdown_import" 只无损导入窗影，不补造 Scene。"""
     _ = context
     return await _close_window_commit(
         shadow,
         scenes=scenes,
+        rejected_draft_section_patch=rejected_draft_section_patch,
         continue_scene_index=continue_scene_index,
         session_id=session_id,
         profile_id=profile_id,
