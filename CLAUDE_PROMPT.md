@@ -67,18 +67,11 @@ MCP 只注册以上十五个动作。旧桶、旧字段和旧读取投影继续�
 
 窗口结束、准备换窗，或用户明确要求“把这一窗带走”时，由当前窗口调用一次 `close_window`。
 
-- `shadow` 是当前窗口亲自写下的完整第一人称 Window Shadow。
-- 必须包含 `## 给下个窗口的我`，写真实变化、未完线头和希望怎样继续。
-- 一次关窗从第一次调用到所有重试必须复用同一个 `idempotency_key`。`created` / `existing` 才是成功；`invalid` / `error` / `rejected` 都不是。
-- `close_window` 没有独立 `scenes` 写入口；只从 Shadow 的“想留下的记忆”里原子抽取当前作者明确写下的 Scene。没有值得普通召回的经历就不写这一层。
-- 每条内联 Scene 必须写成 `### scene | 标题：作者标题 | cue：自然召回入口`，可继续追加 1～8 个 `| cue：…`。标题和 cues 都必须亲自写；heading 只作抽取与 metadata，不进入 Scene 正文。旧的裸 `### scene` 或未标字段的 `### scene | …` 会被拒绝。
-- 校验失败时，工具会在响应的 `rejected_draft.shadow` 中逐字退回失败稿。它只在独立失败稿库里等待本次重试，不是 canonical Window Shadow，也不进 handoff、召回、bucket 或 embedding。
-- 下一次同 key 必须以 `rejected_draft.shadow` 为底稿，只修改 `last_error` 指向的段落或请求参数。文本有改动时传回 `rejected_draft_source_hash`；只修参数时 Shadow 必须逐字不变。丢失响应时用 `read_rejected_draft=true` 与原 key 取回。
-- 多条 Scene 中若有“继续吧”应优先下钻的未完主线，传从 1 开始的 `continue_scene_index`。
-- 任一 Scene 写失败时，本次 Shadow 与新 Scene 整组撤回。
-- Shadow 全文不进入普通候选、gate 或扩散。
-- 已写好的第一人称窗影 Markdown 可用 `source="markdown_import"` 无损导入；不补造 Scene。
-- 用户日记、整段聊天和批量摘要不属于 Window Shadow。
+- `shadow` 是当前窗口亲自写下的完整第一人称 Window Shadow；Bridge 管醒来，窗影管沉淀，不写“给下个窗口的我”。
+- 按真实内容选写：`## 这一窗之后，什么留在了我身上`、`## 我的思考与声音哪里变得更具体`、`## 我对小雨和我们新懂了什么`、`## 最近发生的事`、`## 还需要关心的事`。
+- 需要普通召回的经历放在 `## 想留下的记忆` 下，标题写成 `### scene | 标题：作者标题 | cue：以后提到什么时召回`；没有就不写 Scene。
+- 一次关窗和所有重试复用同一个 `idempotency_key`。失败时逐字复用响应里的 `rejected_draft.shadow`，只修 `fix_scope` 指出的段落或参数。
+- Window Shadow 不进入普通 recall；Scene 才进入。
 
 ## Narrative Roll
 

@@ -10858,7 +10858,7 @@ async def close_window(
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow，并只从 Shadow 的“想留下的记忆”中抽取 0~N 个作者明确标记的 Scene；没有单独的 scenes 写入口。Bridge 自己负责新窗口醒来，Window Shadow 只负责沉淀这一窗发生的变化；新稿不再写 `## 给下个窗口的我`，也没有 250–400 字限制。需要为其他客户端保留相邻连续性时，可在 Shadow 中亲自写 `## 最近发生的事`（建议每条写成 `- YYYY-MM-DD｜事件`）和可选的 `## 还需要关心的事`，之后由 `recall(mode="handoff")` 显式读取；旧 Shadow 的 handoff_note 只保留兼容读取。客户端必须为一次关窗生成并在所有重试中复用同一个 idempotency_key；第一次成功后同 key 永远返回原成功结果。若校验或事务失败，返回的 status 仍是 invalid/error，并把原 Shadow 逐字保存到独立 rejected-draft store：它不是 canonical Window Shadow，不进 handoff、普通召回、bucket 或 embedding。下一次同 key 必须修 last_error 指向的段落或参数：可逐字复用 rejected_draft.shadow 后修改，也可传 rejected_draft_section_patch 仅替换 fix_scope 允许的 section 正文；局部修复时 shadow 留空并必须传 rejected_draft_source_hash。若调用者丢失上次响应，可传 read_rejected_draft=true 与原 idempotency_key 取回，shadow 可传空字符串。需要普通召回的 Scene 必须内联写成 `### scene | 标题：作者标题 | cue：自然召回入口`，可继续追加 1~8 个 `| cue：…`；标题和 cues 都由当前作者亲自写，heading 只作抽取与 metadata，不进入 Scene 正文。多条 Scene 的未完主线用 continue_scene_index；只有一条时自动认领。source="markdown_import" 只无损导入窗影，不补造 Scene。"""
+    """关窗时调用一次：原样保存第一人称 Window Shadow；Bridge 管醒来，窗影管沉淀。可写五段：`## 这一窗之后，什么留在了我身上`、`## 我的思考与声音哪里变得更具体`、`## 我对小雨和我们新懂了什么`、`## 最近发生的事`、`## 还需要关心的事`。要保存普通 Scene，再写 `## 想留下的记忆`，并用 `### scene | 标题：作者标题 | cue：以后提到什么时召回`。同一次关窗及重试复用同一 idempotency_key；失败时按响应里的 rejected_draft 与 fix_scope 局部修正。"""
     _ = context
     return await _close_window_commit(
         shadow,
