@@ -138,12 +138,14 @@ from recall_policy import RecallPolicy, diffusion_seed_topic_term_has_specific_r
 from window_shadows import (
     HANDOFF_NOTE_MAX_CHARS,
     HANDOFF_NOTE_MIN_CHARS,
+    WindowShadowRejectedDraftStore,
     WindowShadowStore,
     extract_window_shadow_moments,
     extract_window_shadow_scenes,
     handoff_note_char_count,
     is_bare_window_continue_query,
     validate_window_shadow,
+    window_shadow_outside_sections,
 )
 from memory_nodes import MemoryNodeStore
 from narrative_rolls import NarrativeRollStore
@@ -231,6 +233,7 @@ memory_node_store = MemoryNodeStore(config)            # Computable memory node 
 memory_moment_store = MemoryMomentStore(config)        # Structured bucket body/comment moment index / 记忆片段索引
 shadow_memory_card_store = ShadowMemoryCardStore(config) # Non-authoritative primary/cue/evidence previews / 影子记忆卡
 window_shadow_store = WindowShadowStore(config)         # Append-only full-window self narratives / 整窗第一人称窗影
+window_shadow_rejected_draft_store = WindowShadowRejectedDraftStore(config) # Non-canonical rejected retry drafts / 非 canonical 失败重试稿
 reflection_engine = ReflectionEngine(config)           # Daily/weekly reflection worker / 关系天气
 diary_source_importer = DiarySourceImporter()          # Lossless diary evidence snapshots / 无损日记证据快照
 metadata_enricher = reflection_engine                  # Proposal-only metadata worker / 只提案、不改正文或权重
@@ -9979,6 +9982,186 @@ async def darkroom_release(entry_id: str = "latest", reason: str = "") -> dict:
 # Tool 3: close_window — Atomically preserve one Shadow + authored Scenes
 # 工具 3：close_window — 原子保存一整窗窗影与明确 Scene
 # =============================================================
+def _close_window_request_snapshot(
+    *,
+    scenes: list[CloseWindowSceneInput] | None,
+    continue_scene_index: int,
+    session_id: str,
+    profile_id: str,
+    date: str,
+    source: str,
+) -> dict:
+    """Keep the rejected call parameters beside, but separate from, its exact Shadow."""
+    try:
+        safe_scenes = _json_lib.loads(
+            _json_lib.dumps(list(scenes or []), ensure_ascii=False)
+        )
+    except (TypeError, ValueError):
+        safe_scenes = []
+    return {
+        "scenes": safe_scenes,
+        "continue_scene_index": continue_scene_index,
+        "session_id": str(session_id or ""),
+        "profile_id": str(profile_id or ""),
+        "date": str(date or ""),
+        "source": str(source or ""),
+    }
+
+
+def _close_window_draft_payload(draft: dict | None) -> dict:
+    item = draft if isinstance(draft, dict) else {}
+    return {
+        "idempotency_key": str(item.get("idempotency_key") or ""),
+        "shadow": str(item.get("shadow") or ""),
+        "source_hash": str(item.get("source_hash") or ""),
+        "last_status": str(item.get("status") or "invalid"),
+        "last_reason": str(item.get("reason") or ""),
+        "last_error": str(item.get("error") or ""),
+        "request": item.get("request") if isinstance(item.get("request"), dict) else {},
+        "validation": (
+            item.get("validation")
+            if isinstance(item.get("validation"), dict)
+            else {}
+        ),
+        "attempt_count": int(item.get("attempt_count") or 0),
+        "created_at": str(item.get("created_at") or ""),
+        "updated_at": str(item.get("updated_at") or ""),
+        "canonical": False,
+        "ordinary_recall": False,
+        "handoff_visible": False,
+    }
+
+
+def _close_window_draft_retry_contract(draft: dict | None) -> dict:
+    payload = _close_window_draft_payload(draft)
+    return {
+        "idempotency_key": payload["idempotency_key"],
+        "rejected_draft_source_hash": payload["source_hash"],
+        "reuse_shadow_verbatim": True,
+        "instruction": (
+            "下一次沿用同一 idempotency_key，以 rejected_draft.shadow 为逐字底稿；"
+            "只改 last_error 指向的段落或请求参数。若 Shadow 文本有任何改动，"
+            "同时传 rejected_draft_source_hash。"
+        ),
+    }
+
+
+def _close_window_existing_draft_response(
+    draft: dict,
+    *,
+    status: str,
+    reason: str,
+    error: str,
+) -> dict:
+    return {
+        "status": status,
+        "reason": reason,
+        "error": error,
+        "canonical": False,
+        "ordinary_recall": False,
+        "rejected_draft_saved": True,
+        "rejected_draft": _close_window_draft_payload(draft),
+        "retry_contract": _close_window_draft_retry_contract(draft),
+    }
+
+
+def _close_window_retry_text_scope_error(draft: dict, shadow: str) -> str:
+    """Enforce that a corrected retry changes only the rejected draft's fix scope."""
+    previous_shadow = str(draft.get("shadow") or "")
+    validation = draft.get("validation")
+    fix_scope = (
+        validation.get("fix_scope")
+        if isinstance(validation, dict)
+        and isinstance(validation.get("fix_scope"), list)
+        else []
+    )
+    scopes = {str(value or "").strip() for value in fix_scope if str(value or "").strip()}
+    parameter_only = bool(scopes) and all(
+        value.startswith("request.") or value == "retry_same_request"
+        for value in scopes
+    )
+    if parameter_only:
+        if not hmac.compare_digest(
+            str(shadow or "").encode("utf-8"),
+            previous_shadow.encode("utf-8"),
+        ):
+            return (
+                "上一份失败只允许修请求参数；Shadow 必须逐字复用 "
+                "rejected_draft.shadow。"
+            )
+        return ""
+
+    section_keys = {
+        value.removeprefix("shadow.")
+        for value in scopes
+        if value in {
+            "shadow.handoff",
+            "shadow.self",
+            "shadow.voice",
+            "shadow.relationship",
+            "shadow.interaction",
+            "shadow.moments",
+        }
+    }
+    if not section_keys:
+        return ""
+    before = window_shadow_outside_sections(previous_shadow, section_keys)
+    after = window_shadow_outside_sections(str(shadow or ""), section_keys)
+    if not hmac.compare_digest(after.encode("utf-8"), before.encode("utf-8")):
+        labels = ", ".join(sorted(f"shadow.{value}" for value in section_keys))
+        return f"这次只允许修改 {labels}；失败稿的其余文字与标题必须逐字不变。"
+    return ""
+
+
+def _close_window_rejection(
+    *,
+    status: str,
+    reason: str,
+    error: str,
+    shadow: str,
+    idempotency_key: str,
+    request: dict,
+    validation: dict | None = None,
+    extra: dict | None = None,
+) -> dict:
+    """Return a rejection and preserve its exact Shadow outside canonical storage."""
+    result = {
+        "status": str(status or "invalid"),
+        "reason": str(reason or ""),
+        "error": str(error or ""),
+        "canonical": False,
+        "ordinary_recall": False,
+        **(extra if isinstance(extra, dict) else {}),
+    }
+    key = str(idempotency_key or "").strip()
+    text = str(shadow or "")
+    if not key or not text:
+        result["rejected_draft_saved"] = False
+        return result
+    try:
+        draft = window_shadow_rejected_draft_store.save(
+            idempotency_key=key,
+            shadow=text,
+            status=result["status"],
+            reason=result["reason"],
+            error=result["error"],
+            request=request,
+            validation=validation,
+        )
+    except Exception as exc:
+        logger.warning(
+            "rejected close_window draft could not be saved / 关窗失败稿保存失败: %s",
+            exc,
+        )
+        result["rejected_draft_saved"] = False
+        result["rejected_draft_store_error"] = str(exc)
+        return result
+    result["rejected_draft_saved"] = True
+    result["rejected_draft"] = _close_window_draft_payload(draft)
+    result["retry_contract"] = _close_window_draft_retry_contract(draft)
+    return result
+
+
 async def _write_window_shadow_scene(
     window: dict,
     scene: dict,
@@ -10104,23 +10287,35 @@ async def _close_window_commit(
     date: str = "",
     source: str = "",
     idempotency_key: str = "",
+    rejected_draft_source_hash: str = "",
+    read_rejected_draft: bool = False,
     require_handoff_note: bool = True,
 ) -> dict:
     """Compensating transaction for one append-only Shadow and zero or more Scenes."""
     await decay_engine.ensure_started()
     text = str(shadow or "")
-    if not text.strip():
-        return {"status": "invalid", "reason": "empty_shadow", "error": "窗影内容为空，未保存。"}
     request_key = str(idempotency_key or "").strip()
+    request_snapshot = _close_window_request_snapshot(
+        scenes=scenes,
+        continue_scene_index=continue_scene_index,
+        session_id=session_id,
+        profile_id=profile_id,
+        date=date,
+        source=source,
+    )
     if len(request_key) > 200:
         return {
             "status": "invalid",
             "reason": "invalid_idempotency_key",
             "error": "idempotency_key 不能超过 200 个字符。",
+            "canonical": False,
+            "ordinary_recall": False,
+            "rejected_draft_saved": False,
         }
     if request_key:
         existing_request = window_shadow_store.get_by_idempotency_key(request_key)
         if existing_request:
+            rejected_draft_cleared = window_shadow_rejected_draft_store.delete(request_key)
             existing_sections = existing_request.get("sections") or {}
             existing_scene_ids = list(existing_request.get("scene_bucket_ids") or [])
             return {
@@ -10139,43 +10334,200 @@ async def _close_window_commit(
                 "continue_scene_id": str(existing_request.get("continue_scene_id") or ""),
                 "ordinary_recall": False,
                 "idempotent_replay": True,
+                "rejected_draft_cleared": rejected_draft_cleared,
             }
+    previous_draft = (
+        window_shadow_rejected_draft_store.get(request_key)
+        if request_key
+        else None
+    )
+    if read_rejected_draft:
+        if not request_key:
+            return {
+                "status": "invalid",
+                "reason": "idempotency_key_required",
+                "error": "读取 close_window 失败稿必须传原来的 idempotency_key。",
+                "canonical": False,
+                "ordinary_recall": False,
+                "rejected_draft_saved": False,
+            }
+        if not previous_draft:
+            return {
+                "status": "invalid",
+                "reason": "rejected_draft_not_found",
+                "error": "这个 idempotency_key 没有未完成的 close_window 失败稿。",
+                "idempotency_key": request_key,
+                "canonical": False,
+                "ordinary_recall": False,
+                "rejected_draft_saved": False,
+            }
+        return _close_window_existing_draft_response(
+            previous_draft,
+            status="rejected",
+            reason="rejected_draft_available",
+            error="已取回上一份被拒 Shadow；它尚未进入 canonical window_shadows。",
+        )
+    expected_draft_hash = str(rejected_draft_source_hash or "").strip().lower()
+    if expected_draft_hash and not re.fullmatch(r"[0-9a-f]{64}", expected_draft_hash):
+        if previous_draft:
+            return _close_window_existing_draft_response(
+                previous_draft,
+                status="invalid",
+                reason="invalid_rejected_draft_source_hash",
+                error="rejected_draft_source_hash 必须是上一份失败稿返回的 64 位 SHA-256。",
+            )
+        return {
+            "status": "invalid",
+            "reason": "invalid_rejected_draft_source_hash",
+            "error": "rejected_draft_source_hash 必须是 64 位 SHA-256。",
+            "canonical": False,
+            "ordinary_recall": False,
+            "rejected_draft_saved": False,
+        }
+    if expected_draft_hash and not previous_draft:
+        return {
+            "status": "invalid",
+            "reason": "rejected_draft_not_found",
+            "error": "找不到 rejected_draft_source_hash 对应的未完成失败稿；不能把它当作成功 Shadow。",
+            "idempotency_key": request_key,
+            "canonical": False,
+            "ordinary_recall": False,
+            "rejected_draft_saved": False,
+        }
+    if previous_draft:
+        previous_hash = str(previous_draft.get("source_hash") or "").lower()
+        current_hash = WindowShadowRejectedDraftStore.source_hash(text)
+        if expected_draft_hash and not hmac.compare_digest(
+            expected_draft_hash,
+            previous_hash,
+        ):
+            return _close_window_existing_draft_response(
+                previous_draft,
+                status="invalid",
+                reason="rejected_draft_source_hash_mismatch",
+                error="失败稿基线已变化；请重新取回 rejected_draft.shadow 后再修具体报错。",
+            )
+        if not text.strip():
+            return _close_window_existing_draft_response(
+                previous_draft,
+                status="invalid",
+                reason="rejected_draft_shadow_required",
+                error="请以返回的 rejected_draft.shadow 为逐字底稿重试，不能提交空 Shadow。",
+            )
+        if (
+            not hmac.compare_digest(current_hash, previous_hash)
+            and not expected_draft_hash
+        ):
+            return _close_window_existing_draft_response(
+                previous_draft,
+                status="invalid",
+                reason="rejected_draft_reuse_required",
+                error=(
+                    "同一 idempotency_key 已有被拒 Shadow。系统没有接受这份重新生成的文本；"
+                    "请先逐字复用 rejected_draft.shadow，只修 last_error 指向的部分。"
+                ),
+            )
+        retry_scope_error = _close_window_retry_text_scope_error(previous_draft, text)
+        if retry_scope_error:
+            return _close_window_existing_draft_response(
+                previous_draft,
+                status="invalid",
+                reason="rejected_draft_outside_fix_scope_changed",
+                error=retry_scope_error,
+            )
+    if not text.strip():
+        return _close_window_rejection(
+            status="invalid",
+            reason="empty_shadow",
+            error="窗影内容为空，未保存。",
+            shadow=text,
+            idempotency_key=request_key,
+            request=request_snapshot,
+            validation={"fix_scope": ["shadow"]},
+        )
     resolved_source = str(source or "").strip()
+    if resolved_source.lower() in {"operit", "ob-auto-grow", "auto", "workflow", "worker"}:
+        return _close_window_rejection(
+            status="invalid",
+            reason="automatic_shadow_rejected",
+            error="close_window 只保存当前 AI 亲自写好的窗影，不接受旧自动摘要来源。",
+            shadow=text,
+            idempotency_key=request_key,
+            request=request_snapshot,
+            validation={"fix_scope": ["request.source"]},
+        )
     markdown_import = resolved_source.lower() in {"markdown", "markdown_import", "md_import"}
     sections, validation_errors = validate_window_shadow(
         text,
         require_handoff_note=require_handoff_note and not markdown_import,
     )
     if validation_errors:
-        return {
-            "status": "invalid",
-            "reason": "invalid_window_shadow",
-            "error": "窗影格式不完整，未保存：" + ", ".join(validation_errors),
-        }
+        fix_scope = []
+        if any(value.startswith("handoff_note_") or value == "missing_handoff_note" for value in validation_errors):
+            fix_scope.append("shadow.handoff")
+        if "missing_window_delta" in validation_errors:
+            fix_scope.append("shadow.window_delta")
+        if "self_section_needs_first_person" in validation_errors:
+            fix_scope.append("shadow.self")
+        if "voice_section_needs_first_person" in validation_errors:
+            fix_scope.append("shadow.voice")
+        return _close_window_rejection(
+            status="invalid",
+            reason="invalid_window_shadow",
+            error="窗影格式不完整，未保存：" + ", ".join(validation_errors),
+            shadow=text,
+            idempotency_key=request_key,
+            request=request_snapshot,
+            validation={
+                "errors": validation_errors,
+                "fix_scope": fix_scope or ["shadow"],
+            },
+        )
     scene_records, scene_error = _window_shadow_scene_records(
         text,
         scenes,
         markdown_import=markdown_import,
     )
     if scene_error:
-        return {"status": "invalid", "reason": "invalid_scene", "error": scene_error}
+        fix_scope = (
+            ["request.scenes"]
+            if "不能两边重复" in scene_error
+            else ["shadow.moments", "request.scenes"]
+        )
+        return _close_window_rejection(
+            status="invalid",
+            reason="invalid_scene",
+            error=scene_error,
+            shadow=text,
+            idempotency_key=request_key,
+            request=request_snapshot,
+            validation={"fix_scope": fix_scope},
+        )
     try:
         requested_continue_scene_index = int(continue_scene_index or 0)
     except (TypeError, ValueError):
-        return {
-            "status": "invalid",
-            "reason": "invalid_continue_scene_index",
-            "error": "continue_scene_index 必须是 scenes 中从 1 开始的序号，或留空/传 0。",
-        }
+        return _close_window_rejection(
+            status="invalid",
+            reason="invalid_continue_scene_index",
+            error="continue_scene_index 必须是 scenes 中从 1 开始的序号，或留空/传 0。",
+            shadow=text,
+            idempotency_key=request_key,
+            request=request_snapshot,
+            validation={"fix_scope": ["request.continue_scene_index"]},
+        )
     if requested_continue_scene_index < 0 or requested_continue_scene_index > len(scene_records):
-        return {
-            "status": "invalid",
-            "reason": "invalid_continue_scene_index",
-            "error": (
+        return _close_window_rejection(
+            status="invalid",
+            reason="invalid_continue_scene_index",
+            error=(
                 "continue_scene_index 超出本次 Scene 范围："
                 f"收到 {requested_continue_scene_index}，本次共有 {len(scene_records)} 条 Scene。"
             ),
-        }
+            shadow=text,
+            idempotency_key=request_key,
+            request=request_snapshot,
+            validation={"fix_scope": ["request.continue_scene_index"]},
+        )
     resolved_continue_scene_index = (
         requested_continue_scene_index
         if requested_continue_scene_index
@@ -10198,20 +10550,28 @@ async def _close_window_commit(
         rotate_closed=False,
     )
     if str(window_session.get("status") or "") in {"invalid", "conflict"}:
-        return {
-            "status": "error",
-            "reason": "window_resolution_failed",
-            "error": str(window_session.get("reason") or "window_resolution_failed"),
-            "transport_session_id": transport_session_id,
-        }
+        return _close_window_rejection(
+            status="error",
+            reason="window_resolution_failed",
+            error=str(window_session.get("reason") or "window_resolution_failed"),
+            shadow=text,
+            idempotency_key=request_key,
+            request=request_snapshot,
+            validation={"fix_scope": ["request.session_id", "request.profile_id"]},
+            extra={"transport_session_id": transport_session_id},
+        )
     conversation_id = str(window_session.get("conversation_id") or "").strip()
     if not conversation_id:
-        return {
-            "status": "error",
-            "reason": "window_resolution_failed",
-            "error": "window_resolution_missing_conversation_id",
-            "transport_session_id": transport_session_id,
-        }
+        return _close_window_rejection(
+            status="error",
+            reason="window_resolution_failed",
+            error="window_resolution_missing_conversation_id",
+            shadow=text,
+            idempotency_key=request_key,
+            request=request_snapshot,
+            validation={"fix_scope": ["request.session_id", "request.profile_id"]},
+            extra={"transport_session_id": transport_session_id},
+        )
     planned = window_shadow_store.plan(
         text,
         session_id=conversation_id,
@@ -10282,17 +10642,28 @@ async def _close_window_commit(
             except Exception as rollback_exc:
                 rollback_errors.append(f"{bucket_id}:{rollback_exc}")
         logger.warning("close_window rolled back after failure / 关窗写入失败并回滚: %s", exc)
-        return {
-            "status": "error",
-            "reason": "atomic_write_failed",
-            "error": str(exc),
-            "rollback_errors": rollback_errors,
-            "window_id": planned["window_id"],
-        }
+        return _close_window_rejection(
+            status="error",
+            reason="atomic_write_failed",
+            error=str(exc),
+            shadow=text,
+            idempotency_key=request_key,
+            request=request_snapshot,
+            validation={"fix_scope": ["retry_same_request"]},
+            extra={
+                "rollback_errors": rollback_errors,
+                "window_id": planned["window_id"],
+            },
+        )
 
     for bucket_id in created_scene_ids:
         _queue_embedding_refresh(bucket_id)
         _queue_scene_linking(bucket_id)
+    rejected_draft_cleared = (
+        window_shadow_rejected_draft_store.delete(request_key)
+        if request_key
+        else False
+    )
     return {
         "status": "created" if window_created else "existing",
         "window_id": str(window.get("window_id") or planned["window_id"]),
@@ -10311,6 +10682,7 @@ async def _close_window_commit(
         "continue_scene_id": continue_scene_id,
         "ordinary_recall": False,
         "markdown_import": markdown_import,
+        "rejected_draft_cleared": rejected_draft_cleared,
     }
 
 
@@ -10323,18 +10695,13 @@ async def close_window(
     date: str = "",
     source: str = "",
     idempotency_key: str = "",
+    rejected_draft_source_hash: str = "",
+    read_rejected_draft: bool = False,
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow，并同时保存其中明确写出的 0~N 个独立 Scene，不要在关窗后再次调用工具抽取 Scene。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符：写这一窗真正改变了什么、未完线头和我想怎样继续；下个窗口会逐字注入这段，不做二次摘要。Shadow 全文仍原样保存且不进普通召回。session_id 可以继续传客户端固定身份（默认 main），Gateway 会把它解析为当前内部窗口；下次正常聊天自动换窗并认领这篇 Shadow。客户端重试同一次关窗时必须复用同一个 idempotency_key；Brain 会返回第一次成功写入的 window_id，不会再次关闭下一窗。profile_id 是长期身份，通常沿用配置默认值。scenes 每项必须由当前作者同时传 content 与至少一个 cues，可选 title；cues 写“以后提到什么时，我希望这段记忆回来”，不是摘要，系统也不会从 title、引句或正文代写。若 Scene 写在 Shadow 的 `## 想留下的记忆` 内，使用 `### scene | cue 一 | cue 二`，heading 只作抽取与 cues 标记，不进入 Scene 正文。多条 Scene 中若有下一窗说“继续吧”时应优先下钻的未完主线，传从 1 开始的 continue_scene_index；只有一条 Scene 时会自动认领，ID 由本次事务生成并写回窗影，无需调用者预知。后来才产生的新理解用 annotate 挂回来源。已经写好的 Markdown 用 source="markdown_import" 只转成窗影，不强制补 handoff_note，也不补造 Scene。"""
+    """窗口结束时只调用这一次：原子保存一篇完整第一人称 Window Shadow 与 0~N 个独立 Scene。客户端必须为一次关窗生成并在所有重试中复用同一个 idempotency_key；第一次成功后同 key 永远返回原成功结果。若校验或事务失败，返回的 status 仍是 invalid/error，并把原 Shadow 逐字保存到独立 rejected-draft store：它不是 canonical Window Shadow，不进 handoff、普通召回、bucket 或 embedding。下一次同 key 必须以 rejected_draft.shadow 为底稿，只修 last_error 指向的段落或参数；Shadow 文本有改动时传 rejected_draft_source_hash。若调用者丢失上次响应，可传 read_rejected_draft=true 与原 idempotency_key 取回，shadow 可传空字符串。新窗影必须含 `## 给下个窗口的我`，正文为 250–400 个非空白字符。scenes 每项必须同时传 content 与至少一个当前作者亲写的 cues，可选 title；系统不从 title、引句或正文代写。Shadow 内联 Scene 使用 `### scene | cue 一 | cue 二`，不可再同时传 scenes。多条 Scene 的未完主线用 continue_scene_index；只有一条时自动认领。source="markdown_import" 只无损导入窗影，不补造 Scene。"""
     _ = context
-    resolved_source = str(source or "").strip().lower()
-    if resolved_source in {"operit", "ob-auto-grow", "auto", "workflow", "worker"}:
-        return {
-            "status": "invalid",
-            "reason": "automatic_shadow_rejected",
-            "error": "close_window 只保存当前 AI 亲自写好的窗影，不接受旧自动摘要来源。",
-        }
     return await _close_window_commit(
         shadow,
         scenes=scenes,
@@ -10344,6 +10711,8 @@ async def close_window(
         date=date,
         source=source,
         idempotency_key=idempotency_key,
+        rejected_draft_source_hash=rejected_draft_source_hash,
+        read_rejected_draft=read_rejected_draft,
     )
 
 

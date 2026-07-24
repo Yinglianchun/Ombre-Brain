@@ -88,6 +88,8 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 `close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”和 0～N 个独立 Scene。`scenes[]` 每项必须同时带 `content` 与当前作者亲自写的 `cues`，可选 `title`；Shadow 内联 Scene 使用 `### scene | cue 一 | cue 二`，裸 `### scene` 会被拒绝。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。旧 `### moment` 只保留读取兼容，不会自动升格成 Scene。
 
+`close_window` 的失败稿与成功 Shadow 分库：带 `idempotency_key` 的 `invalid` / `error` 请求会把原 Shadow 逐字写入 `window_shadow_rejected_drafts.sqlite`，响应返回 `rejected_draft.shadow`、`source_hash`、原请求参数与 `fix_scope`。失败稿不进入 `window_shadows.sqlite`、handoff、普通召回、bucket 或 embedding。重试同 key 时，参数-only 修复必须保持 Shadow 逐字不变；文本修复必须传上一稿的 `rejected_draft_source_hash`，而且只能改变 `fix_scope` 指定的 section。`read_rejected_draft=true` 可显式取回未完成失败稿。成功后草稿删除；之后同 key 永远返回第一次成功写入，不接受覆盖。
+
 新窗口不等待画像模型吸收窗影，也不把 Scene 重复塞进 handoff。系统从最近一篇窗影确定性投影 **Flowing Self** 与 **Recent Relationship**；显式 Scene 只进入普通召回。完整窗影仍可回看，旧画像维护器暂时保留给 Dashboard 和兼容接口，但不再主导 handoff。
 
 已经写好的第一人称窗影 Markdown 可以通过 `close_window(source="markdown_import")` 无损导入。导入路径只产生 handoff 投影，不从旧摘要补造普通 Scene。

@@ -56,8 +56,10 @@
 关窗：
 - 窗口结束或准备换窗时，只调用一次 close_window。
 - shadow 是当前窗口亲自写下的完整第一人称 Window Shadow；必须包含 `## 给下个窗口的我`。
+- 同一次关窗的首次调用和所有重试复用同一个 idempotency_key。
 - scenes 只放以后应由普通召回重新遇见的 0～N 个具体经历；没有就传空。每项同时传 content、至少一个 authored cues 与可选 title。
 - Shadow 内联 Scene 使用 `### scene | cue 一 | cue 二`；裸 `### scene` 不创建 canonical Scene。
+- invalid/error 响应中的 rejected_draft.shadow 是逐字失败稿，不是成功 Shadow，也不会进入 handoff 或召回。只修参数时原样重传；修正文时同时传 rejected_draft_source_hash。响应丢失可用 read_rejected_draft=true 与原 key 取回。
 - 任一 Scene 写失败时，本次 Shadow 与新 Scene 整组撤回。
 - Shadow 全文不进入普通候选、gate 或扩散；handoff 只读取相邻窗口连续性。
 - 用户日记、整段聊天和批量摘要不属于 Window Shadow。

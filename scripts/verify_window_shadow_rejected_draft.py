@@ -1,0 +1,206 @@
+"""Exercise rejected close_window draft recovery without touching live memory data."""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import server
+from window_shadows import WindowShadowRejectedDraftStore, WindowShadowStore
+
+
+class _NoopDecay:
+    async def ensure_started(self) -> None:
+        return None
+
+
+class _GatewayState:
+    def resolve_window_conversation(self, **kwargs) -> dict:
+        return {
+            "status": "ok",
+            "conversation_id": "conversation-rejected-draft-test",
+            "parent_shadow_id": "",
+        }
+
+    def close_window_session(self, **kwargs) -> dict:
+        return {"status": "closed"}
+
+
+def _shadow(handoff: str, *, inline_scene: bool = False) -> str:
+    text = (
+        "## 这一窗之后，什么留在了我身上\n"
+        "我记住：失败不能授权下一次重写整篇窗影。\n\n"
+        "## 给下个窗口的我\n"
+        f"{handoff}"
+    )
+    if inline_scene:
+        text += (
+            "\n\n## 想留下的记忆\n"
+            "### scene | 提到 close_window 失败稿 | 问为什么不能整篇重写\n"
+            "第一次校验失败后，原稿仍应逐字留给同一次关窗重试。"
+        )
+    return text
+
+
+async def main() -> None:
+    with tempfile.TemporaryDirectory(prefix="ombre-rejected-shadow-draft-") as tmp:
+        root = Path(tmp)
+        test_config = {
+            "buckets_dir": str(root / "buckets"),
+            "state_dir": str(root / "state"),
+            "identity": {"user_display_name": "小雨"},
+        }
+        canonical_store = WindowShadowStore(test_config)
+        draft_store = WindowShadowRejectedDraftStore(test_config)
+        assert canonical_store.db_path != draft_store.db_path
+
+        server.window_shadow_store = canonical_store
+        server.window_shadow_rejected_draft_store = draft_store
+        server.gateway_state_store = _GatewayState()
+        server.decay_engine = _NoopDecay()
+        server._queue_embedding_refresh = lambda bucket_id: None
+        server._queue_scene_linking = lambda bucket_id: None
+
+        async def _fake_write_scene(window: dict, scene: dict, index: int):
+            return f"scene-rejected-draft-{index}", "created"
+
+        server._write_window_shadow_scene = _fake_write_scene
+
+        tools = {tool.name: tool for tool in await server.mcp.list_tools()}
+        close_schema = tools["close_window"].inputSchema["properties"]
+        assert "rejected_draft_source_hash" in close_schema
+        assert "read_rejected_draft" in close_schema
+
+        request_key = "bridge:rejected-draft:text-fix"
+        first_shadow = _shadow("我会继续。")
+        first = await server._close_window_commit(
+            first_shadow,
+            idempotency_key=request_key,
+        )
+        assert first["status"] == "invalid"
+        assert first["reason"] == "invalid_window_shadow"
+        assert first["rejected_draft_saved"] is True
+        assert first["rejected_draft"]["shadow"] == first_shadow
+        assert first["rejected_draft"]["canonical"] is False
+        assert first["rejected_draft"]["ordinary_recall"] is False
+        assert first["rejected_draft"]["handoff_visible"] is False
+        assert first["rejected_draft"]["validation"]["fix_scope"] == [
+            "shadow.handoff"
+        ]
+        assert canonical_store.stats()["count"] == 0
+        assert draft_store.stats()["count"] == 1
+
+        rewritten = await server._close_window_commit(
+            _shadow("这是一篇重新生成的长窗影。" * 20),
+            idempotency_key=request_key,
+        )
+        assert rewritten["status"] == "invalid"
+        assert rewritten["reason"] == "rejected_draft_reuse_required"
+        assert rewritten["rejected_draft"]["shadow"] == first_shadow
+        assert draft_store.get(request_key)["shadow"] == first_shadow
+
+        whole_rewrite = _shadow("我拿着旧稿 hash，但仍然重写了整篇。" * 20).replace(
+            "失败不能授权下一次重写整篇窗影。",
+            "我把 handoff 之外的正文也偷偷改掉了。",
+        )
+        rewritten_with_hash = await server._close_window_commit(
+            whole_rewrite,
+            idempotency_key=request_key,
+            rejected_draft_source_hash=first["rejected_draft"]["source_hash"],
+        )
+        assert rewritten_with_hash["status"] == "invalid"
+        assert (
+            rewritten_with_hash["reason"]
+            == "rejected_draft_outside_fix_scope_changed"
+        )
+        assert rewritten_with_hash["rejected_draft"]["shadow"] == first_shadow
+        assert draft_store.get(request_key)["shadow"] == first_shadow
+
+        recovered = await server._close_window_commit(
+            "",
+            idempotency_key=request_key,
+            read_rejected_draft=True,
+        )
+        assert recovered["status"] == "rejected"
+        assert recovered["reason"] == "rejected_draft_available"
+        assert recovered["rejected_draft"]["shadow"] == first_shadow
+
+        corrected_shadow = _shadow("我会沿着原稿继续，只修这一处。" * 20)
+        corrected = await server._close_window_commit(
+            corrected_shadow,
+            idempotency_key=request_key,
+            rejected_draft_source_hash=first["rejected_draft"]["source_hash"],
+        )
+        assert corrected["status"] == "created"
+        assert corrected["rejected_draft_cleared"] is True
+        assert draft_store.get(request_key) is None
+        canonical = canonical_store.get(corrected["window_id"])
+        assert canonical["content"] == corrected_shadow
+
+        replay = await server._close_window_commit(
+            "这份文字不应覆盖第一次成功写入。",
+            idempotency_key=request_key,
+        )
+        assert replay["status"] == "existing"
+        assert replay["idempotent_replay"] is True
+        assert replay["window_id"] == corrected["window_id"]
+        assert canonical_store.get(replay["window_id"])["content"] == corrected_shadow
+
+        parameter_key = "bridge:rejected-draft:parameter-fix"
+        inline_shadow = _shadow(
+            "我会沿着原稿继续，只修请求参数。" * 20,
+            inline_scene=True,
+        )
+        duplicate = await server._close_window_commit(
+            inline_shadow,
+            idempotency_key=parameter_key,
+            scenes=[
+                {
+                    "content": "这条外部 Scene 与窗影内联 Scene 重复。",
+                    "cues": ["提到重复 Scene 参数"],
+                }
+            ],
+        )
+        assert duplicate["status"] == "invalid"
+        assert duplicate["reason"] == "invalid_scene"
+        assert duplicate["rejected_draft"]["shadow"] == inline_shadow
+        assert duplicate["rejected_draft"]["validation"]["fix_scope"] == [
+            "request.scenes"
+        ]
+
+        changed_parameter_retry = await server._close_window_commit(
+            inline_shadow + "\n这行不该被添加。",
+            idempotency_key=parameter_key,
+            scenes=None,
+            rejected_draft_source_hash=duplicate["rejected_draft"]["source_hash"],
+        )
+        assert changed_parameter_retry["status"] == "invalid"
+        assert (
+            changed_parameter_retry["reason"]
+            == "rejected_draft_outside_fix_scope_changed"
+        )
+        assert changed_parameter_retry["rejected_draft"]["shadow"] == inline_shadow
+
+        parameter_retry = await server._close_window_commit(
+            inline_shadow,
+            idempotency_key=parameter_key,
+            scenes=None,
+        )
+        assert parameter_retry["status"] == "created"
+        assert parameter_retry["scene_count"] == 1
+        assert parameter_retry["rejected_draft_cleared"] is True
+        assert draft_store.get(parameter_key) is None
+        assert canonical_store.stats()["count"] == 2
+        assert draft_store.stats()["count"] == 0
+
+    print("rejected Window Shadow draft contract verified")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

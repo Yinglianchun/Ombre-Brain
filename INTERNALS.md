@@ -79,7 +79,7 @@
 |---|---|---|
 | `breath` | query, max_tokens, domain, valence, arousal, max_results | 检索/浮现记忆 |
 | `hold` | content, cues, tags, importance, pinned, feel, whisper, source_bucket, valence, arousal | 原样保存一段纯 Scene 正文；旧 section 仅兼容读取 |
-| `close_window` | shadow, scenes, session_id, date, source | 原子保存整窗第一人称窗影与 0～N 个 Scene |
+| `close_window` | shadow, scenes, idempotency_key, rejected_draft_source_hash, read_rejected_draft | 原子保存整窗窗影与 Scene；失败稿分库等待同 key 重试 |
 | `grow` | content | `close_window` 兼容别名；不提升旧 `### moment` |
 | `comment_bucket` | bucket_id, content, kind, valence, arousal | 给源 bucket 追加年轮 |
 | `trace` | bucket_id, name, domain, valence, arousal, importance, tags, resolved, pinned, anchor, digested, content, delete | 修改元数据/内容/删除 |
@@ -137,6 +137,8 @@
 - 整篇第一人称窗影原样写入独立 SQLite，不进普通候选池
 - “想留下的记忆”内联格式为 `### scene | cue 一 | cue 二`，heading 落库时去掉；`scenes[]` 每项传 `content`、至少一个 authored `cues` 与可选 `title`；不调用 LLM
 - 写前完整校验，任一 Scene 失败就补偿删除本次新建 Scene 与 Shadow；成功后才排 embedding
+- `invalid` / `error` 且有 idempotency key 时，原 Shadow 逐字写入单独的 `window_shadow_rejected_drafts.sqlite`；该库没有 ordinary recall、handoff、bucket、embedding 或 `read_memory` 入口
+- 同 key 的 divergent Shadow 没有上一稿 hash 时拒绝；参数-only 修复必须逐字复用，文本修复必须带 `rejected_draft_source_hash` 且只能改变 `fix_scope` 指定的 section；成功写入后清除失败稿，成功幂等结果始终优先
 - `grow` 仅为旧客户端兼容别名，不把旧 `### moment` 提升成 Scene
 
 **`pulse`** — 系统状态：

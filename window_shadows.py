@@ -12,6 +12,7 @@ from identity import identity_names
 
 
 WINDOW_SHADOW_VERSION = "window-shadow-v3"
+WINDOW_SHADOW_REJECTED_DRAFT_VERSION = "window-shadow-rejected-draft-v1"
 HANDOFF_NOTE_MIN_CHARS = 250
 HANDOFF_NOTE_MAX_CHARS = 400
 
@@ -77,6 +78,38 @@ def parse_window_shadow(content: str) -> dict[str, str]:
         end = top_rows[index + 1][0].start() if index + 1 < len(top_rows) else len(text)
         sections[key] = text[match.end():end].strip()
     return sections
+
+
+def window_shadow_outside_sections(
+    content: str,
+    mutable_sections: set[str] | frozenset[str],
+) -> str:
+    """Redact selected section bodies so retries cannot rewrite the rest."""
+    text = str(content or "")
+    allowed = {
+        str(value or "").strip()
+        for value in mutable_sections
+        if str(value or "").strip() in _SECTION_KEYS
+    }
+    if not allowed:
+        return text
+    matches = list(_HEADING_RE.finditer(text))
+    top_rows: list[tuple[re.Match[str], str]] = []
+    for match in matches:
+        key = _section_key(match.group(2))
+        if key:
+            top_rows.append((match, key))
+    output: list[str] = []
+    cursor = 0
+    for index, (match, key) in enumerate(top_rows):
+        end = top_rows[index + 1][0].start() if index + 1 < len(top_rows) else len(text)
+        if key not in allowed:
+            continue
+        output.append(text[cursor:match.end()])
+        output.append(f"\n<rejected-draft-mutable:{key}>\n")
+        cursor = end
+    output.append(text[cursor:])
+    return "".join(output)
 
 
 def handoff_note_char_count(content: str) -> int:
@@ -267,6 +300,168 @@ def project_window_shadow_handoff(
             )
         ),
     }
+
+
+class WindowShadowRejectedDraftStore:
+    """Non-canonical rejected close_window drafts keyed only for explicit retry."""
+
+    def __init__(self, config: dict):
+        state_dir = config.get("state_dir") or os.path.join(
+            os.path.dirname(os.path.abspath(config.get("buckets_dir", "buckets"))),
+            "state",
+        )
+        os.makedirs(state_dir, exist_ok=True)
+        self.db_path = os.path.join(state_dir, "window_shadow_rejected_drafts.sqlite")
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        conn = self._connect()
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rejected_window_shadow_drafts (
+                idempotency_key TEXT PRIMARY KEY,
+                version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                source_hash TEXT NOT NULL,
+                shadow TEXT NOT NULL,
+                request_json TEXT NOT NULL DEFAULT '{}',
+                validation_json TEXT NOT NULL DEFAULT '{}',
+                attempt_count INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rejected_shadow_drafts_updated "
+            "ON rejected_window_shadow_drafts(updated_at DESC)"
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def source_hash(shadow: str) -> str:
+        return hashlib.sha256(str(shadow or "").encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _row(row: sqlite3.Row | None) -> dict | None:
+        if row is None:
+            return None
+        item = dict(row)
+        for key, output_key in (
+            ("request_json", "request"),
+            ("validation_json", "validation"),
+        ):
+            try:
+                parsed = json.loads(item.pop(key) or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed = {}
+            item[output_key] = parsed if isinstance(parsed, dict) else {}
+        item["canonical"] = False
+        item["ordinary_recall"] = False
+        item["handoff_visible"] = False
+        return item
+
+    def save(
+        self,
+        *,
+        idempotency_key: str,
+        shadow: str,
+        status: str,
+        reason: str,
+        error: str,
+        request: dict | None = None,
+        validation: dict | None = None,
+    ) -> dict:
+        key = str(idempotency_key or "").strip()
+        if not key:
+            raise ValueError("idempotency_key is required for rejected Shadow drafts")
+        text = str(shadow or "")
+        now = _now_utc()
+        conn = self._connect()
+        conn.execute(
+            """
+            INSERT INTO rejected_window_shadow_drafts (
+                idempotency_key, version, status, reason, error, source_hash,
+                shadow, request_json, validation_json, attempt_count,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(idempotency_key) DO UPDATE SET
+                version = excluded.version,
+                status = excluded.status,
+                reason = excluded.reason,
+                error = excluded.error,
+                source_hash = excluded.source_hash,
+                shadow = excluded.shadow,
+                request_json = excluded.request_json,
+                validation_json = excluded.validation_json,
+                attempt_count = rejected_window_shadow_drafts.attempt_count + 1,
+                updated_at = excluded.updated_at
+            """,
+            (
+                key,
+                WINDOW_SHADOW_REJECTED_DRAFT_VERSION,
+                str(status or "invalid").strip() or "invalid",
+                str(reason or "").strip(),
+                str(error or "").strip(),
+                self.source_hash(text),
+                text,
+                json.dumps(request if isinstance(request, dict) else {}, ensure_ascii=False),
+                json.dumps(validation if isinstance(validation, dict) else {}, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return self.get(key) or {}
+
+    def get(self, idempotency_key: str) -> dict | None:
+        key = str(idempotency_key or "").strip()
+        if not key:
+            return None
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT * FROM rejected_window_shadow_drafts WHERE idempotency_key = ?",
+            (key,),
+        ).fetchone()
+        conn.close()
+        return self._row(row)
+
+    def delete(self, idempotency_key: str) -> bool:
+        key = str(idempotency_key or "").strip()
+        if not key:
+            return False
+        conn = self._connect()
+        cursor = conn.execute(
+            "DELETE FROM rejected_window_shadow_drafts WHERE idempotency_key = ?",
+            (key,),
+        )
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        conn.close()
+        return deleted
+
+    def stats(self) -> dict:
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT COUNT(*) AS count, MAX(updated_at) AS latest_updated_at "
+            "FROM rejected_window_shadow_drafts"
+        ).fetchone()
+        conn.close()
+        return {
+            "count": int(row["count"] or 0) if row else 0,
+            "latest_updated_at": str(row["latest_updated_at"] or "") if row else "",
+            "canonical": False,
+            "ordinary_recall": False,
+        }
 
 
 class WindowShadowStore:
