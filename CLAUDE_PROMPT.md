@@ -34,7 +34,7 @@ MCP 只注册以上十五个动作。旧桶、旧字段和旧读取投影继续�
 - 已知对象 ID：用 `read_memory(memory_id=..., memory_type="scene|shadow|narrative")`。
 - 只有 query 没有 ID 时，`read_memory` 必须显式选择 `memory_type`；语义寻找 Scene 应使用 `recall`。
 - Narrative Roll 是有来源的派生叙事；核对日期、原句或细节时继续下钻 Scene。
-- Window Shadow 不进入普通召回，只用于相邻窗口连续性和明确回看。
+- Window Shadow 不进入普通召回，只用于最新窗影交接和明确回看。
 
 ## 写 Scene
 

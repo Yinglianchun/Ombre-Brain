@@ -1,4 +1,4 @@
-"""Verify the v4 Window Shadow settlement and explicit handoff contract."""
+"""Verify the unbound Window Shadow settlement and latest-handoff contract."""
 
 from __future__ import annotations
 
@@ -40,8 +40,13 @@ async def main() -> None:
     assert "handoff" not in tools
     assert "recall" in tools
     assert "mode" in tools["recall"].inputSchema["properties"]
+    assert "session_id" not in tools["recall"].inputSchema["properties"]
+    assert "previous_session_id" not in tools["recall"].inputSchema["properties"]
+    assert "parent_shadow_id" not in tools["recall"].inputSchema["properties"]
     assert "close_window" in tools
     assert "还需要关心的事" in str(tools["close_window"].description or "")
+    assert "session_id" not in tools["close_window"].inputSchema["properties"]
+    assert "profile_id" not in tools["close_window"].inputSchema["properties"]
 
     with tempfile.TemporaryDirectory(prefix="ombre-shadow-recent-events-") as tmp:
         root = Path(tmp)
@@ -77,11 +82,7 @@ async def main() -> None:
         server.portrait_engine = _PortraitFallback()
         server._format_handoff_care_memos = lambda **kwargs: ""
 
-        authored_handoff = await server._build_handoff_breath(
-            parent_shadow_id=authored["window_id"],
-            max_tokens=1800,
-            debug=True,
-        )
+        authored_handoff = await server._build_handoff_breath(max_tokens=1800, debug=True)
         assert "=== Recent Events From Previous Window ===" in authored_handoff
         assert "Bridge 管醒来，窗影管沉淀" in authored_handoff
         assert "=== Things That Still Need Care ===" in authored_handoff
@@ -110,11 +111,7 @@ async def main() -> None:
             sections=legacy_sections,
         )
         assert created is True
-        legacy_handoff = await server._build_handoff_breath(
-            parent_shadow_id=legacy["window_id"],
-            max_tokens=1800,
-            debug=True,
-        )
+        legacy_handoff = await server._build_handoff_breath(max_tokens=1800, debug=True)
         assert "=== Legacy Previous-Window Note ===" in legacy_handoff
         assert legacy_note in legacy_handoff
         assert "后台生成的最近事件 fallback" not in legacy_handoff
@@ -133,11 +130,7 @@ async def main() -> None:
             sections=fallback_sections,
         )
         assert created is True
-        generated_handoff = await server._build_handoff_breath(
-            parent_shadow_id=fallback["window_id"],
-            max_tokens=1800,
-            debug=True,
-        )
+        generated_handoff = await server._build_handoff_breath(max_tokens=1800, debug=True)
         assert "=== Generated Recent Continuity Fallback ===" in generated_handoff
         assert "后台生成的最近事件 fallback" in generated_handoff
         assert server._last_handoff_status["route"] == "recent_continuity"

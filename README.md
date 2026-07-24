@@ -94,7 +94,7 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 `close_window` 的失败稿与成功 Shadow 分库：带 `idempotency_key` 的 `invalid` / `error` 请求会把原 Shadow 逐字写入 `window_shadow_rejected_drafts.sqlite`，响应返回 `rejected_draft.shadow`、`source_hash`、原请求参数与 `fix_scope`。失败稿不进入 `window_shadows.sqlite`、handoff、普通召回、bucket 或 embedding。重试同 key 时，参数-only 修复必须保持 Shadow 逐字不变；文本修复必须传上一稿的 `rejected_draft_source_hash`，而且只能改变 `fix_scope` 指定的 section。`read_rejected_draft=true` 可显式取回未完成失败稿。成功后草稿删除；之后同 key 永远返回第一次成功写入，不接受覆盖。
 
-Bridge 的换窗路径不调用 Ombre handoff。其他客户端需要交接时显式调用 `recall(mode="handoff")`：优先读取直接父窗影亲写的最近事件，可附带还需要关心的事；旧窗影的 handoff note 只作兼容。父窗没有事件层时，才读取 72 小时内的后台 Recent Continuity，并明确标成 generated fallback；再失败才返回少量 raw_events 原文。生成 fallback 不写回 canonical Shadow、Scene 或普通召回。handoff 调用本身不现场请求模型，显式 Scene 也不会重复塞进交接包；只有裸“继续吧”会按 `continue_scene_id` 精确读取一条 Scene。
+Bridge 的换窗路径不调用 Ombre handoff。其他客户端需要交接时显式调用 `recall(mode="handoff")`：优先读取最新窗影亲写的最近事件，可附带还需要关心的事；旧窗影的 handoff note 只作兼容。最新窗影没有事件层时，才读取 72 小时内的后台 Recent Continuity，并明确标成 generated fallback；再失败才返回少量 raw_events 原文。生成 fallback 不写回 canonical Shadow、Scene 或普通召回。handoff 调用本身不现场请求模型，显式 Scene 也不会重复塞进交接包；只有裸“继续吧”会按 `continue_scene_id` 精确读取一条 Scene。
 
 已经写好的第一人称窗影 Markdown 可以通过 `close_window(source="markdown_import")` 无损导入。导入路径只产生 handoff 投影，不从旧摘要补造普通 Scene。
 
@@ -428,7 +428,7 @@ curl -sS -b ombre.cookies -G \
 Brain 提供会话启动用的紧凑 handoff 文本：
 
 ```bash
-curl -sS 'http://127.0.0.1:8000/breath-hook?mode=handoff&session_id=claude-code&max_tokens=1200' \
+curl -sS 'http://127.0.0.1:8000/breath-hook?mode=handoff&max_tokens=1200' \
   -H "Authorization: Bearer $OMBRE_BREATH_HOOK_TOKEN"
 ```
 
@@ -468,7 +468,7 @@ Codex 接线时注意：
 
 | 工具 | 用途 |
 | --- | --- |
-| `recall` | 按 query/date 召回，或执行相邻窗口 handoff |
+| `recall` | 按 query/date 召回，或读取最新窗影 handoff |
 | `read_memory` | 精确读取 Scene、Window Shadow 或 Narrative Roll |
 | `write_scene` | 原样保存一件 canonical Scene |
 | `edit_scene` | 带版本检查地原位修订一条 authored Scene |

@@ -35,6 +35,8 @@ async def main() -> None:
 
     assert "cues" in write_schema["required"]
     assert "scenes" not in close_properties
+    assert "session_id" not in close_properties
+    assert "profile_id" not in close_properties
     assert "CloseWindowSceneInput" not in close_schema.get("$defs", {})
     assert server._authored_scene_cues("") == []
     assert server._authored_scene_cues("提到 authored cues") == ["提到 authored cues"]

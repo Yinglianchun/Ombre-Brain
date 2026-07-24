@@ -1752,23 +1752,12 @@ def _format_budgeted_handoff_sections(
 
 def _latest_window_shadow_handoff_projection(
     *,
-    session_id: str = "",
-    parent_shadow_id: str = "",
-    allow_latest_fallback: bool = True,
     self_max_tokens: int = 360,
     relationship_max_tokens: int = 360,
 ) -> dict[str, str]:
-    """Carry authored Shadow layers without injecting its recalled Scene layer."""
+    """Carry the latest authored Shadow layers without injecting recalled Scene prose."""
     try:
-        exact_parent = str(parent_shadow_id or "").strip()
-        if exact_parent:
-            projection = window_shadow_store.handoff_projection(exact_parent)
-        elif allow_latest_fallback:
-            projection = window_shadow_store.latest_handoff_projection(
-                exclude_session_id=session_id
-            )
-        else:
-            projection = None
+        projection = window_shadow_store.latest_handoff_projection()
     except Exception as exc:
         logger.warning("Latest window shadow projection failed / 最近窗影投影失败: %s", exc)
         return {}
@@ -1792,34 +1781,24 @@ def _latest_window_shadow_handoff_projection(
 
 def _emergency_raw_handoff_projection(
     *,
-    session_id: str = "",
-    previous_session_id: str = "",
     event_limit: int = 6,
     scan_limit: int = 80,
     max_tokens: int = 520,
 ) -> dict[str, str | bool]:
     """Restore a failed close from stored originals, without asking a model to summarize."""
-    current_session = str(session_id or "").strip()
-    requested_previous = str(previous_session_id or "").strip()
     try:
-        if requested_previous:
-            target_session = requested_previous
-            inferred = False
-        else:
-            recent = raw_event_store.search(query="", limit=max(1, min(100, scan_limit)))
-            target_session = next(
-                (
-                    str(item.get("session_id") or "").strip()
-                    for item in recent.get("items", []) or []
-                    if isinstance(item, dict)
-                    and str(item.get("session_id") or "").strip()
-                    and str(item.get("session_id") or "").strip() != current_session
-                    and str(item.get("role") or "").strip().lower() in {"user", "assistant"}
-                ),
-                "",
-            )
-            inferred = True
-        if not target_session or target_session == current_session:
+        recent = raw_event_store.search(query="", limit=max(1, min(100, scan_limit)))
+        target_session = next(
+            (
+                str(item.get("session_id") or "").strip()
+                for item in recent.get("items", []) or []
+                if isinstance(item, dict)
+                and str(item.get("session_id") or "").strip()
+                and str(item.get("role") or "").strip().lower() in {"user", "assistant"}
+            ),
+            "",
+        )
+        if not target_session:
             return {}
         payload = raw_event_store.search(
             query="",
@@ -1860,7 +1839,7 @@ def _emergency_raw_handoff_projection(
         "text": rendered,
         "session_id": target_session,
         "source": ",".join(sources),
-        "inferred": inferred,
+        "inferred": True,
     }
 
 
@@ -2109,9 +2088,6 @@ def _window_shadow_continue_scene(
 
 async def _build_handoff_breath(
     max_tokens: int = 1200,
-    session_id: str = "",
-    previous_session_id: str = "",
-    parent_shadow_id: str = "",
     query: str = "",
     debug: bool = False,
 ) -> str:
@@ -2127,34 +2103,12 @@ async def _build_handoff_breath(
         logger.warning("Handoff portrait state failed / handoff portrait 状态失败: %s", e)
         portrait_sections = {}
 
-    safe_session_id = str(session_id or "").strip()
-    profile_cfg = config.get("persona", {}) if isinstance(config.get("persona", {}), dict) else {}
-    profile_id = str(profile_cfg.get("profile_id") or "default").strip() or "default"
-    window_session = (
-        gateway_state_store.get_window_session(safe_session_id, profile_id=profile_id)
-        if safe_session_id
-        else None
-    )
-    declared_window = bool(window_session)
-    resolved_parent_shadow_id = str(parent_shadow_id or "").strip()
-    if not resolved_parent_shadow_id and window_session:
-        resolved_parent_shadow_id = str(window_session.get("parent_shadow_id") or "").strip()
-    resolved_previous_session_id = str(previous_session_id or "").strip()
-    if not resolved_previous_session_id and window_session:
-        resolved_previous_session_id = str(
-            window_session.get("previous_conversation_id") or ""
-        ).strip()
-
     recent_continuity_status = _recent_continuity_fallback_status(portrait_sections)
     self_anchor = _format_handoff_self_anchor(all_buckets, limit=1)
     anchors = _format_handoff_anchors(all_buckets, limit=2)
-    care_memos = _format_handoff_care_memos(session_id=session_id, limit=3)
+    care_memos = _format_handoff_care_memos(limit=3)
     self_core = _trim_handoff_text_to_token_budget(self_anchor, 110)
-    shadow_projection = _latest_window_shadow_handoff_projection(
-        session_id=safe_session_id,
-        parent_shadow_id=resolved_parent_shadow_id,
-        allow_latest_fallback=not declared_window and not resolved_parent_shadow_id,
-    )
+    shadow_projection = _latest_window_shadow_handoff_projection()
     raw_recent_events = str(shadow_projection.get("recent_events") or "").strip()
     recent_events = _trim_handoff_text_to_token_budget(raw_recent_events, 650)
     raw_care_items = str(shadow_projection.get("care_items") or "").strip()
@@ -2191,10 +2145,7 @@ async def _build_handoff_breath(
     emergency_raw = (
         {}
         if shadow_continuity or recent_continuity
-        else _emergency_raw_handoff_projection(
-            session_id=session_id,
-            previous_session_id=resolved_previous_session_id,
-        )
+        else _emergency_raw_handoff_projection()
     )
     handoff_route = (
         "window_shadow_recent_events"
@@ -2212,9 +2163,6 @@ async def _build_handoff_breath(
         {
             "route": handoff_route,
             "observed_at": now_iso(),
-            "session_id": safe_session_id,
-            "previous_session_id": resolved_previous_session_id,
-            "parent_shadow_id": resolved_parent_shadow_id,
             "window_shadow_id": str(shadow_projection.get("window_id") or ""),
             "window_shadow_continuity_section": shadow_continuity_section,
             "window_shadow_recent_events_available": bool(raw_recent_events),
@@ -2265,11 +2213,11 @@ async def _build_handoff_breath(
     )
     sections = [
         (SELF_ANCHOR_TAG, self_core, 100, False),
-        # Explicit handoff reads the exact parent's authored event layer without
-        # model rewriting. The startup projection may only budget-trim it.
+        # Explicit handoff reads the latest authored event layer without model
+        # rewriting. The startup projection may only budget-trim it.
         (shadow_continuity_title, shadow_continuity, 650, False),
         ("Things That Still Need Care", care_items, 260, False),
-        # Metadata-only down-drill entrances from the same verified parent Shadow.
+        # Metadata-only down-drill entrances from the same latest Shadow.
         # Scene prose is never copied into the startup package.
         ("Linked Scene Index", str(scene_index.get("text") or ""), 240, True, True),
         # A bare first-turn `继续吧` reads exactly the authored primary Scene.
@@ -2294,10 +2242,6 @@ async def _build_handoff_breath(
                 f"portrait_updated_at: {portrait_sections.get('updated_at', '')}\n"
                 f"portrait_last_run_date: {portrait_sections.get('last_run_date', '')}\n"
                 f"handoff_route: {handoff_route}\n"
-                f"window_declared: {declared_window}\n"
-                f"window_conversation_id: {safe_session_id}\n"
-                f"window_previous_conversation_id: {resolved_previous_session_id}\n"
-                f"parent_shadow_id: {resolved_parent_shadow_id}\n"
                 f"window_shadow_id: {shadow_projection.get('window_id', '')}\n"
                 f"window_shadow_continuity_section: {shadow_continuity_section}\n"
                 f"window_shadow_recent_events_available: {bool(raw_recent_events)}\n"
@@ -4181,38 +4125,15 @@ async def breath_hook(request):
         requested_mode = str(request.query_params.get("mode") or "").strip().lower()
         if requested_mode in {"", "handoff"}:
             max_tokens = _int_between(request.query_params.get("max_tokens"), 1200, 0, 1600)
-            session_id = str(request.query_params.get("session_id") or "").strip()
-            previous_session_id = str(
-                request.query_params.get("previous_session_id") or ""
-            ).strip()
-            parent_shadow_id = str(
-                request.query_params.get("parent_shadow_id") or ""
-            ).strip()
-            if parent_shadow_id and not window_shadow_store.get(parent_shadow_id):
-                from starlette.responses import JSONResponse
-
-                return JSONResponse(
-                    {
-                        "error": "parent_shadow_not_found",
-                        "parent_shadow_id": parent_shadow_id,
-                    },
-                    status_code=404,
-                )
             query = str(request.query_params.get("query") or "").strip()
             text = await _recall_memory(
                 mode="handoff",
                 query=query,
                 max_tokens=max_tokens,
-                session_id=session_id,
-                previous_session_id=previous_session_id,
-                parent_shadow_id=parent_shadow_id,
                 include_core=False,
                 include_related=False,
             )
-            response = PlainTextResponse(text)
-            if parent_shadow_id:
-                response.headers["X-Ombre-Window-Shadow-Id"] = parent_shadow_id
-            return response
+            return PlainTextResponse(text)
         all_buckets = await bucket_mgr.list_all(include_archive=False)
         # pinned
         pinned = [
@@ -8387,7 +8308,8 @@ async def _recall_memory(
     previous_session_id: str = "",
     parent_shadow_id: str = "",
 ) -> str:
-    """只读检索记忆。查主题用 query；valence/arousal 仅兼容旧调用且不参与普通排序。轻交接用 mode="handoff"：session_id 若来自 Gateway 的开窗登记，会精确读取它的 parent Shadow；也可显式传 parent_shadow_id。连续性只走一个事件槽位：优先读取上一窗亲写的 `最近发生的事`，并可附带 `还需要关心的事`；旧 Shadow 的 handoff_note 只作兼容。父窗缺少事件层时读取 72 小时内的后台 Recent Continuity；两者都不可用时，previous_session_id 可指定从哪一窗的 raw_events 原文尾部生成确定性救生包。直接父窗影若带 continue_scene_id，且第一句 query 只是“继续吧 / 接着来 / 然后呢”等裸续接词，会额外逐字读取这一条 Scene 全文；带具体对象的“继续做……”不触发，也不进行图扩散。handoff 调用本身不现场请求模型。date 或 query 里的日期可查当天普通记忆；domain="feel"/"whisper" 读私密通道，domain="daily_impression" 才读日印象。日期支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日。"""
+    """Read memories or build a compact handoff from the latest Window Shadow."""
+    _ = (session_id, previous_session_id, parent_shadow_id)
     await decay_engine.ensure_started()
     max_results = _int_between(max_results, 20, 1, 50)
     max_tokens = _int_between(max_tokens, 10000, 0, 20000)
@@ -8420,9 +8342,6 @@ async def _recall_memory(
     if mode_key == "handoff":
         return await _build_handoff_breath(
             max_tokens=min(max_tokens or 1200, 1600),
-            session_id=session_id,
-            previous_session_id=previous_session_id,
-            parent_shadow_id=parent_shadow_id,
             query=query,
             debug=debug,
         )
@@ -10078,16 +9997,12 @@ async def darkroom_release(entry_id: str = "latest", reason: str = "") -> dict:
 def _close_window_request_snapshot(
     *,
     continue_scene_index: int,
-    session_id: str,
-    profile_id: str,
     date: str,
     source: str,
 ) -> dict:
     """Keep the rejected call parameters beside, but separate from, its exact Shadow."""
     return {
         "continue_scene_index": continue_scene_index,
-        "session_id": str(session_id or ""),
-        "profile_id": str(profile_id or ""),
         "date": str(date or ""),
         "source": str(source or ""),
     }
@@ -10373,12 +10288,13 @@ async def _close_window_commit(
 ) -> dict:
     """Compensating transaction for one append-only Shadow and zero or more Scenes."""
     await decay_engine.ensure_started()
+    # Retired compatibility inputs: a Window Shadow is now an independent
+    # authored artifact, not the closing state of a Gateway conversation.
+    _ = (session_id, profile_id)
     text = str(shadow or "")
     request_key = str(idempotency_key or "").strip()
     request_snapshot = _close_window_request_snapshot(
         continue_scene_index=continue_scene_index,
-        session_id=session_id,
-        profile_id=profile_id,
         date=date,
         source=source,
     )
@@ -10400,9 +10316,6 @@ async def _close_window_commit(
             return {
                 "status": "existing",
                 "window_id": str(existing_request.get("window_id") or ""),
-                "conversation_id": str(existing_request.get("session_id") or ""),
-                "profile_id": str(existing_request.get("profile_id") or ""),
-                "parent_shadow_id": str(existing_request.get("parent_shadow_id") or ""),
                 "idempotency_key": request_key,
                 "source_hash": str(existing_request.get("source_hash") or ""),
                 "recent_events_chars": window_shadow_section_char_count(
@@ -10687,53 +10600,14 @@ async def _close_window_commit(
 
     source_date = local_date_key(date) if str(date or "").strip() else _handoff_today_key()
     source_date = source_date or _handoff_today_key()
-    profile_cfg = config.get("persona", {}) if isinstance(config.get("persona", {}), dict) else {}
-    safe_profile_id = str(profile_id or profile_cfg.get("profile_id") or "default").strip() or "default"
-    gateway_cfg = config.get("gateway", {}) if isinstance(config.get("gateway", {}), dict) else {}
-    transport_session_id = str(
-        session_id or gateway_cfg.get("default_session_id") or "main"
-    ).strip() or "main"
-    window_session = gateway_state_store.resolve_window_conversation(
-        profile_id=safe_profile_id,
-        transport_session_id=transport_session_id,
-        rotate_closed=False,
-    )
-    if str(window_session.get("status") or "") in {"invalid", "conflict"}:
-        return _close_window_rejection(
-            status="error",
-            reason="window_resolution_failed",
-            error=str(window_session.get("reason") or "window_resolution_failed"),
-            shadow=text,
-            idempotency_key=request_key,
-            request=request_snapshot,
-            validation={"fix_scope": ["request.session_id", "request.profile_id"]},
-            extra={"transport_session_id": transport_session_id},
-        )
-    conversation_id = str(window_session.get("conversation_id") or "").strip()
-    if not conversation_id:
-        return _close_window_rejection(
-            status="error",
-            reason="window_resolution_failed",
-            error="window_resolution_missing_conversation_id",
-            shadow=text,
-            idempotency_key=request_key,
-            request=request_snapshot,
-            validation={"fix_scope": ["request.session_id", "request.profile_id"]},
-            extra={"transport_session_id": transport_session_id},
-        )
     planned = window_shadow_store.plan(
         text,
-        session_id=conversation_id,
         idempotency_key=request_key,
     )
-    parent_shadow_id = str(
-        (window_session or {}).get("parent_shadow_id") or ""
-    ).strip()
     planned_window = {
         **planned,
-        "session_id": conversation_id,
-        "profile_id": safe_profile_id,
-        "parent_shadow_id": parent_shadow_id,
+        "profile_id": "",
+        "parent_shadow_id": "",
         "source_date": source_date,
     }
     existing_window = window_shadow_store.get(planned["window_id"])
@@ -10758,9 +10632,6 @@ async def _close_window_commit(
         else:
             window, window_created = window_shadow_store.write(
                 text,
-                session_id=conversation_id,
-                profile_id=safe_profile_id,
-                parent_shadow_id=parent_shadow_id,
                 idempotency_key=request_key,
                 source_date=source_date,
                 sections=sections,
@@ -10770,15 +10641,6 @@ async def _close_window_commit(
             scene_bucket_ids,
             continue_scene_id=continue_scene_id,
         ) or window
-        lifecycle = gateway_state_store.close_window_session(
-            profile_id=safe_profile_id,
-            conversation_id=conversation_id,
-            shadow_id=str(window.get("window_id") or planned["window_id"]),
-        )
-        if lifecycle.get("status") in {"invalid", "conflict"}:
-            raise RuntimeError(
-                f"window_lifecycle_{lifecycle.get('reason') or lifecycle.get('status')}"
-            )
     except Exception as exc:
         if window_created:
             window_shadow_store.delete(planned["window_id"])
@@ -10816,10 +10678,6 @@ async def _close_window_commit(
     return {
         "status": "created" if window_created else "existing",
         "window_id": str(window.get("window_id") or planned["window_id"]),
-        "conversation_id": conversation_id,
-        "transport_session_id": transport_session_id,
-        "profile_id": safe_profile_id,
-        "parent_shadow_id": parent_shadow_id,
         "idempotency_key": request_key,
         "source_hash": str(window.get("source_hash") or planned["source_hash"]),
         "recent_events_chars": window_shadow_section_char_count(
@@ -10848,8 +10706,6 @@ async def _close_window_commit(
 async def close_window(
     shadow: str,
     rejected_draft_section_patch: CloseWindowShadowPatchInput | None = None,
-    session_id: str = "",
-    profile_id: str = "",
     date: str = "",
     source: str = "",
     idempotency_key: str = "",
@@ -10858,14 +10714,12 @@ async def close_window(
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """保存一篇 Window Shadow，并抽取内联 Scene。shadow 可写五段：`这一窗之后，什么留在了我身上`、`我的思考与声音哪里变得更具体`、`我对你和我们新懂了什么`、`最近发生的事`、`还需要关心的事`。Scene 放在 `## 想留下的记忆` 下，写成 `### scene | 标题：作者标题 | cue：以后提到什么时召回`。session_id/profile_id/date/source 填来源；idempotency_key 在重试时复用；失败稿重试按响应填写 rejected_draft_*；continue_scene_index 选择续接 Scene。"""
+    """保存一篇 Window Shadow，并抽取内联 Scene。shadow 可写：`这一窗之后，什么留在了我身上`、`我的思考与声音哪里变得更具体`、`我对你和我们新懂了什么`、`最近发生的事`、`还需要关心的事`；Scene 写成 `### scene | 标题：作者标题 | cue：以后提到什么时召回`。date/source 填来源；idempotency_key 在重试时复用；失败稿重试按响应填写 rejected_draft_*；continue_scene_index 选择续接 Scene。"""
     _ = context
     return await _close_window_commit(
         shadow,
         rejected_draft_section_patch=rejected_draft_section_patch,
         continue_scene_index=continue_scene_index,
-        session_id=session_id,
-        profile_id=profile_id,
         date=date,
         source=source,
         idempotency_key=idempotency_key,
@@ -11644,7 +11498,7 @@ async def reflect(period: str = "daily", force: bool = False) -> dict:
 
 
 async def portrait_maintain(force: bool = False, scope: str = "") -> dict:
-    """整理每日 portrait state 与 stable candidates。模型不能发布 Stable；Stable 只接受你审阅证据后的本人定稿。不会写 profile_fact、anchor、pinned、protected 或 Core Memory。"""
+    """整理 Portrait 状态与候选内容。force 强制运行；scope 可限定范围。"""
     await decay_engine.ensure_started()
     force_scopes = [str(scope or "").strip()] if str(scope or "").strip() else []
     return await portrait_engine.maintain_daily(
@@ -11883,6 +11737,7 @@ async def read_portrait(scope: str = "", include_evidence_text: bool = True) -> 
     result = portrait_engine.read_reviewed_portrait(scope=scope)
     if str(result.get("status") or "") != "ok":
         return result
+    result.pop("publication_boundary", None)
     for item in (result.get("scopes") or {}).values():
         if not isinstance(item, dict):
             continue
@@ -11890,7 +11745,39 @@ async def read_portrait(scope: str = "", include_evidence_text: bool = True) -> 
             item.get("evidence", []),
             include_text=bool(include_evidence_text),
         )
+        for candidate in item.get("candidate_materials", []) or []:
+            if not isinstance(candidate, dict):
+                continue
+            candidate["resolved_evidence"] = await _resolved_portrait_evidence(
+                candidate.get("evidence", []),
+                include_text=bool(include_evidence_text),
+            )
     return result
+
+
+def _portrait_default_publication_evidence(scope: str) -> tuple[list[dict], str]:
+    """Use the newest candidate's sources, then the current published sources."""
+    reviewed = portrait_engine.read_reviewed_portrait(scope=scope)
+    scope_state = (
+        (reviewed.get("scopes") or {}).get(scope, {})
+        if isinstance(reviewed, dict)
+        else {}
+    )
+    candidates = (
+        scope_state.get("candidate_materials", [])
+        if isinstance(scope_state, dict)
+        else []
+    )
+    for candidate in reversed(candidates if isinstance(candidates, list) else []):
+        if not isinstance(candidate, dict):
+            continue
+        candidate_evidence = _portrait_evidence_input_rows(candidate.get("evidence", []))
+        if candidate_evidence:
+            return candidate_evidence, str(candidate.get("id") or candidate.get("created_at") or "")
+    stable_evidence = _portrait_evidence_input_rows(
+        scope_state.get("evidence", []) if isinstance(scope_state, dict) else []
+    )
+    return stable_evidence, "current_portrait" if stable_evidence else ""
 
 
 async def _publish_portrait_memory(
@@ -11900,11 +11787,15 @@ async def _publish_portrait_memory(
     evidence: list[dict] | None = None,
     locked: bool = True,
 ) -> dict:
-    """由你亲手发布一版 User 或 Relationship Portrait。必须先 read_portrait，传 expected_revision，并给出 Scene、Narrative Roll 或 Window Shadow evidence。Relationship 可直接引用窗影；User 引用窗影时工具会沿 linked_scene_ids 回到 Scene，避免把一次观察冒充用户事实。模型候选不会自动发布。"""
+    """Publish an authored Portrait while preserving its source relationship."""
     safe_scope = str(scope or "").strip().lower()
+    selected_evidence = _portrait_evidence_input_rows(evidence)
+    inherited_from = ""
+    if evidence is None:
+        selected_evidence, inherited_from = _portrait_default_publication_evidence(safe_scope)
     normalized, source_dates, resolved, errors = await _resolve_portrait_publication_evidence(
         safe_scope,
-        evidence or [],
+        selected_evidence,
     )
     if errors:
         return {
@@ -11923,6 +11814,8 @@ async def _publish_portrait_memory(
         locked=locked,
     )
     result["resolved_evidence"] = resolved
+    if inherited_from:
+        result["evidence_inherited_from"] = inherited_from
     return result
 
 
@@ -12399,11 +12292,8 @@ async def recall(
     date: str = "",
     max_results: int = 2,
     max_tokens: int = 3000,
-    session_id: str = "",
-    previous_session_id: str = "",
-    parent_shadow_id: str = "",
 ) -> str:
-    """查找 Scene 或读取相邻窗口交接。query/date 填记忆线索；mode 选 memory 或 handoff；max_results/max_tokens 控制结果；交接时可传 session_id、previous_session_id 或 parent_shadow_id。"""
+    """查找 Scene 或读取最新窗影交接。query/date 填记忆线索；mode 选 memory 或 handoff；max_results/max_tokens 控制结果。"""
     safe_mode = str(mode or "memory").strip().lower()
     if safe_mode not in {"memory", "handoff"}:
         return "mode 只能是 memory 或 handoff。"
@@ -12413,9 +12303,6 @@ async def recall(
         max_results=_int_between(max_results, 2, 1, 20),
         max_tokens=_int_between(max_tokens, 3000, 0, 20000),
         mode="handoff" if safe_mode == "handoff" else "",
-        session_id=session_id,
-        previous_session_id=previous_session_id,
-        parent_shadow_id=parent_shadow_id,
     )
 
 
@@ -12742,7 +12629,7 @@ async def publish_portrait(
     evidence: list[dict] | None = None,
     locked: bool = True,
 ) -> dict:
-    """发布 Portrait。scope 选 user 或 relationship；text 写正文；expected_revision 填 read_portrait 返回的 revision；evidence 填来源，locked 控制锁定状态。"""
+    """发布 Portrait。scope 选 user 或 relationship；text 写正文；expected_revision 填 read_portrait 返回的 revision；evidence 可省略并使用最新候选来源；locked 控制锁定状态。"""
     return await _publish_portrait_memory(
         scope=scope,
         text=text,

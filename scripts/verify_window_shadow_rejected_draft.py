@@ -22,14 +22,10 @@ class _NoopDecay:
 
 class _GatewayState:
     def resolve_window_conversation(self, **kwargs) -> dict:
-        return {
-            "status": "ok",
-            "conversation_id": "conversation-rejected-draft-test",
-            "parent_shadow_id": "",
-        }
+        raise AssertionError("close_window must not resolve a Gateway window")
 
     def close_window_session(self, **kwargs) -> dict:
-        return {"status": "closed"}
+        raise AssertionError("close_window must not close a Gateway window")
 
 
 def _shadow(self_delta: str, *, inline_scene: bool = False) -> str:
@@ -80,6 +76,8 @@ async def main() -> None:
         assert "read_rejected_draft" in close_schema
         assert "rejected_draft_section_patch" in close_schema
         assert "scenes" not in close_schema
+        assert "session_id" not in close_schema
+        assert "profile_id" not in close_schema
 
         request_key = "bridge:rejected-draft:text-fix"
         first_shadow = _shadow("失败不能授权下一次重写整篇窗影。")
