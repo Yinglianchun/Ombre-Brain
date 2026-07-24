@@ -88,6 +88,8 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 `edit_scene` 原位修订一条 authored Scene。调用者必须先 `read_memory`，再把读到的 `metadata.updated_at` 原样作为 `expected_updated_at`；版本不一致时返回 conflict，绝不覆盖较新的修改。只修改显式传入的 title、content、cues，旧版本全文保存在 Scene 自己的 revision history 中；Scene ID、created、source、source refs、窗影关联和 comments 都不变。窗影抽取 Scene 的 `scene_source_hash` 永远指向 revision 1；正文修订后，handoff 会沿 revision history 验回原窗影证据，而不让新正文冒充原始摘录。标题、正文或 cues 变化后刷新 embedding、moment 与 entity 索引，并重新排队 Scene link proposal。它不接受 Window Shadow、Narrative Roll、旧 bucket 或 immutable source record。
 
+`set_scene_status` 带版本检查地归档或恢复一条 authored Scene。调用者同样必须先 `read_memory`，把最新 `metadata.updated_at` 原样传入，再把 status 设为 `archived` 或 `active`。归档不删除或重写正文、Scene ID、created、source refs、revision history、comments、窗影关联或已审阅 Scene edges；它只把 Scene 移出普通 recall，并清理可重建的向量、moment、entity 与 node 索引。归档 Scene 仍可由 `read_memory(scene_id)` 精确读回；恢复后重建派生索引并回到归档前的 dynamic/permanent 存储层。重复设置当前状态是无副作用的 unchanged。它不接受 Window Shadow、Narrative Roll、旧 bucket 或 immutable source record。
+
 `close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”。Bridge 负责新窗口醒来，窗影只沉淀这一窗的变化：新稿不再要求 `## 给下个窗口的我`，也没有 250～400 字限制；相邻连续性可写成 `## 最近发生的事`（建议 `- YYYY-MM-DD｜事件`）与可选的 `## 还需要关心的事`。它只从 Shadow 的“想留下的记忆”中抽取 0～N 个独立 Scene，没有平行 `scenes[]` 写入口。每条 Scene 使用 `### scene | 标题：作者标题 | cue：自然召回入口`，可继续追加 1～8 个 `| cue：…`。标题与 cues 都由当前作者亲自写，只进入 metadata；heading 不进入 Scene 正文。裸 `### scene`、未显式标注标题/cue 的旧格式都会被拒绝。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。旧 `### moment` 只保留读取兼容，不会自动升格成 Scene。
 
 `close_window` 的失败稿与成功 Shadow 分库：带 `idempotency_key` 的 `invalid` / `error` 请求会把原 Shadow 逐字写入 `window_shadow_rejected_drafts.sqlite`，响应返回 `rejected_draft.shadow`、`source_hash`、原请求参数与 `fix_scope`。失败稿不进入 `window_shadows.sqlite`、handoff、普通召回、bucket 或 embedding。重试同 key 时，参数-only 修复必须保持 Shadow 逐字不变；文本修复必须传上一稿的 `rejected_draft_source_hash`，而且只能改变 `fix_scope` 指定的 section。`read_rejected_draft=true` 可显式取回未完成失败稿。成功后草稿删除；之后同 key 永远返回第一次成功写入，不接受覆盖。
@@ -470,6 +472,7 @@ Codex 接线时注意：
 | `read_memory` | 精确读取 Scene、Window Shadow 或 Narrative Roll |
 | `write_scene` | 原样保存一件 canonical Scene |
 | `edit_scene` | 带版本检查地原位修订一条 authored Scene |
+| `set_scene_status` | 带版本检查地归档或恢复一条 authored Scene |
 | `annotate` | 给已有来源追加带时间的 Annotation |
 | `close_window` | 原子保存一篇 Window Shadow 与 0～N 个 Scene |
 | `publish_narrative` | 发布或修订有 Scene 来源账的 Narrative Roll |
@@ -481,7 +484,7 @@ Codex 接线时注意：
 | `delete_diary` | 确认后软删除一篇日记 |
 | `comment_diary` | 以 Haven 身份追加日记评论 |
 
-MCP 只注册以上十四个动作。旧桶格式、读取投影和 Dashboard/internal HTTP 兼容继续保留，但旧 MCP 工具名与旧 Diary MCP 工具不再公布或接受调用。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
+MCP 只注册以上十五个动作。旧桶格式、读取投影和 Dashboard/internal HTTP 兼容继续保留，但旧 MCP 工具名与旧 Diary MCP 工具不再公布或接受调用。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
 
 ## 运维与验证
 

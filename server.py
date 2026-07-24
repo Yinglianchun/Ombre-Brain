@@ -11,13 +11,13 @@
 #   - Initialize canonical authored-memory stores, Diary storage, legacy
 #     read compatibility, indexes, and background maintenance engines.
 #     初始化作者记忆主存储、日记存储、旧数据读取兼容、索引与后台维护引擎。
-#   - Expose the 14-tool daily façade:
-#     暴露 14 把日常工具：
+#   - Expose the 15-tool daily façade:
+#     暴露 15 把日常工具：
 #       recall / read_memory
 #         Recall Scenes or explicitly read handoff; read exact Scene,
 #         Window Shadow, or Narrative Roll objects.
 #         召回 Scene 或显式读取 handoff；精确读取 Scene、窗影或叙事卷。
-#       write_scene / edit_scene / annotate / close_window
+#       write_scene / edit_scene / set_scene_status / annotate / close_window
 #         Author and revise Scenes, append sourced later understanding,
 #         and atomically settle one Window Shadow plus inline Scenes.
 #         亲写与修订 Scene、追加有来源的后来理解，并原子沉淀一篇窗影及内联 Scene。
@@ -3201,6 +3201,12 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "scene_revision",
         "scene_revision_history",
         "last_edit_source",
+        "scene_status",
+        "scene_status_history",
+        "scene_pre_archive_type",
+        "archived_at",
+        "restored_at",
+        "last_status_change_source",
         "window_shadow_id",
         "window_shadow_session_id",
         "window_shadow_index",
@@ -12182,6 +12188,206 @@ async def _edit_scene_memory(
     }
 
 
+def _scene_revision_token(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value or "").strip()
+
+
+def _scene_storage_status(bucket: dict | None) -> str:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    if (
+        str(meta.get("type") or "").strip().lower() == "archived"
+        or str(meta.get("scene_status") or "").strip().lower() == "archived"
+    ):
+        return "archived"
+    return "active"
+
+
+def _archive_scene_indexes(scene_id: str) -> tuple[dict, list[str]]:
+    cleanup: dict = {}
+    errors: list[str] = []
+    try:
+        embedding_engine.delete_embedding(scene_id)
+        cleanup["embedding"] = True
+    except Exception as exc:
+        logger.warning("Archived Scene embedding cleanup failed / 归档 Scene 向量清理失败: %s", exc)
+        errors.append("embedding")
+    try:
+        cleanup["moments"] = memory_moment_store.delete_bucket(scene_id)
+    except Exception as exc:
+        logger.warning("Archived Scene moment cleanup failed / 归档 Scene moment 清理失败: %s", exc)
+        errors.append("moments")
+    try:
+        cleanup["entity_edges"] = entity_edge_store.delete_for_bucket(scene_id)
+    except Exception as exc:
+        logger.warning("Archived Scene entity cleanup failed / 归档 Scene 实体边清理失败: %s", exc)
+        errors.append("entity_edges")
+    try:
+        cleanup["node"] = memory_node_store.delete(scene_id)
+    except Exception as exc:
+        logger.warning("Archived Scene node cleanup failed / 归档 Scene node 清理失败: %s", exc)
+        errors.append("node")
+    return cleanup, errors
+
+
+def _restore_scene_indexes(bucket: dict) -> tuple[dict, list[str]]:
+    scene_id = str(bucket.get("id") or "")
+    restored: dict = {}
+    errors: list[str] = []
+    try:
+        restored["embedding_refresh"] = (
+            "queued" if _queue_embedding_refresh(scene_id) else "skipped"
+        )
+    except Exception as exc:
+        logger.warning("Restored Scene embedding refresh failed / 恢复 Scene 向量刷新失败: %s", exc)
+        errors.append("embedding")
+    try:
+        restored["moments"] = memory_moment_store.upsert_bucket(bucket)
+    except Exception as exc:
+        logger.warning("Restored Scene moment reindex failed / 恢复 Scene moment 重建失败: %s", exc)
+        errors.append("moments")
+    try:
+        restored["entity_edges"] = _refresh_entity_edges_for_bucket(bucket)
+    except Exception as exc:
+        logger.warning("Restored Scene entity reindex failed / 恢复 Scene 实体边重建失败: %s", exc)
+        errors.append("entity_edges")
+    try:
+        restored["node"] = bool(memory_node_store.upsert_bucket(bucket))
+    except Exception as exc:
+        logger.warning("Restored Scene node reindex failed / 恢复 Scene node 重建失败: %s", exc)
+        errors.append("node")
+    try:
+        restored["scene_linking_queued"] = _queue_scene_linking(scene_id)
+    except Exception as exc:
+        logger.warning("Restored Scene linking refresh failed / 恢复 Scene 关系刷新失败: %s", exc)
+        errors.append("scene_linking")
+    return restored, errors
+
+
+async def _set_scene_status_memory(
+    scene_id: str,
+    *,
+    status: str,
+    expected_updated_at: str,
+) -> dict:
+    """Archive or restore one authored Scene without rewriting its evidence."""
+    scene_id = _coerce_memory_id(scene_id)
+    if not scene_id or not MEMORY_ID_RE.fullmatch(scene_id):
+        return {"status": "invalid", "reason": "invalid_scene_id"}
+
+    requested_status = str(status or "").strip().lower()
+    if requested_status not in {"active", "archived"}:
+        return {
+            "status": "invalid",
+            "reason": "invalid_scene_status",
+            "scene_id": scene_id,
+            "allowed_statuses": ["active", "archived"],
+        }
+
+    bucket = await bucket_mgr.get(scene_id)
+    if not bucket:
+        return {"status": "not_found", "scene_id": scene_id}
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    if not (
+        str(meta.get("object_kind") or "").strip().lower() == "scene"
+        or str(meta.get("memory_value_source") or "").strip() == "authored_scene"
+    ):
+        return {
+            "status": "invalid",
+            "reason": "not_authored_scene",
+            "scene_id": scene_id,
+        }
+    if bool(meta.get("source_record_immutable", False)):
+        return {
+            "status": "invalid",
+            "reason": "immutable_source_record",
+            "scene_id": scene_id,
+        }
+
+    expected_version = _scene_revision_token(expected_updated_at)
+    current_updated_at = _scene_revision_token(meta.get("updated_at"))
+    if not expected_version:
+        return {
+            "status": "invalid",
+            "reason": "expected_updated_at_required",
+            "scene_id": scene_id,
+            "current_updated_at": current_updated_at,
+        }
+    if expected_version != current_updated_at:
+        return {
+            "status": "conflict",
+            "reason": "scene_changed_since_read",
+            "scene_id": scene_id,
+            "expected_updated_at": expected_version,
+            "current_updated_at": current_updated_at,
+        }
+
+    current_status = _scene_storage_status(bucket)
+    if current_status == requested_status:
+        return {
+            "status": "unchanged",
+            "scene_id": scene_id,
+            "scene_status": current_status,
+            "updated_at": current_updated_at,
+            "ordinary_recall": current_status == "active",
+            "exact_read": True,
+            "scene": _bucket_read_payload(bucket),
+        }
+
+    changed_at = now_iso()
+    changed = await bucket_mgr.set_scene_status(
+        scene_id,
+        requested_status,
+        changed_at=changed_at,
+    )
+    if not changed:
+        return {
+            "status": "error",
+            "reason": "scene_status_update_failed",
+            "scene_id": scene_id,
+        }
+    updated_bucket = await bucket_mgr.get(scene_id)
+    if not updated_bucket:
+        return {
+            "status": "error",
+            "reason": "scene_missing_after_status_update",
+            "scene_id": scene_id,
+        }
+
+    if requested_status == "archived":
+        index_changes, index_errors = _archive_scene_indexes(scene_id)
+    else:
+        index_changes, index_errors = _restore_scene_indexes(updated_bucket)
+
+    return {
+        "status": "updated",
+        "scene_id": scene_id,
+        "previous_status": current_status,
+        "scene_status": requested_status,
+        "previous_updated_at": current_updated_at,
+        "updated_at": _scene_revision_token(
+            (updated_bucket.get("metadata") or {}).get("updated_at")
+        ),
+        "ordinary_recall": requested_status == "active",
+        "exact_read": True,
+        "preserved": [
+            "content",
+            "scene_id",
+            "created",
+            "source",
+            "source_refs",
+            "scene_revision_history",
+            "comments",
+            "window_shadow_link",
+            "reviewed_scene_edges",
+        ],
+        "index_changes": index_changes,
+        "index_errors": index_errors,
+        "scene": _bucket_read_payload(updated_bucket),
+    }
+
+
 # =============================================================
 # Daily MCP façade — memory continuity plus authored Diary actions
 # 日常 MCP façade —— 记忆连续性与作者日记动作
@@ -12298,6 +12504,20 @@ async def edit_scene(
         title=title,
         content=content,
         cues=cues,
+    )
+
+
+@mcp.tool()
+async def set_scene_status(
+    scene_id: str,
+    status: Literal["active", "archived"],
+    expected_updated_at: str,
+) -> dict:
+    """先 read_memory，再带 metadata.updated_at 归档或恢复 authored Scene。归档不删除正文，仍可精确读取；恢复不重写证据。"""
+    return await _set_scene_status_memory(
+        scene_id,
+        status=status,
+        expected_updated_at=expected_updated_at,
     )
 
 

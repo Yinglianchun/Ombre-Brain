@@ -1422,6 +1422,117 @@ class BucketManager:
         logger.info(f"Activated bucket / 恢复记忆桶: {bucket_id} → dynamic/{primary_domain}/")
         return True
 
+    async def set_scene_status(
+        self,
+        bucket_id: str,
+        status: str,
+        *,
+        changed_at: str,
+    ) -> bool:
+        """
+        Move one authored Scene between active storage and archive without
+        changing its content, source evidence, revisions, or annotations.
+        在 active 与 archive 间移动 authored Scene，不改正文、来源证据、修订或年轮。
+
+        Canonical Scene validation and optimistic concurrency live in the
+        server façade. This storage primitive only performs the requested,
+        metadata-preserving transition.
+        """
+        safe_status = str(status or "").strip().lower()
+        if safe_status not in {"active", "archived"}:
+            return False
+
+        file_path = self._find_bucket_file(bucket_id)
+        if not file_path:
+            return False
+
+        try:
+            post = frontmatter.load(file_path)
+            if bool(post.get("source_record_immutable", False)):
+                logger.warning(
+                    "Refused immutable source record Scene status change / "
+                    "拒绝修改不可变来源 Scene 状态: %s",
+                    bucket_id,
+                )
+                return False
+
+            domain = post.get("domain", ["未分类"])
+            if not isinstance(domain, list):
+                domain = [domain]
+            primary_domain = sanitize_name(domain[0]) if domain else "未分类"
+            current_type = str(post.get("type") or "dynamic").strip().lower()
+            current_status = (
+                "archived"
+                if current_type == "archived"
+                or str(post.get("scene_status") or "").strip().lower() == "archived"
+                else "active"
+            )
+            history = post.get("scene_status_history")
+            history = list(history) if isinstance(history, list) else []
+            history.append(
+                {
+                    "from": current_status,
+                    "to": safe_status,
+                    "changed_at": changed_at,
+                    "source": "set_scene_status",
+                }
+            )
+            if len(history) > 20:
+                history = [history[0], *history[-19:]]
+
+            if safe_status == "archived":
+                previous_type = current_type if current_type in {"dynamic", "permanent"} else "dynamic"
+                post["scene_pre_archive_type"] = previous_type
+                post["type"] = "archived"
+                post["active"] = False
+                post["archived_at"] = changed_at
+                target_root = self.archive_dir
+            else:
+                previous_type = str(post.get("scene_pre_archive_type") or "dynamic").strip().lower()
+                restored_type = previous_type if previous_type in {"dynamic", "permanent"} else "dynamic"
+                post["type"] = restored_type
+                post["active"] = True
+                post["deprecated"] = False
+                post["restored_at"] = changed_at
+                target_root = self.permanent_dir if restored_type == "permanent" else self.dynamic_dir
+
+            post["scene_status"] = safe_status
+            post["scene_status_history"] = history
+            post["last_status_change_source"] = "set_scene_status"
+            post["updated_at"] = changed_at
+
+            target_dir = os.path.join(target_root, primary_domain)
+            os.makedirs(target_dir, exist_ok=True)
+            dest = safe_path(target_dir, os.path.basename(file_path))
+            same_path = os.path.normpath(file_path) == os.path.normpath(str(dest))
+            if not same_path and os.path.exists(dest):
+                logger.error(
+                    "Refused Scene status move because destination exists / "
+                    "Scene 状态迁移目标已存在: %s",
+                    dest,
+                )
+                return False
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+            if not same_path:
+                shutil.move(file_path, str(dest))
+        except Exception as e:
+            logger.error(
+                "Failed to change Scene status / 修改 Scene 状态失败: %s: %s",
+                bucket_id,
+                e,
+            )
+            return False
+
+        logger.info(
+            "Changed Scene status / 修改 Scene 状态: %s → %s/%s/",
+            bucket_id,
+            safe_status,
+            primary_domain,
+        )
+        return True
+
     # ---------------------------------------------------------
     # Internal: find bucket file across all three directories
     # 内部：在三个目录中查找桶文件
