@@ -9,7 +9,7 @@
 原版 quick deploy 通常只需要一个 `server.py` 服务和一个 buckets 目录；本 fork 的完整生产形态是：
 
 - `server.py`：MCP / Dashboard / bucket API，容器内监听 `8000`
-- `gateway.py`：OpenAI-compatible Gateway / 自动记忆注入，默认监听 `8010`
+- `gateway.py`：OpenAI-compatible Gateway / 记忆召回注入，默认监听 `8010`
 - `/data`：bucket Markdown 文件和 `embeddings.db`
 - `/state`：`gateway_state.db`、`memory_moments.sqlite`、`memory_nodes.sqlite`、`memory_edges.jsonl`、persona/portrait/dream 等运行态文件
 - `config.yaml`：私有身份、上游模型、召回、persona、dream、reflection 等配置
@@ -111,7 +111,7 @@ Volumes：
 
 ### C. Zeabur 单服务：Gateway-only
 
-适合只想接聊天客户端，测试自动记忆注入。
+适合只想接聊天客户端，测试记忆召回注入。
 
 限制：
 

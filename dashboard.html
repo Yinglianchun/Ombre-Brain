@@ -3072,90 +3072,7 @@
     color: var(--text-light);
     font-size: 11px;
   }
-  .chat-memory-board {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .chat-memory-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .chat-memory-card {
-    display: grid;
-    grid-template-rows: auto 1fr auto auto;
-    gap: 9px;
-    min-width: 0;
-    padding: 14px;
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    background: rgba(255,255,255,0.26);
-    color: var(--text-dim);
-    font-size: 13px;
-    line-height: 1.65;
-    box-shadow: inset 1px 1px 2px rgba(90, 72, 52, 0.04);
-  }
-  .chat-memory-card strong {
-    display: block;
-    color: var(--text);
-    font-size: 14px;
-    line-height: 1.4;
-  }
-  .chat-memory-card-body {
-    overflow-wrap: anywhere;
-  }
-  .chat-memory-edit-panel {
-    border-top: 1px solid var(--border);
-    display: grid;
-    gap: 10px;
-    margin-top: 6px;
-    padding-top: 10px;
-  }
-  .chat-memory-edit-panel[hidden] {
-    display: none;
-  }
-  .chat-memory-edit-field {
-    display: grid;
-    gap: 5px;
-    color: var(--text-light);
-    font-size: 11px;
-  }
-  .chat-memory-edit-field input,
-  .chat-memory-edit-field textarea {
-    width: 100%;
-    min-width: 0;
-    box-sizing: border-box;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: rgba(255,255,255,0.42);
-    color: var(--text);
-    font: inherit;
-    line-height: 1.5;
-    padding: 8px 9px;
-  }
-  .chat-memory-edit-field textarea {
-    min-height: 96px;
-    resize: vertical;
-  }
-  .chat-memory-edit-grid {
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 8px;
-  }
-  .chat-memory-card-meta {
-    color: var(--text-light);
-    font-size: 11px;
-  }
-  .chat-memory-card-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 2px;
-  }
-
   @media (max-width: 768px) {
-    .chat-memory-edit-grid {
-      grid-template-columns: 1fr;
-    }
     .header { padding: 20px; flex-wrap: wrap; }
     .header h1 { font-size: 22px; }
     .darkroom-door {
@@ -3246,7 +3163,6 @@
   <div class="tab" data-tab="todos">照顾备忘</div>
   <div class="tab" data-tab="breath">Breath 模拟</div>
   <div class="tab" data-tab="reflection">日印象</div>
-  <div class="tab" data-tab="chat-memory">自动记忆</div>
   <div class="tab" data-tab="dreams">梦境</div>
   <div class="tab" data-tab="persona">Persona</div>
   <div class="tab" data-tab="profile">画像</div>
@@ -3606,12 +3522,12 @@
     </div>
 
     <div class="config-section">
-      <h3>自动记忆模型</h3>
+      <h3>关系整理模型</h3>
       <div class="config-row">
         <label>模型</label>
         <input type="text" id="cfg-reflection-model" placeholder="留空复用 Embedding/Persona/脱水模型" />
       </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">同一个模型负责候选和整理；用于决定写什么、怎么写、写到哪个主域</div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">用于日印象和记忆关系整理</div>
       <div class="config-row">
         <label>思考</label>
         <select id="cfg-reflection-thinking">
@@ -3664,28 +3580,6 @@
         <div class="reflection-calendar" id="reflection-calendar"></div>
       </section>
       <section class="reflection-card reflection-day-panel" id="reflection-day-panel"></section>
-    </div>
-  </div>
-</div>
-
-<div class="content" id="chat-memory-view" style="display:none">
-  <div class="reflection-shell">
-    <div class="reflection-toolbar">
-      <div class="reflection-title">
-        <h2>记忆候选</h2>
-        <p>每天本地零点后从原文保险箱里挑长期记忆；默认自动写入，review 模式下在这里确认。</p>
-      </div>
-    </div>
-    <div class="bucket-bulk-message" id="daily-chat-memory-message"></div>
-    <div class="reflection-board chat-memory-board">
-      <section class="reflection-card">
-        <div class="reflection-card-head">
-          <h3>待确认</h3>
-        </div>
-        <div class="chat-memory-list" id="daily-chat-memory-pending">
-          <div class="loading">暂无待确认候选。</div>
-        </div>
-      </section>
     </div>
   </div>
 </div>
@@ -4119,12 +4013,12 @@
         <label>整理引擎</label>
         <select id="cfg-reflection-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
       </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">总开关；关闭后此区域的关系整理、日印象、自动记忆都不运行</div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">总开关；关闭后此区域的关系整理和日印象都不运行</div>
       <div class="config-row">
         <label>自动整理</label>
         <select id="cfg-reflection-auto"><option value="true">开启</option><option value="false">关闭</option></select>
       </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">后台定时任务；开启后跑零点自动记忆、日印象，并给已有记忆补 tags、affect_anchor、边关系</div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">后台定时任务；开启后跑日印象，并给已有记忆补 tags、affect_anchor、边关系</div>
       <div class="config-row">
         <label>日印象</label>
         <select id="cfg-reflection-daily"><option value="true">开启</option><option value="false">关闭</option></select>
@@ -4140,20 +4034,6 @@
         <input type="number" id="cfg-reflection-daily-turns" min="0" max="80" />
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 12；读取少量当天短期对话原文作为日印象材料</div>
-      <div class="config-row">
-        <label>自动记忆</label>
-        <select id="cfg-reflection-chat-memory-mode">
-          <option value="auto">自动存</option>
-          <option value="review">挑选后确认</option>
-          <option value="off">关闭</option>
-        </select>
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认自动存；每天本地 0 点后整理前一天原文并写入长期记忆</div>
-      <div class="config-row">
-        <label>自动记忆轮次</label>
-        <input type="number" id="cfg-reflection-chat-memory-turns" min="0" max="10000" />
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 0；0 表示按日期读取当天全部原文，只影响自动记忆候选</div>
       <div class="config-row">
         <label>普通记忆和弦</label>
         <select id="cfg-reflection-memory-anchor"><option value="true">开启</option><option value="false">关闭</option></select>
@@ -4408,7 +4288,6 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('breath-view').style.display = target === 'breath' ? '' : 'none';
     document.getElementById('memory-config-view').style.display = target === 'memory-config' ? '' : 'none';
     document.getElementById('reflection-view').style.display = target === 'reflection' ? '' : 'none';
-    document.getElementById('chat-memory-view').style.display = target === 'chat-memory' ? '' : 'none';
     document.getElementById('dreams-view').style.display = target === 'dreams' ? '' : 'none';
     document.getElementById('persona-view').style.display = target === 'persona' ? '' : 'none';
     document.getElementById('profile-view').style.display = target === 'profile' ? '' : 'none';
@@ -4422,7 +4301,6 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (target === 'breath') loadGatewayInjections();
     if (target === 'memory-config') loadConfig();
     if (target === 'reflection') renderReflectionReview();
-    if (target === 'chat-memory' && window.initDailyChatMemoryTab) window.initDailyChatMemoryTab();
     if (target === 'dreams') loadDreams();
     if (target === 'persona') loadPersona();
     if (target === 'profile') {
@@ -4465,7 +4343,6 @@ async function loadBuckets(options) {
     });
     renderBuckets(filterBuckets(allBuckets));
     if (getActiveTab() === 'reflection') renderReflectionReview();
-    if (getActiveTab() === 'chat-memory' && window.loadDailyChatMemoryPending) loadDailyChatMemoryPending();
     if (getActiveTab() === 'todos') loadTodos();
     if (getActiveTab() === 'dreams') loadDreams();
     if (getActiveTab() === 'profile' && !options.skipProfileRefresh) {
@@ -9117,10 +8994,6 @@ async function loadConfig() {
       (cfg.reflection && cfg.reflection.daily_min_memory_items) ?? 5;
     document.getElementById('cfg-reflection-daily-turns').value =
       (cfg.reflection && cfg.reflection.daily_conversation_turn_limit) ?? 12;
-    document.getElementById('cfg-reflection-chat-memory-mode').value =
-      (cfg.reflection && cfg.reflection.daily_chat_memory_mode) || 'review';
-    document.getElementById('cfg-reflection-chat-memory-turns').value =
-      (cfg.reflection && cfg.reflection.daily_chat_memory_turn_limit) ?? 0;
     document.getElementById('cfg-reflection-memory-anchor').value =
       (cfg.reflection && cfg.reflection.memory_affect_anchor_enabled) === false ? 'false' : 'true';
     document.getElementById('cfg-reflection-weather-anchor').value =
@@ -9269,8 +9142,6 @@ async function saveConfig(persist, persistEnv) {
       daily_enabled: document.getElementById('cfg-reflection-daily').value === 'true',
       daily_min_memory_items: numberValue('cfg-reflection-daily-min-memory', 5),
       daily_conversation_turn_limit: numberValue('cfg-reflection-daily-turns', 12),
-      daily_chat_memory_mode: document.getElementById('cfg-reflection-chat-memory-mode').value || 'review',
-      daily_chat_memory_turn_limit: numberValue('cfg-reflection-chat-memory-turns', 0),
       memory_affect_anchor_enabled: document.getElementById('cfg-reflection-memory-anchor').value === 'true',
       relationship_weather_affect_anchor_enabled: document.getElementById('cfg-reflection-weather-anchor').value === 'true',
     };
@@ -9679,14 +9550,6 @@ async function batchReview(idsJson, action) {
   } catch(e) {}
 }
 
-function loadDashboardModule(path) {
-  const script = document.createElement('script');
-  script.src = BASE + path;
-  script.defer = true;
-  document.body.appendChild(script);
-}
-
-loadDashboardModule('/dashboard-assets/chat-memory.js?v=20260706-chat-memory-edit');
 </script>
 </body>
 </html>

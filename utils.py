@@ -388,23 +388,6 @@ def load_config(config_path: str = None) -> dict:
             "edge_min_confidence": 0.55,
             "diary_mcp_url": "",
             "diary_mcp_token_env": "",
-            "daily_chat_memory_mode": "review",
-            "daily_chat_memory_hour": 0,
-            "daily_chat_memory_turn_limit": 0,
-            "daily_chat_memory_max_per_day": 10,
-            "daily_chat_memory_min_confidence": 0.68,
-            "daily_chat_memory_review_max_per_day": 10,
-            "daily_chat_memory_review_min_confidence": 0.55,
-            "daily_chat_memory_summary_enabled": True,
-            "daily_chat_memory_summary_window_turns": 14,
-            "daily_chat_memory_summary_stride_turns": 7,
-            "daily_chat_memory_api_key_env": "",
-            "daily_chat_memory_base_url": "",
-            "daily_chat_memory_timeout_seconds": 180,
-            "daily_chat_memory_summary_model": "",
-            "daily_chat_memory_summary_max_tokens": 2200,
-            "daily_chat_memory_candidate_model": "",
-            "daily_chat_memory_candidate_max_tokens": 3200,
             "daily_activity_summary_enabled": True,
             "daily_activity_summary_turn_limit": 0,
             "daily_activity_summary_max_tokens": 320,
@@ -687,10 +670,6 @@ def load_config(config_path: str = None) -> dict:
     env_reflection_model = os.environ.get("OMBRE_REFLECTION_MODEL", "")
     if env_reflection_model:
         config.setdefault("reflection", {})["model"] = env_reflection_model
-
-    env_reflection_candidate_model = os.environ.get("OMBRE_REFLECTION_CANDIDATE_MODEL", "")
-    if env_reflection_candidate_model:
-        config.setdefault("reflection", {})["daily_chat_memory_candidate_model"] = env_reflection_candidate_model
 
     env_diary_mcp_url = os.environ.get("OMBRE_DIARY_MCP_URL", "")
     if env_diary_mcp_url:

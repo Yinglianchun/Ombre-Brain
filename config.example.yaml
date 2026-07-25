@@ -662,30 +662,8 @@ reflection:
   daily_hour: 4                   # legacy rollback only (OMBRE_LEGACY_MEMORY_WRITES=1)
   daily_min_memory_items: 5        # legacy rollback only
   daily_conversation_turn_limit: 12 # legacy rollback only
-  daily_chat_memory_mode: review   # review = pending candidates; auto = write selected Gateway chat memories; off = disabled
-  daily_chat_memory_hour: 0        # organize the previous day's Gateway chats after local midnight
-  daily_chat_memory_turn_limit: 0  # 0 = use all raw_events for that date; >0 caps restored turns
-  daily_chat_memory_max_per_day: 10 # cap for selected long-term memory candidates
-  daily_chat_memory_min_confidence: 0.68 # auto-write threshold
-  daily_chat_memory_review_max_per_day: 10 # review mode can surface more candidates without auto-writing them
-  daily_chat_memory_review_min_confidence: 0.55 # lower review threshold; auto still uses daily_chat_memory_min_confidence
-  daily_chat_memory_summary_enabled: true       # first compress chat windows, then extract memory candidates
-  daily_chat_memory_summary_window_turns: 14    # overlapping context window so boundaries do not split causality
-  daily_chat_memory_summary_stride_turns: 7     # start a new summary window every N turns
-  daily_chat_memory_api_key_env: "" # optional; leave empty to use the dehydration model
-
-  daily_chat_memory_base_url: ""    # optional; set with api_key_env/model only for a separate daily-chat model
-  daily_chat_memory_timeout_seconds: 180
-  daily_chat_memory_summary_model: ""
-  daily_chat_memory_summary_max_tokens: 2200
-  daily_chat_memory_candidate_model: ""
-  daily_chat_memory_candidate_max_tokens: 3200
-  # Optional deployment-owned semantic cues. Keep project/topic vocab here,
-  # not in ReflectionEngine code. Example: {"Project X": ["project-x", "项目X"]}
-  daily_chat_memory_entity_hints: {}
-  daily_chat_memory_topic_hints: {}
   daily_activity_summary_enabled: true      # writes one "what happened today" item into portrait recent_timeline
-  daily_activity_summary_turn_limit: 0      # 0 = use all raw_events for that date; not sourced from auto-memory candidates
+  daily_activity_summary_turn_limit: 0      # 0 = use all raw_events for that date
   daily_activity_summary_max_tokens: 320
   persona_events_limit: 12         # selected and deduped; persona events supplement daily weather only
   persona_events_scan_limit: 80
@@ -712,7 +690,6 @@ reflection:
   #   OMBRE_REFLECTION_API_KEY
   #   OMBRE_REFLECTION_BASE_URL
   #   OMBRE_REFLECTION_MODEL
-  #   OMBRE_REFLECTION_CANDIDATE_MODEL
   #   OMBRE_DIARY_MCP_URL
   #   OMBRE_DIARY_MCP_TOKEN_ENV
 

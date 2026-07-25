@@ -14974,52 +14974,6 @@ async def api_reflection_run(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@mcp.custom_route("/api/daily-chat-memory/run", methods=["POST"])
-async def api_daily_chat_memory_run(request):
-    """Run daily Gateway chat memory extraction; review mode writes pending candidates only."""
-    from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    if not isinstance(body, dict):
-        body = {}
-    try:
-        result = await reflection_engine.run_daily_chat_memory(
-            bucket_mgr,
-            conversation_turn_store=gateway_state_store,
-            raw_event_store=raw_event_store,
-            persona_engine=persona_engine,
-            embedding_engine=embedding_engine,
-            key=str(body.get("date") or ""),
-            mode=str(body.get("mode") or ""),
-            force=_bool_value(body.get("force"), False),
-        )
-        try:
-            activity_date = str(body.get("date") or result.get("date") or "")
-            daily_impression = await _daily_impression_material_for_date(activity_date)
-            activity_result = await reflection_engine.run_daily_activity_summary(
-                conversation_turn_store=gateway_state_store,
-                raw_event_store=raw_event_store,
-                persona_engine=persona_engine,
-                daily_chat_memory_candidates=[
-                    item for item in (result.get("candidates") or []) if isinstance(item, dict)
-                ],
-                daily_impressions=[daily_impression] if daily_impression else [],
-                key=str(body.get("date") or ""),
-                force=_bool_value(body.get("force"), False),
-            )
-            result["daily_activity_summary"] = _store_daily_activity_summary_result(activity_result)
-        except Exception as activity_exc:
-            logger.warning("Daily activity summary side-run failed: %s", activity_exc)
-            result["daily_activity_summary"] = {"status": "error", "error": str(activity_exc)}
-        return JSONResponse(result)
-    except Exception as e:
-        logger.warning("Daily chat memory API failed: %s", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 def _store_daily_activity_summary_result(result: dict, portrait_engine_arg=None) -> dict:
@@ -15040,17 +14994,15 @@ def _store_daily_activity_summary_result(result: dict, portrait_engine_arg=None)
     return {**result, "status": "stored", "portrait": stored}
 
 
-def _daily_activity_materials_from_reflection_results(results: list[dict]) -> tuple[list[dict], list[dict]]:
-    candidates: list[dict] = []
+def _daily_activity_materials_from_reflection_results(results: list[dict]) -> list[dict]:
     daily_impressions: list[dict] = []
     for result in results or []:
         if not isinstance(result, dict):
             continue
-        candidates.extend(item for item in (result.get("candidates") or []) if isinstance(item, dict))
         daily_impression = result.get("daily_impression")
         if isinstance(daily_impression, dict):
             daily_impressions.append(daily_impression)
-    return candidates, daily_impressions
+    return daily_impressions
 
 
 async def _daily_impression_material_for_date(date_key: str, bucket_mgr_arg=None) -> dict:
@@ -15103,49 +15055,8 @@ async def api_daily_activity_summary_run(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@mcp.custom_route("/api/daily-chat-memory/pending", methods=["GET"])
-async def api_daily_chat_memory_pending(request):
-    """List pending daily chat memory candidates."""
-    from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-    params = request.query_params
-    items = reflection_engine.list_daily_chat_memory_pending(
-        status=str(params.get("status") or "pending"),
-        limit=_int_between(params.get("limit"), 50, 1, 200),
-    )
-    return JSONResponse({"status": "ok", "items": items})
 
 
-@mcp.custom_route("/api/daily-chat-memory/confirm", methods=["POST"])
-async def api_daily_chat_memory_confirm(request):
-    """Confirm or reject pending daily chat memory candidates."""
-    from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid json body"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "json body must be an object"}, status_code=400)
-    action = str(body.get("action") or "confirm").strip().lower()
-    required = "REJECT" if action == "reject" else "WRITE"
-    if body.get("confirm") != required:
-        return JSONResponse({"error": f"confirmation required: {required}"}, status_code=400)
-    ids = body.get("candidate_ids", [])
-    if not isinstance(ids, list) or not ids:
-        return JSONResponse({"error": "candidate_ids must be a non-empty list"}, status_code=400)
-    result = await reflection_engine.confirm_daily_chat_memory(
-        [str(item or "") for item in ids],
-        bucket_mgr,
-        embedding_engine=embedding_engine,
-        action=action,
-        edits=body.get("edits") if isinstance(body.get("edits"), dict) else None,
-    )
-    return JSONResponse(result)
 
 
 @mcp.custom_route("/dashboard", methods=["GET"])
@@ -15473,31 +15384,6 @@ async def api_config_get(request):
                 reflection_cfg.get(
                     "daily_activity_summary_max_tokens",
                     getattr(reflection_engine, "daily_activity_summary_max_tokens", 320),
-                )
-            ),
-            "daily_chat_memory_mode": str(
-                reflection_cfg.get(
-                    "daily_chat_memory_mode",
-                    getattr(reflection_engine, "daily_chat_memory_mode", "review"),
-                )
-                or "review"
-            ),
-            "daily_chat_memory_hour": int(
-                reflection_cfg.get(
-                    "daily_chat_memory_hour",
-                    getattr(reflection_engine, "daily_chat_memory_hour", 0),
-                )
-            ),
-            "daily_chat_memory_turn_limit": int(
-                reflection_cfg.get(
-                    "daily_chat_memory_turn_limit",
-                    getattr(reflection_engine, "daily_chat_memory_turn_limit", 0),
-                )
-            ),
-            "daily_chat_memory_max_per_day": int(
-                reflection_cfg.get(
-                    "daily_chat_memory_max_per_day",
-                    getattr(reflection_engine, "daily_chat_memory_max_per_day", 3),
                 )
             ),
             "model": getattr(reflection_engine, "model", reflection_cfg.get("model", "")),
@@ -16054,36 +15940,6 @@ async def api_config_update(request):
                 1000,
             )
             updated.append("reflection.daily_activity_summary_max_tokens")
-        if "daily_chat_memory_mode" in r:
-            mode = str(r.get("daily_chat_memory_mode") or "review").strip().lower()
-            if mode not in {"auto", "review", "off"}:
-                mode = "review"
-            reflection_cfg["daily_chat_memory_mode"] = mode
-            updated.append("reflection.daily_chat_memory_mode")
-        if "daily_chat_memory_hour" in r:
-            reflection_cfg["daily_chat_memory_hour"] = _int_between(
-                r.get("daily_chat_memory_hour"),
-                0,
-                0,
-                23,
-            )
-            updated.append("reflection.daily_chat_memory_hour")
-        if "daily_chat_memory_turn_limit" in r:
-            reflection_cfg["daily_chat_memory_turn_limit"] = _int_between(
-                r.get("daily_chat_memory_turn_limit"),
-                0,
-                0,
-                10000,
-            )
-            updated.append("reflection.daily_chat_memory_turn_limit")
-        if "daily_chat_memory_max_per_day" in r:
-            reflection_cfg["daily_chat_memory_max_per_day"] = _int_between(
-                r.get("daily_chat_memory_max_per_day"),
-                3,
-                0,
-                10,
-            )
-            updated.append("reflection.daily_chat_memory_max_per_day")
         if "thinking_mode" in r:
             thinking_mode = str(r.get("thinking_mode") or "").strip().lower()
             if thinking_mode not in {"", "enabled", "disabled"}:
@@ -16513,30 +16369,6 @@ async def api_config_update(request):
                         320,
                         80,
                         1000,
-                    )
-                if "daily_chat_memory_mode" in body["reflection"]:
-                    mode = str(body["reflection"].get("daily_chat_memory_mode") or "review").strip().lower()
-                    sc_reflection["daily_chat_memory_mode"] = mode if mode in {"auto", "review", "off"} else "review"
-                if "daily_chat_memory_hour" in body["reflection"]:
-                    sc_reflection["daily_chat_memory_hour"] = _int_between(
-                        body["reflection"].get("daily_chat_memory_hour"),
-                        0,
-                        0,
-                        23,
-                    )
-                if "daily_chat_memory_turn_limit" in body["reflection"]:
-                    sc_reflection["daily_chat_memory_turn_limit"] = _int_between(
-                        body["reflection"].get("daily_chat_memory_turn_limit"),
-                        0,
-                        0,
-                        10000,
-                    )
-                if "daily_chat_memory_max_per_day" in body["reflection"]:
-                    sc_reflection["daily_chat_memory_max_per_day"] = _int_between(
-                        body["reflection"].get("daily_chat_memory_max_per_day"),
-                        3,
-                        0,
-                        10,
                     )
                 if "thinking_mode" in body["reflection"]:
                     thinking_mode = str(body["reflection"].get("thinking_mode") or "").strip().lower()
@@ -16982,39 +16814,16 @@ if __name__ == "__main__":
                         80,
                         1000,
                     )
-                    mode = str(reflection_cfg.get("daily_chat_memory_mode") or "review").strip().lower()
-                    local_reflection_engine.daily_chat_memory_mode = (
-                        mode if mode in {"auto", "review", "off"} else "review"
-                    )
-                    local_reflection_engine.daily_chat_memory_hour = _int_between(
-                        reflection_cfg.get("daily_chat_memory_hour"),
-                        0,
-                        0,
-                        23,
-                    )
-                    local_reflection_engine.daily_chat_memory_turn_limit = _int_between(
-                        reflection_cfg.get("daily_chat_memory_turn_limit"),
-                        0,
-                        0,
-                        10000,
-                    )
-                    local_reflection_engine.daily_chat_memory_max_per_day = _int_between(
-                        reflection_cfg.get("daily_chat_memory_max_per_day"),
-                        3,
-                        0,
-                        10,
-                    )
                     results = await local_reflection_engine.run_due(
                         local_bucket_mgr,
                         local_persona_engine,
                         local_embedding_engine,
                         local_gateway_state_store,
-                        raw_event_store,
                     )
                     now_local = local_reflection_engine._local_now()
                     if (
                         getattr(local_reflection_engine, "daily_activity_summary_enabled", True)
-                        and now_local.hour >= local_reflection_engine.daily_chat_memory_hour
+                        and now_local.hour >= local_reflection_engine.daily_hour
                     ):
                         activity_date = (now_local - timedelta(days=1)).date().isoformat()
                         timeline_id = f"daily_activity_summary:{activity_date}"
@@ -17023,9 +16832,7 @@ if __name__ == "__main__":
                             source="daily_activity_summary",
                             timeline_id=timeline_id,
                         ):
-                            activity_candidates, activity_daily_impressions = (
-                                _daily_activity_materials_from_reflection_results(results)
-                            )
+                            activity_daily_impressions = _daily_activity_materials_from_reflection_results(results)
                             if not activity_daily_impressions:
                                 existing_daily_impression = await _daily_impression_material_for_date(
                                     activity_date,
@@ -17037,7 +16844,6 @@ if __name__ == "__main__":
                                 conversation_turn_store=local_gateway_state_store,
                                 raw_event_store=raw_event_store,
                                 persona_engine=local_persona_engine,
-                                daily_chat_memory_candidates=activity_candidates,
                                 daily_impressions=activity_daily_impressions,
                                 key=activity_date,
                             )
