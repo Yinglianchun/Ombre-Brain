@@ -10713,7 +10713,7 @@ async def close_window(
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """写下一篇窗影和想留下的记忆。date 必须填写 `YYYY-MM-DD`；shadow 可直接写在 `## 窗影` 下，或选用 `这一窗留给我的`、`我在想什么`、`关于你，关于我们`、`最近发生的事`、`还需要关心的事`。Scene 写在 `## 想留下的记忆` 下：`### scene | 标题 | cue：以后提到什么时召回`。idempotency_key 用于重试；rejected_draft_* 按失败响应填写；continue_scene_index 选择续接 Scene。"""
+    """写下一篇窗影和想留下的记忆。date 必须填写 `YYYY-MM-DD`；shadow 可直接写在 `## 窗影` 下，或选用 `这一窗留给我的`、`我在想什么`、`关于你，关于我们`、`最近发生的事`、`还需要关心的事`。Scene 写在 `## 想留下的记忆` 下：`### scene | 标题 | cue：一个召回入口 | cue：另一个召回入口`。idempotency_key 用于重试；rejected_draft_* 按失败响应填写；continue_scene_index 选择续接 Scene。"""
     _ = context
     authored_date = str(date or "").strip()
     try:

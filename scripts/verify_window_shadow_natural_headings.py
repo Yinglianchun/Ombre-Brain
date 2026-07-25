@@ -21,6 +21,7 @@ async def main() -> None:
     assert "date 必须填写 `YYYY-MM-DD`" in description
     assert "`## 窗影`" in description
     assert "`关于你，关于我们`" in description
+    assert "`### scene | 标题 | cue：一个召回入口 | cue：另一个召回入口`" in description
 
     diary_shadow = """
 ## 窗影
