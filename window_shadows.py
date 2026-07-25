@@ -48,11 +48,29 @@ def _normalize_heading(value: Any) -> str:
 
 def _section_key(heading: str) -> str:
     key = _normalize_heading(heading)
-    if "这一窗之后什么留在了我身上" in key or "什么留在了我身上" in key:
+    if key in {"窗影", "这篇窗影", "windowshadow", "shadow"}:
+        return "self"
+    if (
+        "这一窗之后什么留在了我身上" in key
+        or "这窗之后什么留在了我身上" in key
+        or "什么留在了我身上" in key
+        or "这一窗留给我的" in key
+        or "这窗留给我的" in key
+        or "这一窗留下的" in key
+        or "这窗留下的" in key
+        or "这一窗留下了什么" in key
+        or "这窗留下了什么" in key
+    ):
         return "self"
     if "我是谁" in key or key in {"self", "identity", "myself"}:
         return "self"
-    if "思考与声音" in key or "思考和声音" in key:
+    if (
+        "思考与声音" in key
+        or "思考和声音" in key
+        or "我在想什么" in key
+        or "我是怎么想的" in key
+        or key in {"我的想法", "我的思绪"}
+    ):
         return "voice"
     if "怎么思考" in key or "怎么说话" in key or "语言的指纹" in key:
         return "voice"
@@ -79,6 +97,11 @@ def _section_key(heading: str) -> str:
         return "handoff"
     if "想留下的记忆" in key or "重要时刻" in key or "难忘时刻" in key or "重要场景" in key:
         return "moments"
+    if (
+        key in {"关于你关于我们", "关于我们", "我眼里的你和我们"}
+        or (key.startswith("关于") and "我们" in key)
+    ):
+        return "relationship"
     if "我对" in key and "我们" in key and ("新懂" in key or "理解" in key):
         return "relationship"
     if "我们之间是什么" in key or ("是谁" in key and "我们" in key):
