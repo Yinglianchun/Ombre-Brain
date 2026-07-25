@@ -293,54 +293,63 @@ def _scene_heading_metadata(heading: str) -> tuple[str, list[str], list[str]]:
     )
     if not match:
         return "", [], [
-            "必须写成 `### scene | 标题：… | cue：…`",
+            "必须写成 `### scene | 标题 | cue：…`",
         ]
     title = ""
     cues = []
     seen = set()
     errors = []
-    for raw in re.split(r"[|｜]+", match.group(1)):
+    for position, raw in enumerate(re.split(r"[|｜]+", match.group(1))):
         token = re.sub(r"\s+", " ", raw).strip(
             " \t\r\n-—*•"
         )
         title_match = re.match(
-            r"^(?:title|标题|名字|名称)\s*[:：=]\s*(.+)$",
+            r"^(?:title|标题|名字|名称)\s*[:：=]\s*(.*)$",
             token,
             flags=re.IGNORECASE,
         )
         if title_match:
             value = title_match.group(1).strip()
             if title:
-                errors.append("只能写一个 `标题：…`")
+                errors.append("只能写一个标题")
             elif not value:
-                errors.append("`标题：` 后不能为空")
+                errors.append("标题不能为空")
             elif len(value) > 48:
                 errors.append("标题不能超过 48 个字符")
             else:
                 title = value
             continue
         cue_match = re.match(
-            r"^cue\s*[:：=]\s*(.+)$",
+            r"^cue\s*[:：=]\s*(.*)$",
             token,
             flags=re.IGNORECASE,
         )
-        if not cue_match:
-            errors.append(
-                f"`{token}` 必须显式写成 `标题：…` 或 `cue：…`"
+        if cue_match:
+            cue = cue_match.group(1).strip(
+                " \t\r\n-—*•、，,。.!！?？:：;；\"'“”‘’"
             )
+            key = re.sub(r"[\s\W_]+", "", cue.lower())
+            if len(key) < 2 or key in seen:
+                continue
+            seen.add(key)
+            cues.append(cue[:80].rstrip())
+            if len(cues) >= 8:
+                break
             continue
-        cue = cue_match.group(1).strip(
-            " \t\r\n-—*•、，,。.!！?？:：;；\"'“”‘’"
-        )
-        key = re.sub(r"[\s\W_]+", "", cue.lower())
-        if len(key) < 2 or key in seen:
+        if position == 0 and not title:
+            if not token:
+                errors.append("标题不能为空")
+            elif len(token) > 48:
+                errors.append("标题不能超过 48 个字符")
+            else:
+                title = token
             continue
-        seen.add(key)
-        cues.append(cue[:80].rstrip())
-        if len(cues) >= 8:
-            break
+        if token:
+            errors.append(
+                f"标题后的 `{token}` 必须写成 `cue：…`"
+            )
     if not title:
-        errors.append("缺少当前作者写的 `标题：…`")
+        errors.append("缺少当前作者写的标题")
     if not cues:
         errors.append("缺少至少一个当前作者写的 `cue：…`")
     return title, cues, errors

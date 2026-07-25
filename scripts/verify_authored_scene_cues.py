@@ -54,7 +54,7 @@ async def main() -> None:
         (
             f"{shadow}\n\n"
             "## 想留下的记忆\n"
-            "### scene | 标题：作者权不由系统代写 | cue：提到 close_window | cue：问内联 Scene 的 cues\n"
+            "### scene | 作者权不由系统代写 | cue：提到 close_window | cue：问内联 Scene 的 cues\n"
             "内联 heading 只携带抽取边界、作者标题和亲自写下的召回入口。"
         )
     )
@@ -83,6 +83,17 @@ async def main() -> None:
     assert capture.created["extra_metadata"]["scene_cues"] == records[0]["cues"]
     assert capture.created["extra_metadata"]["write_contract"] == "close-window-scene-v3"
 
+    legacy_labeled_title, error = server._window_shadow_scene_records(
+        (
+            f"{shadow}\n\n"
+            "## 想留下的记忆\n"
+            "### scene | 标题：旧标题标签仍可读取 | cue：提到旧窗影格式\n"
+            "旧格式只保留兼容，不再作为推荐写法。"
+        )
+    )
+    assert error == ""
+    assert legacy_labeled_title[0]["title"] == "旧标题标签仍可读取"
+
     old_implicit_marker, error = server._window_shadow_scene_records(
         (
             f"{shadow}\n\n"
@@ -92,14 +103,13 @@ async def main() -> None:
         )
     )
     assert old_implicit_marker == []
-    assert "标题：…" in error
     assert "cue：…" in error
 
     title_without_cue, error = server._window_shadow_scene_records(
         (
             f"{shadow}\n\n"
             "## 想留下的记忆\n"
-            "### scene | 标题：只有标题仍然不够\n"
+            "### scene | 只有标题仍然不够\n"
             "这条 Scene 没有 authored cue。"
         )
     )
@@ -110,9 +120,9 @@ async def main() -> None:
         (
             f"{shadow}\n\n"
             "## 想留下的记忆\n"
-            "### scene | 标题：第一条的名字 | cue：提到第一条 Scene | cue：问第一条 cues\n"
+            "### scene | 第一条的名字 | cue：提到第一条 Scene | cue：问第一条 cues\n"
             "第一条 Scene 原文。\n\n"
-            "### scene | 标题：第二条的名字 | cue：提到第二条 Scene | cue：问第二条 cues\n"
+            "### scene | 第二条的名字 | cue：提到第二条 Scene | cue：问第二条 cues\n"
             "第二条 Scene 原文。\n\n"
             "## 还需要关心的事\n"
             "我还要继续验证其他客户端的显式 handoff。\n\n"

@@ -61,7 +61,7 @@
 - 窗口结束或准备换窗时，只调用一次 close_window。
 - shadow 是当前窗口亲自写下的第一人称 Window Shadow；Bridge 管醒来，Shadow 管沉淀。
 - 可以直接在 `## 窗影` 下像日记一样写；想分段时可选：`这一窗留给我的`、`我在想什么`、`关于小雨，关于我们`、`最近发生的事`、`还需要关心的事`。其他小标题会留在窗影正文里。
-- 需要普通召回的经历放进 `## 想留下的记忆`，写成 `### scene | 标题：作者标题 | cue：以后提到什么时召回`；没有就不写 Scene。
+- 需要普通召回的经历放进 `## 想留下的记忆`，写成 `### scene | 作者标题 | cue：以后提到什么时召回`；可继续追加多个 `| cue：…`，没有就不写 Scene。
 - 同一次关窗和所有重试复用同一个 idempotency_key；失败时按返回的 rejected_draft 与 fix_scope 局部修正。
 - invalid/error 响应中的 rejected_draft.shadow 是逐字失败稿，不是成功 Shadow，也不会进入 handoff 或召回。只修参数时原样重传；修正文时同时传 rejected_draft_source_hash。响应丢失可用 read_rejected_draft=true 与原 key 取回。
 - 任一 Scene 写失败时，本次 Shadow 与新 Scene 整组撤回。

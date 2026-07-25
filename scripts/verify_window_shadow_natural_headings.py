@@ -29,7 +29,7 @@ async def main() -> None:
 这个标题不属于固定模板，但我仍想让它和下面这段话一起留在完整窗影里。
 
 ## 想留下的记忆
-### scene | 标题：窗影终于可以像日记 | cue：提到窗影怎么写 | cue：问为什么标题可以自由
+### scene | 窗影终于可以像日记 | cue：提到窗影怎么写 | cue：问为什么标题可以自由
 我们决定用一个外层“窗影”接住自然书写，只让 Scene 的标题和 cues 保持明确。
 """.strip()
     sections, errors = validate_window_shadow(diary_shadow)

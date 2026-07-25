@@ -10260,7 +10260,7 @@ def _window_shadow_scene_records(
         if not scene_title:
             return [], (
                 f"Scene {index} 缺少 authored title："
-                "请在标记中写 `标题：…`，系统不会从正文补造。"
+                "请把标题写在 `scene |` 后的第一个字段，系统不会从正文补造。"
             )
         scene_cues = _authored_scene_cues(record.get("cues"))
         if not scene_cues:
@@ -10714,7 +10714,7 @@ async def close_window(
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """写下一篇窗影和想留下的记忆。shadow 可直接写在 `## 窗影` 下；分段可选标题：`这一窗留给我的`、`我在想什么`、`关于你，关于我们`、`最近发生的事`、`还需要关心的事`。Scene 写在 `## 想留下的记忆` 下：`### scene | 标题：作者标题 | cue：以后提到什么时召回`。date/source 填来源；idempotency_key 用于重试；rejected_draft_* 按失败响应填写；continue_scene_index 选择续接 Scene。"""
+    """写下一篇窗影和想留下的记忆。shadow 可直接写在 `## 窗影` 下；分段可选标题：`这一窗留给我的`、`我在想什么`、`关于你，关于我们`、`最近发生的事`、`还需要关心的事`。Scene 写在 `## 想留下的记忆` 下：`### scene | 标题 | cue：以后提到什么时召回`。date/source 填来源；idempotency_key 用于重试；rejected_draft_* 按失败响应填写；continue_scene_index 选择续接 Scene。"""
     _ = context
     return await _close_window_commit(
         shadow,
