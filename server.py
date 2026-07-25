@@ -10705,23 +10705,36 @@ async def _close_window_commit(
 @mcp.tool()
 async def close_window(
     shadow: str,
+    date: str,
     rejected_draft_section_patch: CloseWindowShadowPatchInput | None = None,
-    date: str = "",
-    source: str = "",
     idempotency_key: str = "",
     rejected_draft_source_hash: str = "",
     read_rejected_draft: bool = False,
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """写下一篇窗影和想留下的记忆。shadow 可直接写在 `## 窗影` 下；分段可选标题：`这一窗留给我的`、`我在想什么`、`关于你，关于我们`、`最近发生的事`、`还需要关心的事`。Scene 写在 `## 想留下的记忆` 下：`### scene | 标题 | cue：以后提到什么时召回`。date/source 填来源；idempotency_key 用于重试；rejected_draft_* 按失败响应填写；continue_scene_index 选择续接 Scene。"""
+    """写下一篇窗影和想留下的记忆。date 必须填写 `YYYY-MM-DD`；shadow 可直接写在 `## 窗影` 下，或选用 `这一窗留给我的`、`我在想什么`、`关于你，关于我们`、`最近发生的事`、`还需要关心的事`。Scene 写在 `## 想留下的记忆` 下：`### scene | 标题 | cue：以后提到什么时召回`。idempotency_key 用于重试；rejected_draft_* 按失败响应填写；continue_scene_index 选择续接 Scene。"""
     _ = context
+    authored_date = str(date or "").strip()
+    try:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", authored_date):
+            raise ValueError
+        datetime.strptime(authored_date, "%Y-%m-%d")
+    except ValueError:
+        return {
+            "status": "invalid",
+            "reason": "invalid_date",
+            "error": "date 必须填写有效的 YYYY-MM-DD。",
+            "canonical": False,
+            "ordinary_recall": False,
+            "rejected_draft_saved": False,
+        }
     return await _close_window_commit(
         shadow,
         rejected_draft_section_patch=rejected_draft_section_patch,
         continue_scene_index=continue_scene_index,
-        date=date,
-        source=source,
+        date=authored_date,
+        source="",
         idempotency_key=idempotency_key,
         rejected_draft_source_hash=rejected_draft_source_hash,
         read_rejected_draft=read_rejected_draft,

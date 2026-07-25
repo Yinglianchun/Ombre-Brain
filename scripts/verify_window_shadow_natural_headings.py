@@ -18,6 +18,7 @@ async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
     description = str(tools["close_window"].description or "")
     assert description.startswith("写下一篇窗影和想留下的记忆。")
+    assert "date 必须填写 `YYYY-MM-DD`" in description
     assert "`## 窗影`" in description
     assert "`关于你，关于我们`" in description
 

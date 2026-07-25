@@ -34,12 +34,21 @@ async def main() -> None:
     close_properties = close_schema["properties"]
 
     assert "cues" in write_schema["required"]
+    assert "date" in close_schema["required"]
+    assert "source" not in close_properties
     assert "scenes" not in close_properties
     assert "session_id" not in close_properties
     assert "profile_id" not in close_properties
     assert "CloseWindowSceneInput" not in close_schema.get("$defs", {})
     assert server._authored_scene_cues("") == []
     assert server._authored_scene_cues("提到 authored cues") == ["提到 authored cues"]
+
+    invalid_date = await server.close_window(
+        "## 窗影\n我不会让没有日期的窗影落库。",
+        date="",
+    )
+    assert invalid_date["reason"] == "invalid_date"
+    assert invalid_date["rejected_draft_saved"] is False
 
     server.decay_engine = _NoopDecay()
     rejected = await server._write_scene_memory(

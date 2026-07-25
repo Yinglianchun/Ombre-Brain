@@ -96,7 +96,7 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 Bridge 的换窗路径不调用 Ombre handoff。其他客户端需要交接时显式调用 `recall(mode="handoff")`：优先读取最新窗影亲写的最近事件，可附带还需要关心的事；旧窗影的 handoff note 只作兼容。最新窗影没有事件层时，才读取 72 小时内的后台 Recent Continuity，并明确标成 generated fallback；再失败才返回少量 raw_events 原文。生成 fallback 不写回 canonical Shadow、Scene 或普通召回。handoff 调用本身不现场请求模型，显式 Scene 也不会重复塞进交接包；只有裸“继续吧”会按 `continue_scene_id` 精确读取一条 Scene。
 
-已经写好的第一人称窗影 Markdown 可以通过 `close_window(source="markdown_import")` 无损导入。导入路径只产生 handoff 投影，不从旧摘要补造普通 Scene。
+旧窗影 Markdown 导入只保留在内部兼容路径，不属于日常 `close_window` 工具。
 
 `profile_fact` 是可搜索的事实目录，不是普通记忆：它不进入普通候选、扩散或 handoff。显式事实问题命中 Fact 后，系统沿 evidence 返回 canonical Scene。后台模型生成的 tags / cues / importance / confidence 只写入 `metadata_proposals.sqlite`；独立 Scene linker 的关系提案与正式 `scene_edges` 都在 `scene_edge_proposals.sqlite`，和旧 `memory_edges.jsonl` 分离。提案可通过 `scene_edge_proposals` 只读查看；只有逐条显式确认的 `review_scene_edge_proposal` 会在重新校验两端 Scene hash、active 状态与逐字证据后，原子晋升为正式 Scene 边。没有批量自动转正。
 
