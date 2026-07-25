@@ -12473,15 +12473,15 @@ async def read_diary(
 
 @mcp.tool()
 async def write_diary(
-    content: str,
+    content: str = "",
     title: str = "",
     date: str = "",
     emotion_tags: list[str] | None = None,
     unlock_at: str = "",
 ) -> dict:
-    """写一篇日记。content 写正文；title、date、emotion_tags 可选；unlock_at 填未来的 ISO-8601 时间时写成暗房日记。"""
+    """写一篇日记。传 unlock_at 时写成上锁日记；content 为空时只关门，不创建日记。"""
     try:
-        return diary_store.create(
+        return diary_store.write(
             content=content,
             title=title or None,
             date=date,

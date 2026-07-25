@@ -203,6 +203,17 @@ class DiaryStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS darkroom_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    locked_at TEXT NOT NULL,
+                    unlock_at TEXT NOT NULL,
+                    diary_id INTEGER,
+                    FOREIGN KEY (diary_id) REFERENCES diaries (id) ON DELETE SET NULL
+                )
+                """
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_date ON diaries(date)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_diary_id ON comments(diary_id)")
             conn.execute(
@@ -216,6 +227,10 @@ class DiaryStore:
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_diaries_source_id "
                 "ON diaries(source_id) WHERE source_id != ''"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_darkroom_sessions_unlock "
+                "ON darkroom_sessions(unlock_at DESC, id DESC)"
             )
 
     @staticmethod
@@ -292,8 +307,9 @@ class DiaryStore:
         item.pop("deleted_at", None)
         return item
 
-    def create(
+    def _create_with_connection(
         self,
+        conn: sqlite3.Connection,
         *,
         content: str,
         date: str = "",
@@ -335,44 +351,176 @@ class DiaryStore:
         tags_json = json.dumps(_normalize_tags(emotion_tags), ensure_ascii=False)
         metadata_json = json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True)
 
+        if safe_source_id:
+            existing = conn.execute(
+                "SELECT * FROM diaries WHERE source_id = ?",
+                (safe_source_id,),
+            ).fetchone()
+            if existing:
+                result = self._public_entry(conn, existing)
+                result["status"] = "exists"
+                return result
+        cursor = conn.execute(
+            """
+            INSERT INTO diaries (
+                date, title, content, author, emotion_tags,
+                created_at, updated_at, entry_type, visibility,
+                unlock_at, revision, source_id, metadata, deleted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, '')
+            """,
+            (
+                safe_date,
+                str(title).strip() if title is not None else None,
+                text,
+                safe_author,
+                tags_json,
+                safe_created_at,
+                safe_created_at,
+                safe_type,
+                safe_visibility,
+                safe_unlock_at,
+                safe_source_id,
+                metadata_json,
+            ),
+        )
+        diary_id = int(cursor.lastrowid)
+        row = conn.execute("SELECT * FROM diaries WHERE id = ?", (diary_id,)).fetchone()
+        result = self._public_entry(conn, row)
+        result["status"] = "created"
+        return result
+
+    def create(
+        self,
+        *,
+        content: str,
+        date: str = "",
+        title: str | None = None,
+        emotion_tags: Iterable[str] | None = None,
+        author: str = "ai",
+        unlock_at: str = "",
+        entry_type: str = "",
+        visibility: str = "active",
+        source_id: str = "",
+        metadata: dict[str, Any] | None = None,
+        created_at: str = "",
+        allow_past_unlock_at: bool = False,
+        preserve_content: bool = False,
+    ) -> dict[str, Any]:
         with self._lock, self._connection() as conn:
-            if safe_source_id:
-                existing = conn.execute(
-                    "SELECT * FROM diaries WHERE source_id = ?",
-                    (safe_source_id,),
-                ).fetchone()
-                if existing:
-                    result = self._public_entry(conn, existing)
-                    result["status"] = "exists"
-                    return result
-            cursor = conn.execute(
-                """
-                INSERT INTO diaries (
-                    date, title, content, author, emotion_tags,
-                    created_at, updated_at, entry_type, visibility,
-                    unlock_at, revision, source_id, metadata, deleted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, '')
-                """,
-                (
-                    safe_date,
-                    str(title).strip() if title is not None else None,
-                    text,
-                    safe_author,
-                    tags_json,
-                    safe_created_at,
-                    safe_created_at,
-                    safe_type,
-                    safe_visibility,
-                    safe_unlock_at,
-                    safe_source_id,
-                    metadata_json,
-                ),
+            return self._create_with_connection(
+                conn,
+                content=content,
+                date=date,
+                title=title,
+                emotion_tags=emotion_tags,
+                author=author,
+                unlock_at=unlock_at,
+                entry_type=entry_type,
+                visibility=visibility,
+                source_id=source_id,
+                metadata=metadata,
+                created_at=created_at,
+                allow_past_unlock_at=allow_past_unlock_at,
+                preserve_content=preserve_content,
             )
-            diary_id = int(cursor.lastrowid)
-            row = conn.execute("SELECT * FROM diaries WHERE id = ?", (diary_id,)).fetchone()
-            result = self._public_entry(conn, row)
-            result["status"] = "created"
-            return result
+
+    @staticmethod
+    def _close_darkroom_with_connection(
+        conn: sqlite3.Connection,
+        *,
+        unlock_at: str,
+        diary_id: int | None = None,
+    ) -> dict[str, Any]:
+        safe_unlock_at = _normalize_unlock_at(unlock_at)
+        if not safe_unlock_at:
+            raise ValueError("unlock_at is required to close the darkroom")
+        if datetime.fromisoformat(safe_unlock_at) <= _now():
+            raise ValueError("unlock_at must be in the future")
+        locked_at = _now_iso()
+        cursor = conn.execute(
+            """
+            INSERT INTO darkroom_sessions (locked_at, unlock_at, diary_id)
+            VALUES (?, ?, ?)
+            """,
+            (locked_at, safe_unlock_at, int(diary_id) if diary_id is not None else None),
+        )
+        return {
+            "session_id": int(cursor.lastrowid),
+            "locked": True,
+            "locked_at": locked_at,
+            "unlock_at": safe_unlock_at,
+            "diary_id": int(diary_id) if diary_id is not None else None,
+        }
+
+    def write(
+        self,
+        *,
+        content: str = "",
+        date: str = "",
+        title: str | None = None,
+        emotion_tags: Iterable[str] | None = None,
+        author: str = "ai",
+        unlock_at: str = "",
+    ) -> dict[str, Any]:
+        has_content = bool(str(content or "").strip())
+        has_lock = bool(str(unlock_at or "").strip())
+        if not has_content and not has_lock:
+            raise ValueError("content or unlock_at is required")
+
+        with self._lock, self._connection() as conn:
+            diary: dict[str, Any] | None = None
+            if has_content:
+                diary = self._create_with_connection(
+                    conn,
+                    content=content,
+                    date=date,
+                    title=title,
+                    emotion_tags=emotion_tags,
+                    author=author,
+                    unlock_at=unlock_at,
+                )
+            if not has_lock:
+                return diary or {}
+
+            door = self._close_darkroom_with_connection(
+                conn,
+                unlock_at=unlock_at,
+                diary_id=int(diary["id"]) if diary and diary.get("id") is not None else None,
+            )
+            if diary is None:
+                return {
+                    "status": "door_locked",
+                    "entry_type": "darkroom",
+                    "diary_created": False,
+                    **door,
+                }
+            diary["darkroom_session"] = door
+            return diary
+
+    def darkroom_status(self) -> dict[str, Any]:
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT id, locked_at, unlock_at, diary_id
+                FROM darkroom_sessions
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return {"status": "ok", "locked": False}
+        item = dict(row)
+        unlock_at = datetime.fromisoformat(str(item["unlock_at"]).replace("Z", "+00:00"))
+        if unlock_at.tzinfo is None:
+            unlock_at = unlock_at.replace(tzinfo=LOCAL_TZ)
+        return {
+            "status": "ok",
+            "session_id": int(item["id"]),
+            "locked": _now() < unlock_at.astimezone(LOCAL_TZ),
+            "locked_at": str(item["locked_at"]),
+            "unlock_at": str(item["unlock_at"]),
+            "diary_id": int(item["diary_id"]) if item["diary_id"] is not None else None,
+        }
 
     def read(
         self,
