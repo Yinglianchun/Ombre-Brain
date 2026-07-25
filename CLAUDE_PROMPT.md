@@ -22,7 +22,7 @@
 | `write_diary` | 原样写日记；带 `unlock_at` 时写暗房日记 |
 | `revise_diary` | 修改日记并保留上一版快照 |
 | `delete_diary` | 软删除精确 ID 的日记 |
-| `comment_diary` | 以 Haven 身份给日记追加评论 |
+| `comment_diary` | 给日记追加你的评论 |
 
 MCP 只注册以上十五个动作。旧桶、旧字段和旧读取投影继续兼容，但历史 MCP 工具名与旧 Diary MCP 的 `get/search/update/add_user_comment` 已经退役。
 
@@ -60,7 +60,7 @@ MCP 只注册以上十五个动作。旧桶、旧字段和旧读取投影继续�
 - `write_diary` 逐字保存作者正文；传 `unlock_at` 时写成 `entry_type=darkroom`。
 - 暗房时间锁结束前不返回正文或评论，也不可修改、删除或评论，没有确认词或密码绕过。
 - `revise_diary` 保留上一版快照；`delete_diary` 需要精确 ID 与 `confirm="DELETE"`，且为可恢复软删除。
-- 用户评论只由前端 HTTP 路径写入；MCP 只提供 Haven 的 `comment_diary`。
+- 用户评论只由前端 HTTP 路径写入；MCP 只提供你的 `comment_diary`。
 - Diary/Darkroom 都不进入普通 Scene candidate、gate、embedding recall 或扩散。
 
 ## 关闭窗口
@@ -76,7 +76,7 @@ MCP 只注册以上十五个动作。旧桶、旧字段和旧读取投影继续�
 
 ## Narrative Roll
 
-- `publish_narrative` 只保存当前 Haven 已审阅的完整第一人称 Markdown，不调用模型改写。
+- `publish_narrative` 只保存你已审阅的完整第一人称 Markdown，不调用模型改写。
 - 每卷至少引用两条 active canonical Scene，并在 document 的来源账中包含逐字正文 hash。
 - `expected_revision=0` 创建；修订必须传当前 revision。
 - `query_cues` 属于该卷自己的审阅后路由数据，不建立全局主题词表。

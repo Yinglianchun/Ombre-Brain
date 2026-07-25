@@ -11465,7 +11465,7 @@ async def dream() -> str:
 # 工具 5.8：import_diary_source — 无损日记证据快照
 # =============================================================
 async def import_diary_source(date: str, title: str = "") -> dict:
-    """从 Haven-Diary 读取一篇日记，并逐字保存为不可变 source_record。只在需要给 Scene、Annotation 或 Narrative Roll 补逐字证据时调用；不会调用模型、不会脱水或改写、不会生成普通记忆，也不参与普通召回。相同正文重复导入会幂等返回原记录；日记正文发生修订时会新建 snapshot，保留旧版并用 supersedes_source_record_id 串联。date 必须为 YYYY-MM-DD；同日多篇时传精确 title。"""
+    """从已配置的日记后端读取一篇日记，并逐字保存为不可变 source_record。只在需要给 Scene、Annotation 或 Narrative Roll 补逐字证据时调用；不会调用模型、不会脱水或改写、不会生成普通记忆，也不参与普通召回。相同正文重复导入会幂等返回原记录；日记正文发生修订时会新建 snapshot，保留旧版并用 supersedes_source_record_id 串联。date 必须为 YYYY-MM-DD；同日多篇时传精确 title。"""
     safe_date = str(date or "").strip()
     safe_title = str(title or "").strip()
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", safe_date):

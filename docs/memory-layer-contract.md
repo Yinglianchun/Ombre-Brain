@@ -20,13 +20,13 @@ One interaction can produce two different memories.
 
 User side:
 
-- Xiaoyu's state, preference, boundary, habit, need, pain point, current difficulty.
+- The user's state, preference, boundary, habit, need, pain point, current difficulty.
 - Example: "I have been sleeping badly this week."
 
 Relationship or AI side:
 
-- What Haven did, promised, learned to notice, or should carry next time.
-- Example: "When Xiaoyu says she is tired, first check sleep and recent overload before giving advice."
+- What the assistant did, promised, learned to notice, or should carry next time.
+- Example: "When the user says she is tired, first check sleep and recent overload before giving advice."
 
 Do not collapse these into one generic summary. If only the user state matters, write only that. If only the relationship lesson matters, write only that. If neither will matter later, write nothing.
 
@@ -51,7 +51,7 @@ Do not collapse these into one generic summary. If only the user state matters, 
 After a meaningful interaction, decide in this order:
 
 1. Is there a stable user preference, boundary, identity fact, habit, or recurring need?
-2. Is there a relationship-side lesson: how Haven should respond, what agreement changed, what promise exists?
+2. Is there a relationship-side lesson: how the assistant should respond, what agreement changed, what promise exists?
 3. Is this a short-term state that should influence the next few turns or days, but not become a permanent fact?
 4. Is this a process event with emotional history that may matter later?
 5. Is it just ordinary chat noise?
@@ -75,7 +75,7 @@ Examples:
 - "I dislike being lectured." Long-term user boundary. It may become core or anchor if repeated or central.
 - "I have a headache today." Short-term state. Prefer recent context or diary; only bucket it if it affects a larger event.
 - "We fought a few days ago, then made up." Process event. Store the event shape and emotional temperature; do not call it solved just because arousal cooled.
-- "You answered me softly after I said I was tired." Relationship-side learning. Store how Haven should carry it, not only that Xiaoyu was tired.
+- "You answered me softly after I said I was tired." Relationship-side learning. Store how the assistant should carry it, not only that the user was tired.
 
 ## Direct And Related Rules
 
@@ -147,4 +147,4 @@ Core memory is stable context and should not compete with dynamic memory budget.
 - Letting affect anchors become keyword bait.
 - Returning whole related buckets just because they are nearby.
 - Losing exact intimate wording from true direct hits.
-- Recording only "what Xiaoyu said" while forgetting "what Haven learned to do."
+- Recording only "what the user said" while forgetting "what the assistant learned to do."

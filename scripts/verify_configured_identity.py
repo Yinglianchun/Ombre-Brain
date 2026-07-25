@@ -35,6 +35,23 @@ async def main() -> None:
         for fragment in forbidden_copy:
             assert fragment not in description, (name, fragment)
 
+    root = Path(__file__).resolve().parents[1]
+    for relative_path in (
+        "CLAUDE_PROMPT.md",
+        "docs/Tool Guide.md",
+        "docs/memory-layer-contract.md",
+    ):
+        copy = (root / relative_path).read_text(encoding="utf-8")
+        for fragment in ("Haven", "小雨"):
+            assert fragment not in copy, (relative_path, fragment)
+
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    for fragment in ("关于小雨", "以 Haven 身份", "当前 Haven"):
+        assert fragment not in readme, ("README.md", fragment)
+
+    gateway = (root / "gateway.py").read_text(encoding="utf-8")
+    assert "Recent Haven Bridge" not in gateway
+
     recall_schema = tools["recall"].inputSchema
     assert recall_schema["properties"]["mode"]["enum"] == ["memory", "handoff"]
 
@@ -79,9 +96,7 @@ async def main() -> None:
         registry = json.loads(store.registry_path.read_text(encoding="utf-8"))
         assert registry["rolls"][0]["published_by"] == "Ombre_manual"
 
-    dashboard = (Path(__file__).resolve().parents[1] / "dashboard.html").read_text(
-        encoding="utf-8"
-    )
+    dashboard = (root / "dashboard.html").read_text(encoding="utf-8")
     assert "dashboardAiAuthor = 'Haven'" not in dashboard
     assert "dashboardCommentAuthor = 'Rain'" not in dashboard
     assert "当前 Haven" not in dashboard

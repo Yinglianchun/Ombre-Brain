@@ -8252,7 +8252,7 @@ class GatewayService:
             return "", debug
 
         lines = [
-            "Recent Haven Bridge raw chat snippets for an explicit Codex/Bridge/room just-now reference. "
+            "Recent Bridge raw chat snippets for an explicit Codex/Bridge/room just-now reference. "
             "These are original mirrored messages; do not substitute current API-session turns."
         ]
         for event in reversed(selected):

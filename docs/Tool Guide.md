@@ -18,7 +18,7 @@
 - `write_diary`：原样写日记；带 `unlock_at` 时写暗房日记。
 - `revise_diary`：修改日记并保存上一版快照。
 - `delete_diary`：确认后软删除精确 ID 的日记。
-- `comment_diary`：以 Haven 身份追加日记评论。
+- `comment_diary`：追加你的日记评论。
 
 旧桶格式、旧 Scene 投影和 Dashboard/internal HTTP 路径仍可兼容读取；旧 MCP 工具名已经退役，不能通过环境变量重新打开。
 
@@ -70,7 +70,7 @@
 - 用户日记、整段聊天和批量摘要不属于 Window Shadow。
 
 叙事卷：
-- publish_narrative 只保存当前 Haven 已审阅的完整第一人称 Markdown。
+- publish_narrative 只保存你已审阅的完整第一人称 Markdown。
 - 每卷至少引用两条 canonical Scene，并在 document 的来源账中包含逐字正文 hash。
 - expected_revision=0 创建；修订必须传当前 revision。
 - query_cues 属于该卷自己的审阅后路由数据，不建立全局主题词表。
