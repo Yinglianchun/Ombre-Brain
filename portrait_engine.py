@@ -201,7 +201,7 @@ class DailyPortraitMaintainer:
         )
         self.model = (
             portrait_model
-            or dehy_cfg.get("model", "deepseek-chat")
+            or dehy_cfg.get("model", "deepseek-v4-flash")
             or reflection_cfg.get("model")
             or persona_cfg.get("model")
         )

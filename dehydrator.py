@@ -260,8 +260,8 @@ class Dehydrator:
         # --- Read dehydration API config / 读取脱水 API 配置 ---
         dehy_cfg = config.get("dehydration", {})
         self.api_key = dehy_cfg.get("api_key", "")
-        self.model = dehy_cfg.get("model", "deepseek-chat")
-        self.base_url = dehy_cfg.get("base_url", "https://api.deepseek.com/v1")
+        self.model = dehy_cfg.get("model", "deepseek-v4-flash")
+        self.base_url = dehy_cfg.get("base_url", "https://api.deepseek.com")
         self.thinking_mode = self._normalize_thinking_mode(dehy_cfg.get("thinking_mode", ""))
         self.max_tokens = dehy_cfg.get("max_tokens", 1024)
         self.temperature = dehy_cfg.get("temperature", 0.1)

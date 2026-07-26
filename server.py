@@ -15502,7 +15502,7 @@ async def api_config_update(request):
             env_updates["OMBRE_API_KEY"] = str(d["api_key"])
             updated.append("dehydration.api_key")
         # Hot-reload dehydrator
-        dehydrator.model = dehy.get("model", "deepseek-chat")
+        dehydrator.model = dehy.get("model", "deepseek-v4-flash")
         dehydrator.base_url = dehy.get("base_url", "")
         dehydrator.api_key = dehy.get("api_key", "")
         normalize_thinking = getattr(dehydrator, "_normalize_thinking_mode", None)

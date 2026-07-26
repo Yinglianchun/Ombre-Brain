@@ -12,7 +12,7 @@ services:
       - key: OMBRE_API_KEY
         sync: false          # Set in Render dashboard > Environment (any OpenAI-compatible key)
       - key: OMBRE_BASE_URL
-        sync: false          # e.g. https://api.deepseek.com/v1 or https://api.siliconflow.cn/v1
+        sync: false          # e.g. https://api.deepseek.com or https://api.siliconflow.cn/v1
       - key: OMBRE_BUCKETS_DIR
         value: /opt/render/project/src/buckets
     disk:

@@ -122,10 +122,14 @@ class PersonaStateEngine:
         self.enabled = bool(self.persona_cfg.get("enabled", True))
         self.profile_id = self.persona_cfg.get("profile_id", "default")
         self.mode = self.persona_cfg.get("mode", "llm")
-        self.base_url = self.persona_cfg.get("base_url", "https://api.deepseek.com/v1")
-        self.model = self.persona_cfg.get("model", "deepseek-chat")
+        self.base_url = self.persona_cfg.get("base_url", "https://api.deepseek.com")
+        self.model = self.persona_cfg.get("model", "deepseek-v4-flash")
         self.thinking_mode = self._normalize_thinking_mode(
-            self.persona_cfg.get("thinking_mode", "")
+            self.persona_cfg.get("thinking_mode", "disabled")
+        )
+        self.json_response_format = self._coerce_bool(
+            self.persona_cfg.get("json_response_format"),
+            True,
         )
         self.temperature = float(self.persona_cfg.get("temperature", 0.1))
         self.max_tokens = int(self.persona_cfg.get("max_tokens", 500))
@@ -429,9 +433,11 @@ class PersonaStateEngine:
                         ),
                     },
                 ],
-                temperature=0.0,
-                max_tokens=120,
-                timeout=self.conflict_nudge_timeout_seconds,
+                **self._completion_options(
+                    temperature=0.0,
+                    max_tokens=120,
+                    timeout=self.conflict_nudge_timeout_seconds,
+                ),
             )
             raw = response.choices[0].message.content if response.choices else ""
             parsed = self._parse_json(raw or "")
@@ -709,6 +715,7 @@ class PersonaStateEngine:
                 "mode": self.mode,
                 "model": self.model,
                 "thinking_mode": self.thinking_mode,
+                "json_response_format": self.json_response_format,
                 "base_url": self.base_url,
                 "api_ready": bool(self.api_key),
                 "db_path": self.db_path,
@@ -1615,13 +1622,23 @@ class PersonaStateEngine:
             number = lower
         return max(lower, min(upper, number))
 
-    def _completion_options(self) -> dict[str, Any]:
+    def _completion_options(
+        self,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         options: dict[str, Any] = {
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "temperature": self.temperature if temperature is None else temperature,
+            "max_tokens": self.max_tokens if max_tokens is None else max_tokens,
         }
+        if timeout is not None:
+            options["timeout"] = timeout
         if self.thinking_mode:
             options["extra_body"] = {"thinking": {"type": self.thinking_mode}}
+        if self.json_response_format:
+            options["response_format"] = {"type": "json_object"}
         return options
 
     def _normalize_thinking_mode(self, value: Any) -> str:

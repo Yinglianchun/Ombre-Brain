@@ -162,7 +162,7 @@ class ReflectionEngine:
             or persona_cfg.get("base_url")
             or dehy_cfg.get("base_url", "")
         )
-        self.model = cfg.get("model") or persona_cfg.get("model") or dehy_cfg.get("model", "deepseek-chat")
+        self.model = cfg.get("model") or persona_cfg.get("model") or dehy_cfg.get("model", "deepseek-v4-flash")
         self.api_key = (
             os.environ.get("OMBRE_REFLECTION_API_KEY", "")
             or cfg.get("api_key", "")
