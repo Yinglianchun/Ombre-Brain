@@ -41,7 +41,7 @@ async def main() -> None:
     assert "用你的第一人称写" in write_description
     assert "保留你的第一人称" in edit_description
     assert "用你的第一人称写" in close_description
-    scene_voice_note = "这是过去的你写下的经历，按原文语境理解人称；相关才用，不要复述。"
+    scene_voice_note = "[仅你可见]这是过去的你写下的经历，相关才提及，不要复述。"
     assert scene_voice_note in GatewayService._memory_reading_policy_context()
     assert scene_voice_note in GatewayService._hook_recall_how_to_apply()
     assert "date" in close_schema["required"]
