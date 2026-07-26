@@ -834,6 +834,9 @@ class GatewayService:
         )
         self.upstream_key_cooldowns: dict[tuple[str, str], float] = {}
         self.pending_tool_reasoning: dict[str, dict[tuple[str, ...], dict[str, Any]]] = {}
+        self.pending_turn_injections: dict[str, dict[str, dict[str, Any]]] = {}
+        self.turn_injection_snapshot_ttl_seconds = 3600.0
+        self.turn_injection_snapshot_max_per_session = 4
 
         self.http_client = http_client or httpx.AsyncClient(timeout=60.0)
 
@@ -1876,6 +1879,7 @@ class GatewayService:
                 session_id,
                 include_favorite_memory=include_favorite_memory,
                 include_debug=True,
+                manage_turn_snapshot=True,
                 debug_detail=(
                     "full"
                     if str(request.headers.get("X-Ombre-Debug-Detail") or "").strip().lower() == "full"
@@ -2019,6 +2023,7 @@ class GatewayService:
                 session_id,
                 include_favorite_memory=include_favorite_memory,
                 include_debug=True,
+                manage_turn_snapshot=True,
                 debug_detail=(
                     "full"
                     if str(request.headers.get("X-Ombre-Debug-Detail") or "").strip().lower() == "full"
@@ -2628,6 +2633,7 @@ class GatewayService:
         *,
         include_favorite_memory: bool = False,
         include_debug: bool = False,
+        manage_turn_snapshot: bool = False,
         debug_detail: str = "full",
     ) -> tuple[dict, list[str] | None] | tuple[dict, list[str] | None, dict[str, Any]]:
         prepare_started_at = time.perf_counter()
@@ -3165,6 +3171,11 @@ class GatewayService:
         forward_payload["model"] = model
         self._restore_cached_reasoning_content(session_id, forward_payload.get("messages"))
         operit_context_rewrite_debug = self._operit_context_rewrite_debug_base()
+        turn_injection_snapshot_debug: dict[str, Any] = {
+            "status": "disabled" if not manage_turn_snapshot else "not_applicable",
+            "snapshot_key": "",
+            "source_message_count": 0,
+        }
         messages_for_forward = forward_payload["messages"]
         if self.operit_context_rewrite_enabled:
             (
@@ -3183,11 +3194,58 @@ class GatewayService:
                 "Operit Activity Context",
                 operit_activity_context,
             )
-        forward_payload["messages"] = self._inject_context_messages(
-            messages_for_forward,
-            stable_context,
-            dynamic_context,
+        current_user_index = self._current_turn_user_index(messages)
+        is_tool_continuation = self._messages_are_tool_continuation(
+            messages,
+            current_user_index,
         )
+        reused_snapshot: dict[str, Any] | None = None
+        reused_snapshot_key = ""
+        if manage_turn_snapshot and is_tool_continuation:
+            reused_snapshot_key, reused_snapshot = self._find_turn_injection_snapshot(
+                session_id,
+                messages,
+                forward_payload,
+            )
+
+        if reused_snapshot is not None:
+            source_message_count = int(reused_snapshot["source_message_count"])
+            forward_payload["messages"] = [
+                *deepcopy(reused_snapshot["prepared_messages"]),
+                *deepcopy(messages_for_forward[source_message_count:]),
+            ]
+            stable_context = str(reused_snapshot.get("stable_context") or "")
+            dynamic_context = str(reused_snapshot.get("dynamic_context") or "")
+            turn_injection_snapshot_debug = {
+                "status": "reused",
+                "snapshot_key": reused_snapshot_key,
+                "source_message_count": source_message_count,
+            }
+        else:
+            forward_payload["messages"] = self._inject_context_messages(
+                messages_for_forward,
+                stable_context,
+                dynamic_context,
+            )
+            if manage_turn_snapshot and is_new_user_turn:
+                snapshot_key = self._remember_turn_injection_snapshot(
+                    session_id,
+                    messages,
+                    forward_payload,
+                    stable_context=stable_context,
+                    dynamic_context=dynamic_context,
+                )
+                turn_injection_snapshot_debug = {
+                    "status": "stored" if snapshot_key else "unchanged",
+                    "snapshot_key": snapshot_key,
+                    "source_message_count": len(messages) if snapshot_key else 0,
+                }
+            elif manage_turn_snapshot and is_tool_continuation:
+                turn_injection_snapshot_debug = {
+                    "status": "miss",
+                    "snapshot_key": "",
+                    "source_message_count": 0,
+                }
         self._apply_prompt_cache_hints(forward_payload, session_id)
         forward_payload["stream"] = payload.get("stream") is True
         mark_step("finalize_forward_payload", stage_started_at)
@@ -3289,6 +3347,7 @@ class GatewayService:
             prepare_timing_debug["total_ms"] = max(0, int((time.perf_counter() - prepare_started_at) * 1000))
             prepare_timing_debug["steps_ms"] = dict(prepare_steps_ms)
             debug_payload["prepare_timing_debug"] = prepare_timing_debug
+            debug_payload["turn_injection_snapshot"] = turn_injection_snapshot_debug
             log_prepare_timing()
             return forward_payload, injected_ids, debug_payload
         log_prepare_timing()
@@ -3813,6 +3872,11 @@ class GatewayService:
         route: str = "",
         upstream_usage: dict[str, Any] | None = None,
     ) -> None:
+        self._update_turn_injection_snapshot_after_assistant(
+            session_id,
+            injection_debug,
+            assistant_message,
+        )
         if recalled_ids is None:
             logger.info(
                 "Gateway round bookkeeping skipped | session=%s reason=not_current_user_turn",
@@ -20251,6 +20315,162 @@ class GatewayService:
                 insert_at = self._after_leading_system_index(new_messages)
                 new_messages.insert(insert_at, dynamic_message)
         return new_messages
+
+    def _remember_turn_injection_snapshot(
+        self,
+        session_id: str,
+        source_messages: list[dict],
+        prepared_payload: dict[str, Any],
+        *,
+        stable_context: str,
+        dynamic_context: str,
+    ) -> str:
+        prepared_messages = prepared_payload.get("messages")
+        if not isinstance(source_messages, list) or not isinstance(prepared_messages, list):
+            return ""
+        if prepared_messages == source_messages:
+            return ""
+
+        now = time.monotonic()
+        self._prune_turn_injection_snapshots(now)
+        source_digest = self._turn_injection_messages_digest(source_messages)
+        contract_digest = self._turn_injection_contract_digest(prepared_payload)
+        snapshot_key = f"{source_digest}:{contract_digest}"
+        session_cache = self.pending_turn_injections.setdefault(session_id, {})
+        session_cache[snapshot_key] = {
+            "source_message_count": len(source_messages),
+            "source_digest": source_digest,
+            "contract_digest": contract_digest,
+            "prepared_messages": deepcopy(prepared_messages),
+            "stable_context": str(stable_context or ""),
+            "dynamic_context": str(dynamic_context or ""),
+            "created_at": now,
+            "last_used_at": now,
+        }
+        while len(session_cache) > self.turn_injection_snapshot_max_per_session:
+            oldest_key = min(
+                session_cache,
+                key=lambda key: float(session_cache[key].get("last_used_at", 0.0)),
+            )
+            session_cache.pop(oldest_key, None)
+        logger.info(
+            "Gateway cached turn injection snapshot | session=%s snapshot=%s messages=%s",
+            session_id,
+            snapshot_key[:12],
+            len(source_messages),
+        )
+        return snapshot_key
+
+    def _find_turn_injection_snapshot(
+        self,
+        session_id: str,
+        incoming_messages: list[dict],
+        payload: dict[str, Any],
+    ) -> tuple[str, dict[str, Any] | None]:
+        now = time.monotonic()
+        self._prune_turn_injection_snapshots(now)
+        session_cache = self.pending_turn_injections.get(session_id)
+        if not session_cache:
+            return "", None
+
+        contract_digest = self._turn_injection_contract_digest(payload)
+        candidates = sorted(
+            session_cache.items(),
+            key=lambda item: int(item[1].get("source_message_count", 0)),
+            reverse=True,
+        )
+        prefix_digests: dict[int, str] = {}
+        for snapshot_key, snapshot in candidates:
+            if snapshot.get("contract_digest") != contract_digest:
+                continue
+            source_message_count = int(snapshot.get("source_message_count", 0))
+            if source_message_count <= 0 or len(incoming_messages) < source_message_count:
+                continue
+            if source_message_count not in prefix_digests:
+                prefix_digests[source_message_count] = self._turn_injection_messages_digest(
+                    incoming_messages[:source_message_count]
+                )
+            if prefix_digests[source_message_count] != snapshot.get("source_digest"):
+                continue
+            snapshot["last_used_at"] = now
+            logger.info(
+                "Gateway reused turn injection snapshot | session=%s snapshot=%s messages=%s",
+                session_id,
+                snapshot_key[:12],
+                source_message_count,
+            )
+            return snapshot_key, snapshot
+        return "", None
+
+    def _update_turn_injection_snapshot_after_assistant(
+        self,
+        session_id: str,
+        injection_debug: dict[str, Any] | None,
+        assistant_message: dict[str, Any] | None,
+    ) -> None:
+        if not self._assistant_message_has_output(assistant_message):
+            return
+        if self._tool_call_signature(assistant_message):
+            return
+        snapshot_debug = (
+            injection_debug.get("turn_injection_snapshot")
+            if isinstance(injection_debug, dict)
+            else None
+        )
+        snapshot_key = str(
+            (snapshot_debug.get("snapshot_key") or "")
+            if isinstance(snapshot_debug, dict)
+            else ""
+        ).strip()
+        if not snapshot_key:
+            return
+        session_cache = self.pending_turn_injections.get(session_id)
+        if not session_cache:
+            return
+        removed = session_cache.pop(snapshot_key, None)
+        if not session_cache:
+            self.pending_turn_injections.pop(session_id, None)
+        if removed is not None:
+            snapshot_debug["cleared_after_response"] = True
+            logger.info(
+                "Gateway cleared turn injection snapshot | session=%s snapshot=%s",
+                session_id,
+                snapshot_key[:12],
+            )
+
+    def _prune_turn_injection_snapshots(self, now: float | None = None) -> None:
+        current = time.monotonic() if now is None else float(now)
+        cutoff = current - self.turn_injection_snapshot_ttl_seconds
+        for session_id, session_cache in list(self.pending_turn_injections.items()):
+            for snapshot_key, snapshot in list(session_cache.items()):
+                if float(snapshot.get("last_used_at", 0.0)) < cutoff:
+                    session_cache.pop(snapshot_key, None)
+            if not session_cache:
+                self.pending_turn_injections.pop(session_id, None)
+
+    @staticmethod
+    def _turn_injection_messages_digest(messages: list[dict]) -> str:
+        serialized = json.dumps(
+            messages,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _turn_injection_contract_digest(self, payload: dict[str, Any]) -> str:
+        contract = {
+            key: deepcopy(payload.get(key))
+            for key in (
+                "model",
+                "tools",
+                "tool_choice",
+                "parallel_tool_calls",
+            )
+            if key in payload
+        }
+        return self._turn_injection_messages_digest([contract])
 
     def _current_turn_user_index(self, messages: list[dict]) -> int | None:
         for index in range(len(messages) - 1, -1, -1):
