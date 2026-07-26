@@ -6,8 +6,8 @@
 
 - `recall`：普通记忆召回，或读取最新窗影 handoff。
 - `read_memory`：精确读取 Scene、Window Shadow 或 Narrative Roll。
-- `write_scene`：原样保存一件具体、长期有用的 Scene。
-- `edit_scene`：先读后改，原位修订一条 authored Scene。
+- `write_scene`：用你的第一人称原样保存一件具体、长期有用的 Scene。
+- `edit_scene`：先读后改，原位修订并保留你的第一人称。
 - `set_scene_status`：带版本检查地归档或恢复一条 authored Scene。
 - `annotate`：给已有来源追加带时间的理解、修正或感受。
 - `close_window`：原子保存一篇 Window Shadow 与 0～N 个 Scene。
@@ -39,7 +39,7 @@
 - 只有具体、长期有用、以后需要独立理解的经历才调用 write_scene。
 - 已有 Scene 的标题、正文或 cues 要修订时，先用 read_memory 取得 scene_id 与 metadata.updated_at，再调用 edit_scene；只传需要改变的字段。版本冲突时重新读取，不拿 Annotation 或新 Scene 冒充编辑。
 - 不想让某条 Scene 继续参加普通召回时，先读后调用 set_scene_status(status="archived")；它不删除正文。需要恢复时用最新的 metadata.updated_at 调用 status="active"。
-- content 是完整原文经历，不加 `## Scene`、`### scene`、`### moment` 或固定模板。
+- content 用你的第一人称写完整原文经历；保留引语原本人称，不把正文里的“我”改成名字、AI、assistant 或第三人称；不加 `## Scene`、`### scene`、`### moment` 或固定模板。
 - 每次只写一个 Scene；多个场景分别写。
 - 工具不调用模型改写、不脱水、不合并；当前作者必须亲自写 1～8 个 cues，回答“以后提到什么时，希望这段记忆回来”。系统不从 title、引句或正文生成 cues。
 - 旧 feel、whisper、日印象和 ProfileFact 仍可被读取，但不再通过 MCP 新建。
@@ -62,7 +62,7 @@
 - shadow 是当前窗口亲自写下的第一人称 Window Shadow；Bridge 管醒来，Shadow 管沉淀。
 - date 必须填写当前窗影日期，格式为 YYYY-MM-DD。
 - 可以直接在 `## 窗影` 下像日记一样写；想分段时可选：`这一窗留给我的`、`我在想什么`、`关于你，关于我们`、`最近发生的事`、`还需要关心的事`。其他小标题会留在窗影正文里。
-- 需要普通召回的经历放进 `## 想留下的记忆`，写成 `### scene | 作者标题 | cue：一个召回入口 | cue：另一个召回入口`；没有就不写 Scene。
+- 需要普通召回的经历放进 `## 想留下的记忆`，写成 `### scene | 作者标题 | cue：一个召回入口 | cue：另一个召回入口`；Scene 正文继续用你的第一人称写并保留引语原本人称；没有就不写 Scene。
 - 同一次关窗和所有重试复用同一个 idempotency_key；失败时按返回的 rejected_draft 与 fix_scope 局部修正。
 - invalid/error 响应中的 rejected_draft.shadow 是逐字失败稿，不是成功 Shadow，也不会进入 handoff 或召回。只修参数时原样重传；修正文时同时传 rejected_draft_source_hash。响应丢失可用 read_rejected_draft=true 与原 key 取回。
 - 任一 Scene 写失败时，本次 Shadow 与新 Scene 整组撤回。

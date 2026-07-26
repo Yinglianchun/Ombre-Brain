@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server
+from gateway import GatewayService
 
 
 class _NoopDecay:
@@ -32,8 +33,17 @@ async def main() -> None:
     write_schema = tools["write_scene"].inputSchema
     close_schema = tools["close_window"].inputSchema
     close_properties = close_schema["properties"]
+    write_description = str(tools["write_scene"].description or "")
+    edit_description = str(tools["edit_scene"].description or "")
+    close_description = str(tools["close_window"].description or "")
 
     assert "cues" in write_schema["required"]
+    assert "用你的第一人称写" in write_description
+    assert "保留你的第一人称" in edit_description
+    assert "用你的第一人称写" in close_description
+    scene_voice_note = "这是过去的你写下的经历，按原文语境理解人称；相关才用，不要复述。"
+    assert scene_voice_note in GatewayService._memory_reading_policy_context()
+    assert scene_voice_note in GatewayService._hook_recall_how_to_apply()
     assert "date" in close_schema["required"]
     assert "source" not in close_properties
     assert "scenes" not in close_properties
