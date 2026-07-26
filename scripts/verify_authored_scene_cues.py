@@ -41,6 +41,7 @@ async def main() -> None:
     for description in (write_description, edit_description, close_description):
         assert "能独立理解的具体场景" in description
         assert "实际发生的细节" in description
+        assert "也可以写下当时的情绪、欲望与犹豫" in description
         assert "摘要或说明" in description
     assert "cues 由你写 1～8 个“以后提到什么时希望它回来”的入口，不是摘要" in write_description
     assert "每个 cue 是“以后提到什么时希望它回来”的入口，不是摘要" in close_description

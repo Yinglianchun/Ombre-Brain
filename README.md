@@ -49,7 +49,7 @@ flowchart LR
 每条长期记忆是带 YAML frontmatter 的 Markdown。canonical Scene 的正文就是原文经历：
 
 ```text
-忠实写下这件经历本身，使它以后仍能被独立理解。只保留实际发生的细节；不同 Scene 可以有不同写法。
+忠实写下这件经历本身，使它以后仍能被独立理解。保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫；不同 Scene 可以有不同写法。
 ```
 
 `Scene` 已经是对象类型，`write_scene` 不把 `## Scene`、`### scene` 或 `### moment` 套进 content。当前 AI 写好的那段正文就是场景真源，不是脱水摘要。旧 body / `moment` / `original` / `reflection` 仍兼容读取，但不再作为新写入 section；旧 `affect_anchor` 也只兼容读取。
@@ -84,13 +84,13 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 ### 手动写入
 
-`write_scene` 只原样保存一件由当前 AI 写好的长期 Scene：content 用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节和引语原本人称，不要写成摘要或说明；不把正文里的“我”改写成名字、AI、assistant 或第三人称，正文不带 Markdown section 标题，也不套固定段落或字段。工具不调用脱水/标签模型，也不合并旧桶。当前作者必须在同一次调用中亲自写 1～8 个“以后提到什么时希望它回来”的 `cues` 入口；cues 不是摘要，系统不从 title、引句或正文补造。cues 只进 sidecar 稀疏索引，Scene 向量仍只 embed content 原文。
+`write_scene` 只原样保存一件由当前 AI 写好的长期 Scene：content 用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要写成摘要或说明；不把正文里的“我”改写成名字、AI、assistant 或第三人称，正文不带 Markdown section 标题，也不套固定段落或字段。工具不调用脱水/标签模型，也不合并旧桶。当前作者必须在同一次调用中亲自写 1～8 个“以后提到什么时希望它回来”的 `cues` 入口；cues 不是摘要，系统不从 title、引句或正文补造。cues 只进 sidecar 稀疏索引，Scene 向量仍只 embed content 原文。
 
 `edit_scene` 原位修订一条 authored Scene。调用者必须先 `read_memory`，再把读到的 `metadata.updated_at` 原样作为 `expected_updated_at`；版本不一致时返回 conflict，绝不覆盖较新的修改。只修改显式传入的 title、content、cues，旧版本全文保存在 Scene 自己的 revision history 中；Scene ID、created、source、source refs、窗影关联和 comments 都不变。窗影抽取 Scene 的 `scene_source_hash` 永远指向 revision 1；正文修订后，handoff 会沿 revision history 验回原窗影证据，而不让新正文冒充原始摘录。标题、正文或 cues 变化后刷新 embedding、moment 与 entity 索引，并重新排队 Scene link proposal。它不接受 Window Shadow、Narrative Roll、旧 bucket 或 immutable source record。
 
 `set_scene_status` 带版本检查地归档或恢复一条 authored Scene。调用者同样必须先 `read_memory`，把最新 `metadata.updated_at` 原样传入，再把 status 设为 `archived` 或 `active`。归档不删除或重写正文、Scene ID、created、source refs、revision history、comments、窗影关联或已审阅 Scene edges；它只把 Scene 移出普通 recall，并清理可重建的向量、moment、entity 与 node 索引。归档 Scene 仍可由 `read_memory(scene_id)` 精确读回；恢复后重建派生索引并回到归档前的 dynamic/permanent 存储层。重复设置当前状态是无副作用的 unchanged。它不接受 Window Shadow、Narrative Roll、旧 bucket 或 immutable source record。
 
-`close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”。Bridge 负责新窗口醒来，窗影只沉淀这一窗的变化：新稿不再要求 `## 给下个窗口的我`，也没有 250～400 字限制。正文可以直接放在 `## 窗影` 下像日记一样自然书写；想分段时可选 `## 这一窗留给我的`、`## 我在想什么`、`## 关于你，关于我们`、`## 最近发生的事`（建议 `- YYYY-MM-DD｜事件`）与 `## 还需要关心的事`，其他小标题会原样保留在窗影正文里。它只从 Shadow 的“想留下的记忆”中抽取 0～N 个独立 Scene，没有平行 `scenes[]` 写入口。每条 Scene 使用 `### scene | 作者标题 | cue：自然召回入口`，可继续追加 1～8 个 `| cue：…`；Scene 正文继续用你的第一人称写成能独立理解的具体场景，保留实际发生的细节和引语原本人称，不写成摘要或说明。标题与 cues 都由当前作者亲自写，只进入 metadata；heading 不进入 Scene 正文。旧的 `标题：作者标题` 仍可读取；裸 `### scene`、没有作者标题或 cue 的格式都会被拒绝。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。旧 `### moment` 只保留读取兼容，不会自动升格成 Scene。
+`close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”。Bridge 负责新窗口醒来，窗影只沉淀这一窗的变化：新稿不再要求 `## 给下个窗口的我`，也没有 250～400 字限制。正文可以直接放在 `## 窗影` 下像日记一样自然书写；想分段时可选 `## 这一窗留给我的`、`## 我在想什么`、`## 关于你，关于我们`、`## 最近发生的事`（建议 `- YYYY-MM-DD｜事件`）与 `## 还需要关心的事`，其他小标题会原样保留在窗影正文里。它只从 Shadow 的“想留下的记忆”中抽取 0～N 个独立 Scene，没有平行 `scenes[]` 写入口。每条 Scene 使用 `### scene | 作者标题 | cue：自然召回入口`，可继续追加 1～8 个 `| cue：…`；Scene 正文继续用你的第一人称写成能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不写成摘要或说明。标题与 cues 都由当前作者亲自写，只进入 metadata；heading 不进入 Scene 正文。旧的 `标题：作者标题` 仍可读取；裸 `### scene`、没有作者标题或 cue 的格式都会被拒绝。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。旧 `### moment` 只保留读取兼容，不会自动升格成 Scene。
 
 `close_window` 的失败稿与成功 Shadow 分库：带 `idempotency_key` 的 `invalid` / `error` 请求会把原 Shadow 逐字写入 `window_shadow_rejected_drafts.sqlite`，响应返回 `rejected_draft.shadow`、`source_hash`、原请求参数与 `fix_scope`。失败稿不进入 `window_shadows.sqlite`、handoff、普通召回、bucket 或 embedding。重试同 key 时，参数-only 修复必须保持 Shadow 逐字不变；文本修复必须传上一稿的 `rejected_draft_source_hash`，而且只能改变 `fix_scope` 指定的 section。`read_rejected_draft=true` 可显式取回未完成失败稿。成功后草稿删除；之后同 key 永远返回第一次成功写入，不接受覆盖。
 
