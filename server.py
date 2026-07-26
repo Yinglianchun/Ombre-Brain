@@ -10713,7 +10713,7 @@ async def close_window(
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """写下一篇窗影和想留下的记忆。date 必须填写 `YYYY-MM-DD`；shadow 可直接写在 `## 窗影` 下，或选用 `这一窗留给我的`、`我在想什么`、`关于你，关于我们`、`最近发生的事`、`还需要关心的事`。Scene 写在 `## 想留下的记忆` 下：`### scene | 标题 | cue：一个召回入口 | cue：另一个召回入口`；正文用你的第一人称写，保留引语原本的人称。idempotency_key 用于重试；rejected_draft_* 按失败响应填写；continue_scene_index 选择续接 Scene。"""
+    """写下一篇窗影和想留下的记忆。date 必须填写 `YYYY-MM-DD`；shadow 可直接写在 `## 窗影` 下，或选用 `这一窗留给我的`、`我在想什么`、`关于你，关于我们`、`最近发生的事`、`还需要关心的事`。Scene 写在 `## 想留下的记忆` 下：`### scene | 标题 | cue：一个召回入口 | cue：另一个召回入口`；正文用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节和引语原本人称，不要写成摘要或说明；每个 cue 是“以后提到什么时希望它回来”的入口，不是摘要。idempotency_key 用于重试；rejected_draft_* 按失败响应填写；continue_scene_index 选择续接 Scene。"""
     _ = context
     authored_date = str(date or "").strip()
     try:
@@ -12379,7 +12379,7 @@ async def write_scene(
     date: str = "",
     domain: str = "",
 ) -> str:
-    """保存一条 Scene。content 用你的第一人称写完整经历，保留引语原本的人称；cues 写 1～8 个“以后提到什么时召回”的入口；title、date、domain 可选。"""
+    """保存一条 Scene。content 用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节和引语原本人称，不要写成摘要或说明；cues 由你写 1～8 个“以后提到什么时希望它回来”的入口，不是摘要；title、date、domain 可选。"""
     return await _write_scene_memory(
         content,
         title=title,
@@ -12397,7 +12397,7 @@ async def edit_scene(
     content: str | None = None,
     cues: str | list[str] | None = None,
 ) -> dict:
-    """修改一条 Scene。scene_id 填 Scene ID；expected_updated_at 填 read_memory 返回的 metadata.updated_at；title、content、cues 只传需要修改的项；修改 content 时保留你的第一人称与引语原本人称。"""
+    """修改一条 Scene。scene_id 填 Scene ID；expected_updated_at 填 read_memory 返回的 metadata.updated_at；title、content、cues 只传需要修改的项；修改 content 时仍用你的第一人称写成能独立理解的具体场景，保留实际发生的细节和引语原本人称，不要改成摘要或说明。"""
     return await _edit_scene_memory(
         scene_id,
         expected_updated_at=expected_updated_at,

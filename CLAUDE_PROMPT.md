@@ -41,10 +41,10 @@ MCP 只注册以上十五个动作。旧桶、旧字段和旧读取投影继续�
 - 只有具体、长期有用、以后需要独立理解的经历才调用 `write_scene`。
 - 修改已有 Scene 时先 `read_memory`，再调用 `edit_scene(scene_id=..., expected_updated_at=...)`；只传真正要改的 title、content 或 cues。不要用 `annotate` 冒充正文修订，也不要重写成一条新 Scene。
 - 不想让 Scene 继续进入普通 recall 时，先读后调用 `set_scene_status(scene_id=..., status="archived", expected_updated_at=...)`；这不是删除。恢复时重新读取并传 `status="active"`。
-- `content` 用你的第一人称写完整原文经历；保留引语原本的人称，不把正文里的“我”改写成名字、AI、assistant 或第三人称；不加 `## Scene`、`### scene`、`### moment` 或固定模板。
+- `content` 用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节和引语原本人称，不要写成摘要或说明；不把正文里的“我”改写成名字、AI、assistant 或第三人称；不加 `## Scene`、`### scene`、`### moment` 或固定模板。
 - 每次只写一个 Scene；多个场景分别调用。
 - 工具不调用模型改写、不脱水、不合并。
-- `cues` 必须由正在写 Scene 的你亲自给出 1～8 个，回答“以后提到什么时，我希望这段记忆回来”。它不是摘要；不要从 title、引句或正文机械提取。cues 只进稀疏 sidecar，不进入正文或 Scene 原文向量。
+- `cues` 必须由正在写 Scene 的你亲自给出 1～8 个“以后提到什么时希望它回来”的入口。它不是摘要；不要从 title、引句或正文机械提取。cues 只进稀疏 sidecar，不进入正文或 Scene 原文向量。
 - 旧 feel、whisper、日印象和 ProfileFact 仍可读取，但不再通过 MCP 新建。
 
 ## 追加 Annotation
@@ -70,7 +70,7 @@ MCP 只注册以上十五个动作。旧桶、旧字段和旧读取投影继续�
 - `shadow` 是当前窗口亲自写下的完整第一人称 Window Shadow；Bridge 管醒来，窗影管沉淀，不写“给下个窗口的我”。
 - `date` 必须填写当前窗影日期，格式为 `YYYY-MM-DD`。
 - 可以直接在 `## 窗影` 下像日记一样自然书写；想分段时按真实内容选写：`## 这一窗留给我的`、`## 我在想什么`、`## 关于你，关于我们`、`## 最近发生的事`、`## 还需要关心的事`。其他日记小标题会原样留在窗影正文里。
-- 需要普通召回的经历放在 `## 想留下的记忆` 下，写成 `### scene | 作者标题 | cue：一个召回入口 | cue：另一个召回入口`；Scene 正文继续用你的第一人称写，保留引语原本人称；没有就不写 Scene。
+- 需要普通召回的经历放在 `## 想留下的记忆` 下，写成 `### scene | 作者标题 | cue：一个召回入口 | cue：另一个召回入口`；Scene 正文继续用你的第一人称写成能独立理解的具体场景，保留实际发生的细节和引语原本人称，不写成摘要或说明；没有就不写 Scene。
 - 一次关窗和所有重试复用同一个 `idempotency_key`。失败时逐字复用响应里的 `rejected_draft.shadow`，只修 `fix_scope` 指出的段落或参数。
 - Window Shadow 不进入普通 recall；Scene 才进入。
 

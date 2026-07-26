@@ -38,9 +38,12 @@ async def main() -> None:
     close_description = str(tools["close_window"].description or "")
 
     assert "cues" in write_schema["required"]
-    assert "用你的第一人称写" in write_description
-    assert "保留你的第一人称" in edit_description
-    assert "用你的第一人称写" in close_description
+    for description in (write_description, edit_description, close_description):
+        assert "能独立理解的具体场景" in description
+        assert "实际发生的细节" in description
+        assert "摘要或说明" in description
+    assert "cues 由你写 1～8 个“以后提到什么时希望它回来”的入口，不是摘要" in write_description
+    assert "每个 cue 是“以后提到什么时希望它回来”的入口，不是摘要" in close_description
     scene_voice_note = "[仅你可见]这是过去的你写下的经历，相关才提及，不要复述。"
     assert scene_voice_note in GatewayService._memory_reading_policy_context()
     assert scene_voice_note in GatewayService._hook_recall_how_to_apply()
