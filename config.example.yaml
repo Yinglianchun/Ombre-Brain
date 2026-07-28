@@ -664,6 +664,7 @@ reflection:
   daily_activity_summary_enabled: true      # writes one "what happened today" item into portrait recent_timeline
   daily_activity_summary_turn_limit: 0      # 0 = use all raw_events for that date
   daily_activity_summary_max_tokens: 320
+  # daily_activity_summary_diagnostics_path: "" # default: state/daily_activity_summary_runs.jsonl
   persona_events_limit: 12         # selected and deduped; persona events supplement daily weather only
   persona_events_scan_limit: 80
   weekly_enabled: false            # retired legacy weekly impression writes

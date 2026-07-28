@@ -42,6 +42,8 @@ PORTRAIT_PROMPT_TEMPLATE = """你是一个证据化记忆状态整理器，正�
       "scope": "user|persona|relationship",
       "text": "一条短观察",
       "evidence": [{{"bucket_id": "证据桶id", "moment_id": ""}}],
+      "source_turn_ids": [1, 2],
+      "source_event_ids": [101, 102],
       "confidence": 0.72
     }}
   ],
@@ -85,6 +87,9 @@ PORTRAIT_PROMPT_TEMPLATE = """你是一个证据化记忆状态整理器，正�
 - 先找证据里反复出现、未来换窗仍有用的模式，再写画像；只说明当天发生什么的内容放 add_recent 或 add_recent_activity。
 - user 回答“{user_display_name}近期稳定呈现的工作方式、偏好、边界或关心点是什么”；“最近在做什么”优先写 add_recent_activity。
 - relationship 回答“这段关系最近怎样被恢复、有哪些边界、协作方式或里程碑”；关系天气、撒娇、确认、互动模式优先写 relationship。不要把技术工作升格成象征、仪式或文学化解释。
+- relationship 不得把“仍在追问、继续质疑、没有反驳、话题结束”写成“接受了、理解了、同意了”；不得凭一次任务完成写“信任增强、关系更近、更加默契、合作顺畅”。
+- 上述关系结果只有在原话直接表达，或原始轮次里有清楚的前后行为证据时才能写；否则只写具体发生了什么，不升格。日印象或其他模型摘要里的关系结论不能自行证明自己。
+- 每条 relationship add/rewrite 都必须同时给出 evidence，并从被引用材料的 source_turn_ids / source_event_ids 中选择原始轮次；不能落到原始轮次就放 skip。
 - persona 正式回答“{ai_name}怎样理解自己、正在形成怎样的回复姿态或自我边界”，与 user、relationship 一样需要每日检查维护。
 - add_recent_activity 只回答“{user_display_name}最近在做什么/推进什么/忙什么”，偏项目、生活事项、正在处理的问题。
 - initial_run=true 时，add_recent 和 add_recent_activity 只放真正短期/当天或最近几天观察；高置信、能跨窗口携带的观察放入 move_to_staging。每个 scope 尽量给 1-3 条 move_to_staging，证据不足时少写。
@@ -583,6 +588,8 @@ class DailyPortraitMaintainer:
             scope_state["mid_term_evidence"] = mid_evidence
             if mid_had_bucket and not mid_evidence and str(scope_state.get("mid_term") or "").strip():
                 scope_state["mid_term"] = ""
+                scope_state["mid_term_source_turn_ids"] = []
+                scope_state["mid_term_source_event_ids"] = []
                 scope_state["mid_term_source_dates"] = []
                 scope_state["mid_term_source_date"] = ""
                 scope_state["mid_term_updated_at"] = ""
@@ -846,6 +853,8 @@ class DailyPortraitMaintainer:
                     )
                     scope_state["mid_term"] = ""
                     scope_state["mid_term_evidence"] = []
+                    scope_state["mid_term_source_turn_ids"] = []
+                    scope_state["mid_term_source_event_ids"] = []
                     scope_state["mid_term_source_dates"] = []
                     scope_state["mid_term_source_date"] = ""
                     scope_state["mid_term_updated_at"] = ""
@@ -977,6 +986,8 @@ class DailyPortraitMaintainer:
                 "evidence_invalid": evidence_invalid,
                 "mid_term": str(scope_state.get("mid_term") or "").strip(),
                 "mid_term_evidence": deepcopy(scope_state.get("mid_term_evidence", []) or []),
+                "mid_term_source_turn_ids": list(scope_state.get("mid_term_source_turn_ids", []) or []),
+                "mid_term_source_event_ids": list(scope_state.get("mid_term_source_event_ids", []) or []),
                 "recent_buffer": deepcopy(scope_state.get("recent_buffer", []) or []),
                 "staging_pool": deepcopy(scope_state.get("staging_pool", []) or []),
                 "candidate_materials": [
@@ -2256,6 +2267,7 @@ class DailyPortraitMaintainer:
         normalized = {key: [] for key in PATCH_KEYS}
         rejected = []
         evidence_scope_limits = self._material_scope_limits(materials)
+        evidence_source_index = self._material_evidence_source_index(materials)
         current_bucket_ids = {
             str(item.get("bucket_id") or "")
             for item in materials.get("buckets", [])
@@ -2307,6 +2319,7 @@ class DailyPortraitMaintainer:
                     evidence_bucket_ids=known_bucket_ids,
                     evidence_session_ids=known_session_ids,
                     evidence_scope_limits=evidence_scope_limits,
+                    evidence_source_index=evidence_source_index,
                 )
                 if clean and uses_window_shadow(clean):
                     clean = None
@@ -2341,6 +2354,7 @@ class DailyPortraitMaintainer:
                     evidence_bucket_ids=bucket_ids,
                     evidence_session_ids=session_ids,
                     evidence_scope_limits=evidence_scope_limits,
+                    evidence_source_index=evidence_source_index,
                     missing_reason=missing_reason,
                 )
                 if clean and key == "stable_candidate" and not self._stable_candidate_evidence_is_eligible(
@@ -2438,6 +2452,7 @@ class DailyPortraitMaintainer:
         evidence_bucket_ids: set[str],
         evidence_session_ids: set[str],
         evidence_scope_limits: dict[tuple[str, str], set[str]] | None = None,
+        evidence_source_index: dict[tuple[str, str], dict] | None = None,
         missing_reason: str = "missing_valid_evidence",
     ) -> tuple[dict | None, str]:
         if not isinstance(item, dict):
@@ -2481,12 +2496,48 @@ class DailyPortraitMaintainer:
             evidence = scoped_evidence
         if key == "profile_fact_candidate" and not any(row.get("bucket_id") for row in evidence):
             return None, "profile_fact_needs_bucket_evidence"
+        source_turn_ids, source_event_ids = self._evidence_source_ids(
+            evidence,
+            evidence_source_index or {},
+        )
+        requested_turn_ids = self._merge_source_ids([], item.get("source_turn_ids", []), limit=80)
+        requested_event_ids = self._merge_source_ids([], item.get("source_event_ids", []), limit=160)
+        if requested_turn_ids:
+            allowed_turn_ids = set(source_turn_ids)
+            requested_turn_ids = [value for value in requested_turn_ids if value in allowed_turn_ids]
+        if requested_event_ids:
+            allowed_event_ids = set(source_event_ids)
+            requested_event_ids = [value for value in requested_event_ids if value in allowed_event_ids]
+        source_turn_ids = requested_turn_ids or source_turn_ids
+        source_event_ids = requested_event_ids or source_event_ids
+        if (
+            scope == "relationship"
+            and key in {"add_recent", "move_to_staging", "rewrite_mid_term"}
+            and not source_turn_ids
+            and not source_event_ids
+        ):
+            return None, "relationship_missing_source_turns"
+        if (
+            scope == "relationship"
+            and key in {"add_recent", "move_to_staging", "rewrite_mid_term"}
+            and self._unsupported_relationship_outcome(text)
+            and not self._relationship_outcome_has_direct_evidence(
+                text,
+                evidence,
+                evidence_source_index or {},
+            )
+        ):
+            return None, "unsupported_relationship_outcome"
         clean = {
             "scope": scope,
             "text": self._clip(text, 420),
             "evidence": evidence,
             "confidence": self._clamp(item.get("confidence"), 0.55),
         }
+        if source_turn_ids:
+            clean["source_turn_ids"] = source_turn_ids
+        if source_event_ids:
+            clean["source_event_ids"] = source_event_ids
         if key in {"rewrite_mid_term", "rewrite_stable"} and self._portrait_text_too_stylized(clean["text"]):
             return None, "overstyled_portrait_text"
         if key == "stable_candidate":
@@ -2496,6 +2547,142 @@ class DailyPortraitMaintainer:
             clean["predicate"] = self._safe_key(item.get("predicate") or "")
             clean["object"] = self._clip(str(item.get("object") or ""), 120)
         return clean, ""
+
+    def _material_evidence_source_index(self, materials: dict) -> dict[tuple[str, str], dict]:
+        index: dict[tuple[str, str], dict] = {}
+
+        def add(key: tuple[str, str], row: dict) -> None:
+            if not key[1]:
+                return
+            existing = index.setdefault(
+                key,
+                {
+                    "source_turn_ids": [],
+                    "source_event_ids": [],
+                    "source": "",
+                    "source_excerpt": "",
+                },
+            )
+            existing["source_turn_ids"] = self._merge_source_ids(
+                existing.get("source_turn_ids", []),
+                row.get("source_turn_ids", []),
+                limit=80,
+            )
+            existing["source_event_ids"] = self._merge_source_ids(
+                existing.get("source_event_ids", []),
+                row.get("source_event_ids", []),
+                limit=160,
+            )
+            if not existing.get("source"):
+                existing["source"] = str(row.get("source") or "")
+            if not existing.get("source_excerpt"):
+                existing["source_excerpt"] = str(
+                    row.get("source_excerpt")
+                    or row.get("text")
+                    or row.get("user_excerpt")
+                    or row.get("assistant_excerpt")
+                    or ""
+                )
+
+        for row in materials.get("buckets", []) or []:
+            if isinstance(row, dict):
+                add(("bucket", str(row.get("bucket_id") or "").strip()), row)
+        for row in materials.get("persona_events", []) or []:
+            if isinstance(row, dict):
+                add(("session", str(row.get("session_id") or "").strip()), row)
+        previous = materials.get("previous_portrait", {})
+        if isinstance(previous, dict):
+            for scope in PORTRAIT_SCOPES:
+                scope_state = previous.get(scope, {}) if isinstance(previous.get(scope), dict) else {}
+                rows = list(scope_state.get("recent_buffer", []) or [])
+                rows.extend(scope_state.get("staging_pool", []) or [])
+                rows.append(
+                    {
+                        "evidence": scope_state.get("mid_term_evidence", []) or [],
+                        "source_turn_ids": scope_state.get("mid_term_source_turn_ids", []) or [],
+                        "source_event_ids": scope_state.get("mid_term_source_event_ids", []) or [],
+                    }
+                )
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    for evidence in row.get("evidence", []) or []:
+                        if not isinstance(evidence, dict):
+                            continue
+                        if evidence.get("bucket_id"):
+                            add(("bucket", str(evidence["bucket_id"]).strip()), row)
+                        if evidence.get("session_id"):
+                            add(("session", str(evidence["session_id"]).strip()), row)
+        return index
+
+    def _evidence_source_ids(
+        self,
+        evidence: list[dict],
+        index: dict[tuple[str, str], dict],
+    ) -> tuple[list[int], list[int]]:
+        turn_ids = []
+        event_ids = []
+        for row in evidence:
+            if not isinstance(row, dict):
+                continue
+            keys = []
+            if row.get("bucket_id"):
+                keys.append(("bucket", str(row["bucket_id"]).strip()))
+            if row.get("session_id"):
+                keys.append(("session", str(row["session_id"]).strip()))
+            for key in keys:
+                source = index.get(key, {})
+                turn_ids = self._merge_source_ids(
+                    turn_ids,
+                    source.get("source_turn_ids", []),
+                    limit=80,
+                )
+                event_ids = self._merge_source_ids(
+                    event_ids,
+                    source.get("source_event_ids", []),
+                    limit=160,
+                )
+        return turn_ids, event_ids
+
+    @staticmethod
+    def _unsupported_relationship_outcome(text: str) -> bool:
+        return bool(
+            re.search(
+                r"接受了|理解了|同意了|信任(?:感)?(?:增强|增加|加深|提升)|"
+                r"关系(?:更近|更亲近|更亲密|加深)|更加?默契|合作(?:更)?顺畅",
+                str(text or ""),
+            )
+        )
+
+    @staticmethod
+    def _relationship_outcome_has_direct_evidence(
+        text: str,
+        evidence: list[dict],
+        index: dict[tuple[str, str], dict],
+    ) -> bool:
+        claim_terms = re.findall(
+            r"接受了|理解了|同意了|信任(?:感)?(?:增强|增加|加深|提升)|"
+            r"关系(?:更近|更亲近|更亲密|加深)|更加?默契|合作(?:更)?顺畅",
+            str(text or ""),
+        )
+        if not claim_terms:
+            return True
+        for row in evidence:
+            if not isinstance(row, dict):
+                continue
+            keys = []
+            if row.get("bucket_id"):
+                keys.append(("bucket", str(row["bucket_id"]).strip()))
+            if row.get("session_id"):
+                keys.append(("session", str(row["session_id"]).strip()))
+            for key in keys:
+                source = index.get(key, {})
+                if str(source.get("source") or "").strip().lower() == "reflection":
+                    continue
+                excerpt = str(source.get("source_excerpt") or "")
+                if all(term in excerpt for term in claim_terms):
+                    return True
+        return False
 
     @staticmethod
     def _stable_candidate_evidence_is_eligible(item: dict, materials: dict) -> bool:
@@ -3027,6 +3214,16 @@ class DailyPortraitMaintainer:
                 continue
             scope_state["mid_term"] = item["text"]
             scope_state["mid_term_evidence"] = item["evidence"]
+            scope_state["mid_term_source_turn_ids"] = self._merge_source_ids(
+                [],
+                item.get("source_turn_ids", []),
+                limit=80,
+            )
+            scope_state["mid_term_source_event_ids"] = self._merge_source_ids(
+                [],
+                item.get("source_event_ids", []),
+                limit=160,
+            )
             source_dates = self._merge_source_dates([], item.get("source_dates", []))
             scope_state["mid_term_source_dates"] = source_dates
             scope_state["mid_term_source_date"] = source_dates[0] if source_dates else item.get("source_date", "")
@@ -3075,6 +3272,16 @@ class DailyPortraitMaintainer:
             if self._norm(row.get("text", "")) == key:
                 row["text"] = item["text"]
                 row["evidence"] = self._dedupe_evidence(row.get("evidence", []) + item.get("evidence", []))
+                row["source_turn_ids"] = self._merge_source_ids(
+                    row.get("source_turn_ids", []),
+                    item.get("source_turn_ids", []),
+                    limit=80,
+                )
+                row["source_event_ids"] = self._merge_source_ids(
+                    row.get("source_event_ids", []),
+                    item.get("source_event_ids", []),
+                    limit=160,
+                )
                 row["source_dates"] = self._merge_source_dates(row.get("source_dates", []), item.get("source_dates", []))
                 row["source_date"] = row["source_dates"][0] if row["source_dates"] else row.get("source_date", "")
                 row["confidence"] = max(float(row.get("confidence") or 0.0), float(item.get("confidence") or 0.0))
@@ -3087,6 +3294,16 @@ class DailyPortraitMaintainer:
                 {
                     "text": item["text"],
                     "evidence": self._dedupe_evidence(item.get("evidence", [])),
+                    "source_turn_ids": self._merge_source_ids(
+                        [],
+                        item.get("source_turn_ids", []),
+                        limit=80,
+                    ),
+                    "source_event_ids": self._merge_source_ids(
+                        [],
+                        item.get("source_event_ids", []),
+                        limit=160,
+                    ),
                     "source_dates": self._merge_source_dates([], item.get("source_dates", [])),
                     "source_date": str(item.get("source_date") or ""),
                     "confidence": item.get("confidence", 0.55),
@@ -3531,6 +3748,18 @@ class DailyPortraitMaintainer:
             "updated_at": str(meta.get("updated_at") or meta.get("last_active") or ""),
             "source_date": self._bucket_source_date(meta),
             "source": str(meta.get("source") or ""),
+            "source_turn_ids": self._merge_source_ids(
+                [],
+                meta.get("source_turn_ids")
+                or meta.get("source_conversation_turn_ids")
+                or [],
+                limit=80,
+            ),
+            "source_event_ids": self._merge_source_ids(
+                [],
+                meta.get("source_event_ids") or [],
+                limit=160,
+            ),
             "anchor": bool(meta.get("anchor")),
             "profile_kind": str(meta.get("profile_kind") or ""),
             "allowed_scopes": self._material_allowed_scopes(bucket),
@@ -3806,6 +4035,8 @@ class DailyPortraitMaintainer:
                 "staging_pool": (portrait.get(scope, {}) or {}).get("staging_pool", [])[:8],
                 "mid_term": (portrait.get(scope, {}) or {}).get("mid_term", ""),
                 "mid_term_evidence": (portrait.get(scope, {}) or {}).get("mid_term_evidence", [])[:8],
+                "mid_term_source_turn_ids": (portrait.get(scope, {}) or {}).get("mid_term_source_turn_ids", [])[:80],
+                "mid_term_source_event_ids": (portrait.get(scope, {}) or {}).get("mid_term_source_event_ids", [])[:160],
                 "mid_term_source_dates": (portrait.get(scope, {}) or {}).get("mid_term_source_dates", [])[:8],
                 "stable": (portrait.get(scope, {}) or {}).get("stable", ""),
                 "stable_evidence": (portrait.get(scope, {}) or {}).get("stable_evidence", [])[:8],
@@ -4031,6 +4262,8 @@ class DailyPortraitMaintainer:
                     "staging_pool": [],
                     "mid_term": "",
                     "mid_term_evidence": [],
+                    "mid_term_source_turn_ids": [],
+                    "mid_term_source_event_ids": [],
                     "mid_term_source_dates": [],
                     "mid_term_source_date": "",
                     "mid_term_updated_at": "",

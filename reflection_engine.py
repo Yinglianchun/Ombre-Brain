@@ -65,7 +65,9 @@ REFLECT_PROMPT_TEMPLATE = """你是 {ai_name} 的记忆反思器。请根据给�
   "valence": 0.56,
   "arousal": 0.34,
   "confidence": 0.78,
-  "tags": ["relationship_weather"]
+  "tags": ["relationship_weather"],
+  "source_turn_ids": [1, 2],
+  "source_event_ids": [101, 102]
 }
 
 要求：
@@ -76,6 +78,9 @@ REFLECT_PROMPT_TEMPLATE = """你是 {ai_name} 的记忆反思器。请根据给�
 - 有 conversation_turns 时，优先用普通记忆和对话原文；persona_events 只是没有原文时的轻量补充。
 - 周印象优先总结本周 daily_impressions，再参考高重要普通记忆和未完成承诺；不要直接吞整周日记。
 - 不编造材料之外的事件。
+- 不得把“仍在追问、继续质疑、没有反驳、话题结束”写成“接受了、理解了、同意了”；不得凭顺利完成一次任务写“信任增强、关系更近、更加默契、合作顺畅”。
+- 上述关系结果只有在原话直接表达，或原始轮次里有清楚、可指出的前后行为证据时才能写；否则只写具体发生了什么，不升格成关系结论。
+- 每个关系判断都必须能落到 source_turn_ids / source_event_ids 指向的原始轮次；只能使用输入里真实出现的 id，拿不准就删掉该判断。
 - 不写建议清单。"""
 
 
@@ -101,6 +106,7 @@ DAILY_ACTIVITY_SUMMARY_PROMPT_TEMPLATE = """你是 {ai_name} 的当天行动摘�
 - 不写关系天气、情绪评价、昵称互动、普通寒暄、召回探针、模型自夸。
 - summary 用一句自然中文，35 到 90 字；不要 Markdown，不要列表，不要“今天的总结是”这种壳。
 - source_turn_ids / source_event_ids 只能使用输入里真实出现的 id；拿不准可留空。
+- 不能可靠生成时返回空 JSON 对象；不要拼接输入末尾，不要使用“围绕……继续推进”之类兜底句。
 """
 
 
@@ -218,6 +224,16 @@ class ReflectionEngine:
         self.daily_activity_summary_max_tokens = max(
             80,
             min(1000, int(cfg.get("daily_activity_summary_max_tokens", 320))),
+        )
+        state_dir = self.config.get("state_dir") or os.path.join(
+            os.path.dirname(os.path.abspath(self.config.get("buckets_dir", "buckets"))),
+            "state",
+        )
+        self.daily_activity_summary_diagnostics_path = os.path.abspath(
+            str(
+                cfg.get("daily_activity_summary_diagnostics_path")
+                or os.path.join(state_dir, "daily_activity_summary_runs.jsonl")
+            )
         )
         self.dehydration_base_url = str(dehy_cfg.get("base_url") or "").strip().rstrip("/")
         self.dehydration_model = str(dehy_cfg.get("model") or "").strip()
@@ -495,15 +511,24 @@ class ReflectionEngine:
             for event in materials.get("persona_events", [])
             if event.get("id")
         ]
-        source_conversation_turn_ids = [
-            int(turn.get("id"))
-            for turn in materials.get("conversation_turns", [])
-            if turn.get("id")
-        ]
+        all_turn_ids, all_event_ids = self._conversation_source_ids(
+            materials.get("conversation_turns", [])
+        )
+        source_conversation_turn_ids = self._validated_source_ids(
+            result.get("source_turn_ids"),
+            all_turn_ids,
+            limit=80,
+        ) or all_turn_ids
+        source_event_ids = self._validated_source_ids(
+            result.get("source_event_ids"),
+            all_event_ids,
+            limit=160,
+        ) or all_event_ids
         source_metadata = {
             "source_bucket_ids": source_bucket_ids[:40],
             "source_persona_event_ids": source_persona_event_ids[:40],
             "source_conversation_turn_ids": source_conversation_turn_ids[:80],
+            "source_event_ids": source_event_ids[:160],
         }
 
         if existing:
@@ -574,6 +599,8 @@ class ReflectionEngine:
                 "content": content,
                 "confidence": confidence,
                 "date": key,
+                "source_turn_ids": source_conversation_turn_ids[:80],
+                "source_event_ids": source_event_ids[:160],
             },
             "materials": {
                 "buckets": len(materials["buckets"]),
@@ -1290,6 +1317,9 @@ class ReflectionEngine:
     ) -> dict:
         if not self.enabled or not self.daily_activity_summary_enabled:
             return {"status": "disabled", "reason": "daily_activity_summary_off"}
+        # Kept in the signature for compatibility. Relationship-weather
+        # summaries are never reused as activity evidence.
+        _ = daily_impressions
 
         now_local = self._local_now(now)
         if key:
@@ -1299,20 +1329,6 @@ class ReflectionEngine:
             except ValueError:
                 pass
         key = now_local.date().isoformat()
-        memory_item = self._daily_activity_summary_from_memory_materials(
-            key,
-            daily_impressions=daily_impressions or [],
-        )
-        if memory_item:
-            return {
-                "status": "ready",
-                "date": key,
-                "turns": 0,
-                "turn_source": "daily_memory_materials",
-                "force": bool(force),
-                "activity_summary": memory_item,
-            }
-
         if not conversation_turn_store and not raw_event_store:
             return {"status": "skipped", "reason": "no_conversation_source"}
 
@@ -1328,23 +1344,39 @@ class ReflectionEngine:
         if not turns:
             return {"status": "skipped", "reason": "no_conversation_turns", "date": key}
 
-        item = await self._extract_daily_activity_summary(key, turns)
+        attempts = []
+        item, diagnostic = await self._extract_daily_activity_summary(
+            key,
+            turns,
+            attempt="primary",
+        )
+        attempts.append(diagnostic)
         if not item and self._daily_activity_summary_dehydration_retry_available():
-            item = await self._extract_daily_activity_summary(
+            item, diagnostic = await self._extract_daily_activity_summary(
                 key,
                 turns,
                 client_override=self._daily_dehydration_client(),
                 model_override=self.dehydration_model,
+                attempt="dehydration_retry",
             )
-        if not item:
-            item = self._fallback_daily_activity_summary(key, turns)
+            attempts.append(diagnostic)
+        run_diagnostic = self._daily_activity_summary_run_diagnostic(
+            key=key,
+            turns=len(turns),
+            turn_source=turn_source,
+            force=force,
+            attempts=attempts,
+            status="ready" if item else "skipped",
+        )
+        self._record_daily_activity_summary_diagnostic(run_diagnostic)
         if not item:
             return {
                 "status": "skipped",
-                "reason": "no_activity_summary",
+                "reason": "activity_summary_model_unusable",
                 "date": key,
                 "turns": len(turns),
                 "turn_source": turn_source,
+                "diagnostics": run_diagnostic,
             }
         return {
             "status": "ready",
@@ -1353,61 +1385,8 @@ class ReflectionEngine:
             "turn_source": turn_source,
             "force": bool(force),
             "activity_summary": item,
+            "diagnostics": run_diagnostic,
         }
-
-    def _daily_activity_summary_from_memory_materials(
-        self,
-        key: str,
-        *,
-        daily_impressions: list[dict],
-    ) -> dict:
-        snippets: list[str] = []
-        source_event_ids: list[int] = []
-        source_turn_ids: list[int] = []
-        evidence: list[dict] = []
-        confidences: list[float] = []
-        for item in daily_impressions or []:
-            content = re.sub(
-                r"\s+",
-                " ",
-                strip_wikilinks(str(item.get("content") or item.get("text") or "")).strip(),
-            )
-            content = re.split(r"\n?### affect_anchor\b", content, maxsplit=1)[0].strip()
-            if content:
-                snippets.append(self._clip_activity_material(content, limit=80))
-            if item.get("id"):
-                evidence.append({"bucket_id": str(item.get("id"))})
-            confidences.append(self._clamp(item.get("confidence", 0.7)))
-        snippets = list(dict.fromkeys(snippets))[:4]
-        if not snippets:
-            return {}
-        text = "；".join(snippets)
-        if len(text) > 140:
-            text = text[:137].rstrip("，,；;、 ") + "..."
-        return {
-            "timeline_id": f"daily_activity_summary:{key}",
-            "source": "daily_activity_summary",
-            "scope": "doing",
-            "text": text,
-            "evidence": evidence[:4],
-            "source_date": key,
-            "source_dates": [key],
-            "timestamp": datetime.combine(
-                datetime.strptime(key, "%Y-%m-%d").date(),
-                time.max,
-                tzinfo=self.tz,
-            ).isoformat(timespec="seconds"),
-            "confidence": max(confidences or [0.65]),
-            "source_turn_ids": list(dict.fromkeys(source_turn_ids))[:80],
-            "source_event_ids": list(dict.fromkeys(source_event_ids))[:160],
-        }
-
-    @staticmethod
-    def _clip_activity_material(text: str, *, limit: int = 72) -> str:
-        text = re.sub(r"\s+", " ", str(text or "")).strip(" -\t\r\n")
-        if len(text) <= limit:
-            return text
-        return text[: limit - 3].rstrip("，,；;、 ") + "..."
 
     async def _extract_daily_activity_summary(
         self,
@@ -1416,14 +1395,25 @@ class ReflectionEngine:
         *,
         client_override: Any = None,
         model_override: str = "",
-    ) -> dict:
+        attempt: str = "primary",
+    ) -> tuple[dict, dict]:
         if client_override is not None:
             client = client_override
         else:
             client = self.client
-        if not client:
-            return {}
         model = str(model_override or "").strip() or self.model
+        diagnostic = {
+            "attempt": str(attempt or "primary"),
+            "requested_model": str(model or ""),
+            "response_model": "",
+            "status": "client_unavailable" if not client else "pending",
+            "failure_reason": "client_unavailable" if not client else "",
+            "error_type": "",
+            "error": "",
+            "raw_response": "",
+        }
+        if not client:
+            return {}, diagnostic
         fallback_turn_ids, fallback_event_ids = self._conversation_source_ids(turns)
         payload = {
             "date": key,
@@ -1450,17 +1440,54 @@ class ReflectionEngine:
                     thinking_mode="" if client is self.dehydration_client else None,
                 ),
             )
-            parsed = self._parse_json_object(self._completion_content(response) or "")
+            diagnostic["response_model"] = str(getattr(response, "model", "") or "")
+            raw = self._completion_content(response) or ""
+            diagnostic["raw_response"] = self._clip_diagnostic_text(raw)
         except Exception as exc:
             logger.warning("Daily activity summary model failed: %s", exc)
-            return {}
-        return self._normalize_daily_activity_summary(
+            diagnostic.update(
+                {
+                    "status": "request_error",
+                    "failure_reason": "request_error",
+                    "error_type": type(exc).__name__,
+                    "error": self._clip_diagnostic_text(exc),
+                }
+            )
+            return {}, diagnostic
+        if not raw.strip():
+            diagnostic.update(
+                {
+                    "status": "empty_response",
+                    "failure_reason": "empty_response",
+                }
+            )
+            return {}, diagnostic
+        parsed = self._parse_json_object(raw)
+        if not parsed:
+            diagnostic.update(
+                {
+                    "status": "invalid_json",
+                    "failure_reason": "invalid_json_or_non_object",
+                }
+            )
+            return {}, diagnostic
+        item = self._normalize_daily_activity_summary(
             key,
             parsed,
             turns,
             source_turn_ids=fallback_turn_ids,
             source_event_ids=fallback_event_ids,
         )
+        if not item:
+            diagnostic.update(
+                {
+                    "status": "invalid_summary",
+                    "failure_reason": self._daily_activity_summary_validation_error(parsed),
+                }
+            )
+            return {}, diagnostic
+        diagnostic.update({"status": "ready", "failure_reason": ""})
+        return item, diagnostic
 
     def _daily_activity_summary_dehydration_retry_available(self) -> bool:
         if not self._daily_dehydration_client():
@@ -1498,15 +1525,17 @@ class ReflectionEngine:
         confidence = self._clamp(item.get("confidence", 0.65))
         if confidence < 0.35:
             return {}
+        valid_turn_ids = set(source_turn_ids)
+        valid_event_ids = set(source_event_ids)
         raw_turn_ids = [
             int(turn_id)
             for turn_id in self._string_list(item.get("source_turn_ids"), limit=80)
-            if str(turn_id).isdigit()
+            if str(turn_id).isdigit() and int(turn_id) in valid_turn_ids
         ] or source_turn_ids
         raw_event_ids = [
             int(event_id)
             for event_id in self._string_list(item.get("source_event_ids"), limit=160)
-            if str(event_id).isdigit()
+            if str(event_id).isdigit() and int(event_id) in valid_event_ids
         ] or source_event_ids
         sessions = [
             str(turn.get("session_id") or "").strip()
@@ -1528,42 +1557,84 @@ class ReflectionEngine:
             "source_event_ids": raw_event_ids[:160],
         }
 
-    def _fallback_daily_activity_summary(self, key: str, turns: list[dict]) -> dict:
-        fallback_turn_ids, fallback_event_ids = self._conversation_source_ids(turns)
-        snippets = []
-        for turn in reversed(turns or []):
-            snippet = self._daily_activity_summary_excerpt(turn.get("user_text") or turn.get("assistant_text") or "")
-            if snippet:
-                snippets.append(snippet)
-            if len(snippets) >= 3:
-                break
-        snippets = list(reversed(list(dict.fromkeys(snippets))))
-        if not snippets:
-            return {}
-        joined = "；".join(snippets)
-        if len(joined) > 96:
-            joined = joined[:93].rstrip("，,；;、 ") + "..."
-        return self._normalize_daily_activity_summary(
-            key,
-            {
-                "summary": f"围绕{joined}继续推进。",
-                "confidence": 0.45,
-                "source_turn_ids": fallback_turn_ids,
-                "source_event_ids": fallback_event_ids,
-            },
-            turns,
-            source_turn_ids=fallback_turn_ids,
-            source_event_ids=fallback_event_ids,
-        )
+    @staticmethod
+    def _daily_activity_summary_validation_error(item: dict) -> str:
+        text = str(item.get("summary") or item.get("text") or item.get("content") or "").strip()
+        if not text:
+            return "missing_summary"
+        try:
+            confidence = float(item.get("confidence", 0.65))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        if confidence < 0.35:
+            return "confidence_below_threshold"
+        return "summary_rejected"
 
     @staticmethod
-    def _daily_activity_summary_excerpt(value: Any) -> str:
-        text = strip_wikilinks(str(value or "")).strip()
-        text = re.sub(r"```.*?```", " ", text, flags=re.S)
-        text = re.sub(r"<attachment\b[^>]*>.*?</attachment>", " ", text, flags=re.I | re.S)
-        text = re.sub(r"【当前时间】[^\n\r]+", " ", text)
-        text = re.sub(r"\s+", " ", text).strip(" -\t\r\n")
-        return text[:60].rstrip("，,；;、 ")
+    def _validated_source_ids(value: Any, allowed: list[int], *, limit: int) -> list[int]:
+        allowed_ids = set()
+        for item in allowed:
+            try:
+                source_id = int(item)
+            except (TypeError, ValueError):
+                continue
+            if source_id > 0:
+                allowed_ids.add(source_id)
+        values = value if isinstance(value, list) else []
+        result = []
+        seen = set()
+        for item in values:
+            try:
+                source_id = int(item)
+            except (TypeError, ValueError):
+                continue
+            if source_id not in allowed_ids or source_id in seen:
+                continue
+            seen.add(source_id)
+            result.append(source_id)
+            if len(result) >= limit:
+                break
+        return result
+
+    def _daily_activity_summary_run_diagnostic(
+        self,
+        *,
+        key: str,
+        turns: int,
+        turn_source: str,
+        force: bool,
+        attempts: list[dict],
+        status: str,
+    ) -> dict:
+        created_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        return {
+            "run_id": f"daily_activity_summary:{key}:{created_at}",
+            "date": key,
+            "created_at": created_at,
+            "status": status,
+            "turns": int(turns),
+            "turn_source": str(turn_source or ""),
+            "force": bool(force),
+            "fallback_used": False,
+            "retry_used": len(attempts) > 1,
+            "attempts": attempts,
+        }
+
+    def _record_daily_activity_summary_diagnostic(self, record: dict) -> None:
+        path = self.daily_activity_summary_diagnostics_path
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except Exception as exc:
+            logger.warning("Daily activity summary diagnostic write failed: %s", exc)
+
+    @staticmethod
+    def _clip_diagnostic_text(value: Any, limit: int = 4000) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3] + "..."
 
     def _daily_activity_summary_timestamp(self, key: str, turns: list[dict]) -> str:
         latest: datetime | None = None
