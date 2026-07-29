@@ -145,6 +145,34 @@ def verify_identity_title_and_keyword_rescue() -> None:
         [{"id": target_id}],
     ) == {target_id: 0.5}
 
+    class RecallPolicy:
+        @staticmethod
+        def has_strong_score(**kwargs):
+            _ = kwargs
+            return False
+
+    service.recall_policy = RecallPolicy()
+    service.recall_fusion_mode = "dynamic"
+    service.high_confidence_keyword_score = 0.65
+    service._bucket_recall_rank = lambda query, bucket, score: (0,)
+    title_item = {
+        "bucket": {"id": "title"},
+        "title_anchor_terms": ["命名日"],
+        "score": 0.75,
+    }
+    keyword_item = {
+        "bucket": {"id": "body"},
+        "keyword_multi_evidence_signal": True,
+        "score": 0.9,
+    }
+    assert service._bucket_final_candidate_rank(
+        query,
+        title_item,
+    ) < service._bucket_final_candidate_rank(
+        query,
+        keyword_item,
+    )
+
 
 def verify_latin_subject_does_not_cut_other_names() -> None:
     patterns = _compact_retrieval_alias_patterns(["Haven", "小雨"])

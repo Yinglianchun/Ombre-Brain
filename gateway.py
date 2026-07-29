@@ -17356,24 +17356,28 @@ class GatewayService:
         if (
             item.get("exact_anchor_match")
             or self._planner_lexical_direct_signal(item)
-            or item.get("keyword_multi_evidence_signal")
-            or item.get("title_anchor_terms")
-            or item.get("category_overview_item")
             or item.get("explicit_relation_edge_match")
             or self._entity_edge_direct_signal(item)
         ):
             evidence_tier = 0
+        elif item.get("title_anchor_terms"):
+            evidence_tier = 1
+        elif (
+            item.get("keyword_multi_evidence_signal")
+            or item.get("category_overview_item")
+        ):
+            evidence_tier = 2
         elif self.recall_policy.has_strong_score(
             semantic_score=item.get("semantic_score"),
             rerank_score=item.get("rerank_score"),
         ):
-            evidence_tier = 1
-        elif self._safe_float(item.get("word_map_score"), 0.0) > 0:
-            evidence_tier = 2
-        elif self._safe_float(item.get("keyword_score"), 0.0) >= self.high_confidence_keyword_score:
             evidence_tier = 3
-        else:
+        elif self._safe_float(item.get("word_map_score"), 0.0) > 0:
             evidence_tier = 4
+        elif self._safe_float(item.get("keyword_score"), 0.0) >= self.high_confidence_keyword_score:
+            evidence_tier = 5
+        else:
+            evidence_tier = 6
         bucket_id = str((item.get("bucket") or {}).get("id") or "")
         recent_penalty = bool(recent_ids and bucket_id in recent_ids and evidence_tier != 0)
         if self.recall_fusion_mode == "dynamic":
