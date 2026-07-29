@@ -7621,10 +7621,6 @@ class GatewayService:
                 add(term)
         return terms[:8]
 
-    def _identity_name_semantic_query(self, query: str) -> str:
-        terms = self._identity_name_search_terms(query)
-        return " ".join(terms[:8]).strip()
-
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
         try:
@@ -11869,26 +11865,40 @@ class GatewayService:
             and not self._axis_lite_has_technical_axis(query_plan)
             and bool(row.get("has_topic_evidence"))
         )
-        if (
-            getattr(query_plan, "activated_axis_groups", ()) or ()
-        ) and not self._axis_lite_candidate_matches(query_plan, moment):
-            if not (
+        axis_groups = getattr(query_plan, "activated_axis_groups", ()) or ()
+        axis_candidate_matched = (
+            self._axis_lite_candidate_matches(query_plan, moment)
+            if axis_groups
+            else True
+        )
+        axis_candidate_would_reject = bool(
+            axis_groups
+            and not axis_candidate_matched
+            and not (
                 has_caution_path
                 or has_source_record_topic_evidence
                 or explicit_edge_axis_bypass
                 or topic_supported_local_chain
                 or self._semantic_neighbor_has_strong_confidence(row)
-            ):
-                return False, "activated_axis_mismatch"
-        if (
-            getattr(query_plan, "activated_axis_groups", ()) or ()
-        ) and self._axis_lite_domain_mismatch(query_plan, moment):
-            if not (
+            )
+        )
+        axis_domain_would_reject = bool(
+            axis_groups
+            and self._axis_lite_domain_mismatch(query_plan, moment)
+            and not (
                 has_caution_path
                 or has_source_record_topic_evidence
                 or explicit_edge_axis_bypass
-            ):
-                return False, "activated_axis_mismatch"
+            )
+        )
+        if axis_candidate_would_reject or axis_domain_would_reject:
+            row["axis_lite_shadow"] = {
+                "would_reject": True,
+                "reason": "activated_axis_mismatch",
+                "candidate_mismatch": axis_candidate_would_reject,
+                "domain_mismatch": axis_domain_would_reject,
+                **self._axis_lite_debug(query_plan, matched=axis_candidate_matched),
+            }
         if topic_supported_local_chain:
             return True, ""
         if why in {"same_topic", "date_neighbor"}:
@@ -14516,7 +14526,6 @@ class GatewayService:
             "generic_category_only",
             "weak_evidence_only",
             "no_hard_evidence",
-            "activated_axis_mismatch",
         }
         candidates = [
             item
@@ -15841,15 +15850,10 @@ class GatewayService:
         mark("keyword_candidates", stage_started_at)
         stage_started_at = time.perf_counter()
         if allow_semantic:
-            semantic_query = self._identity_name_semantic_query(raw_query) or raw_query
             semantic_scores = await self._get_semantic_candidates(
-                semantic_query,
+                raw_query,
                 set(semantic_bucket_map),
-                query_embedding=(
-                    query_embedding
-                    if semantic_query == raw_query
-                    else None
-                ),
+                query_embedding=query_embedding,
             )
         else:
             semantic_scores = {}
@@ -17012,8 +17016,6 @@ class GatewayService:
             return 1.0
         if str(item.get("admission_reason") or "") == "session_hard_exclude":
             return 0.0
-        if str(item.get("admission_reason") or "") == "activated_axis_mismatch":
-            return 0.0
         if str(item.get("admission_reason") or "") == "word_map_topic_evidence_missing":
             return 0.0
         if not self._query_has_specific_seed_residue(query):
@@ -17456,6 +17458,26 @@ class GatewayService:
             return None
         return "activated_axis_mismatch", self._axis_lite_debug(query_plan, matched=False)
 
+    @staticmethod
+    def _record_axis_lite_shadow(
+        item: dict,
+        rejection: tuple[str, dict[str, Any]] | None,
+    ) -> None:
+        if not rejection:
+            return
+        reason, debug = rejection
+        policy_debug = (
+            dict(item.get("recall_policy_debug"))
+            if isinstance(item.get("recall_policy_debug"), dict)
+            else {}
+        )
+        policy_debug["axis_lite_shadow"] = {
+            "would_reject": True,
+            "reason": reason,
+            **debug,
+        }
+        item["recall_policy_debug"] = policy_debug
+
     def _bucket_is_tech_domain(self, bucket: dict | None) -> bool:
         if not isinstance(bucket, dict):
             return False
@@ -17616,11 +17638,7 @@ class GatewayService:
         else:
             item.pop("recall_policy_debug", None)
         axis_rejection = self._axis_lite_bucket_rejection(query, item, query_plan)
-        if axis_rejection:
-            reason, debug = axis_rejection
-            item["admission_reason"] = reason
-            item["recall_policy_debug"] = debug
-            return False
+        self._record_axis_lite_shadow(item, axis_rejection)
         decision = self.recall_policy.assess(
             query,
             self._bucket_relevance_node(bucket),
@@ -17881,14 +17899,7 @@ class GatewayService:
             return False
         if decision.admit_direct:
             axis_rejection = self._axis_lite_moment_rejection(query, moment, query_plan)
-            if axis_rejection:
-                reason, debug = axis_rejection
-                moment["admission_reason"] = reason
-                moment["recall_policy_debug"] = {
-                    **(moment.get("recall_policy_debug") if isinstance(moment.get("recall_policy_debug"), dict) else {}),
-                    **debug,
-                }
-                return False
+            self._record_axis_lite_shadow(moment, axis_rejection)
         return decision.admit_direct
 
     def _unselected_moment_min_score(self) -> float:
