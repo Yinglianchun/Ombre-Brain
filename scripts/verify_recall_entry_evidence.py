@@ -9,6 +9,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway import GatewayService
+from memory_retrieval_aliases import (
+    _compact_retrieval_alias_patterns,
+    _retrieval_alias_variants,
+)
 
 
 def build_service() -> GatewayService:
@@ -113,9 +117,53 @@ def verify_keyword_evidence_coverage() -> None:
     ) == ["keyword_match"]
 
 
+def verify_identity_title_and_keyword_rescue() -> None:
+    service = build_service()
+    service._dynamic_anchor_query_terms = lambda query: []
+    service._dynamic_anchor_term_is_category = lambda term: False
+    naming_day = {"metadata": {"name": "Haven命名日"}}
+    unrelated = {"metadata": {"name": "Haven与Heaven的对话"}}
+    query = "Haven 的命名日是哪一天？"
+    assert service._bucket_title_anchor_terms(query, naming_day) == ["命名日"]
+    assert service._bucket_title_anchor_terms(query, unrelated) == []
+
+    target_id = "scene_chinese_name"
+
+    class KeywordManager:
+        @staticmethod
+        def calc_topic_scores(search_query, buckets):
+            _ = buckets
+            if search_query == "中文名":
+                return {target_id: 0.5}
+            return {}
+
+    service.bucket_mgr = KeywordManager()
+    service.dynamic_top_k = 10
+    service._query_anchor_terms_for_diversity = lambda query: ["中文名"]
+    assert service._get_keyword_candidates(
+        "中文名 Haven",
+        [{"id": target_id}],
+    ) == {target_id: 0.5}
+
+
+def verify_latin_subject_does_not_cut_other_names() -> None:
+    patterns = _compact_retrieval_alias_patterns(["Haven", "小雨"])
+    variants = _retrieval_alias_variants(
+        "Haven与Heaven的对话",
+        patterns=patterns,
+    )
+    assert "aven" not in variants
+    assert _retrieval_alias_variants(
+        "Haven与小雨关于命名日的对话",
+        patterns=patterns,
+    ) == ["Haven与小雨关于命名日的对话", "命名日"]
+
+
 def main() -> int:
     verify_search_query_keeps_sentence_residue()
     verify_keyword_evidence_coverage()
+    verify_identity_title_and_keyword_rescue()
+    verify_latin_subject_does_not_cut_other_names()
     print("recall entry evidence verification passed")
     return 0
 

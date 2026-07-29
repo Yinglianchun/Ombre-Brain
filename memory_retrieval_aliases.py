@@ -58,9 +58,16 @@ GENERIC_RETRIEVAL_ALIAS_KEYS = frozenset(
 def _compact_retrieval_alias_patterns(identity_terms: Any = ()) -> tuple[re.Pattern, ...]:
     subjects = ["哥哥", "我", "我们", "她", "他", "i", "we", "she", "he"]
     subjects.extend(str(term or "").strip() for term in (identity_terms or ()))
+
+    def subject_expression(term: str) -> str:
+        escaped = re.escape(term)
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]*", term):
+            return rf"{escaped}(?![A-Za-z0-9_])"
+        return escaped
+
     subject_pattern = "|".join(
         sorted(
-            {re.escape(term) for term in subjects if term},
+            {subject_expression(term) for term in subjects if term},
             key=len,
             reverse=True,
         )

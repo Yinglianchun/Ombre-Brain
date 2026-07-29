@@ -9415,6 +9415,7 @@ class GatewayService:
             "keyword_multi_evidence_signal",
             "legacy_distinctive_keyword_match",
             "legacy_distinctive_anchor_would_block",
+            "title_anchor_terms",
             "dynamic_anchor_plan",
             "distinctive_anchor_match",
             "distinctive_anchor_terms",
@@ -16726,6 +16727,7 @@ class GatewayService:
                 "keyword_multi_evidence_signal",
                 "legacy_distinctive_keyword_match",
                 "legacy_distinctive_anchor_would_block",
+                "title_anchor_terms",
                 "recall_policy_debug",
                 "dynamic_anchor_plan",
                 "distinctive_anchor_match",
@@ -16878,28 +16880,66 @@ class GatewayService:
         if not query or not isinstance(bucket, dict):
             return []
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        title_key = self._compact_lookup_key(meta.get("name") or bucket.get("name") or "")
+        title = str(meta.get("name") or bucket.get("name") or "").strip()
+        title_key = self._compact_lookup_key(title)
         if not title_key:
             return []
+        identity_terms = sorted(
+            self._identity_match_terms(),
+            key=lambda value: len(str(value or "")),
+            reverse=True,
+        )
+        identity_keys = {
+            self._compact_lookup_key(value)
+            for value in identity_terms
+            if self._compact_lookup_key(value)
+        }
         output: list[str] = []
         for term in self._dynamic_anchor_query_terms(query):
             key = self._compact_lookup_key(term)
-            if not key or len(key) < 3 or self._dynamic_anchor_term_is_category(term):
+            if (
+                not key
+                or key in identity_keys
+                or len(key) < 3
+                or self._dynamic_anchor_term_is_category(term)
+            ):
                 continue
             if key in title_key and term not in output:
                 output.append(term)
         query_key = self._compact_lookup_key(query)
-        title = str(meta.get("name") or bucket.get("name") or "").strip()
         for fragment in re.split(r"[与和及、/|：:—-]+", title):
             cleaned = fragment.strip()
             key = self._compact_lookup_key(cleaned)
             if (
                 len(key) >= 4
+                and key not in identity_keys
                 and key in query_key
                 and not self._dynamic_anchor_term_is_category(cleaned)
                 and cleaned not in output
             ):
                 output.append(cleaned)
+        identity_stripped_title = title
+        for identity_term in identity_terms:
+            if not identity_term:
+                continue
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]*", identity_term):
+                identity_stripped_title = re.sub(
+                    rf"(?<![A-Za-z0-9_]){re.escape(identity_term)}(?![A-Za-z0-9_])",
+                    "",
+                    identity_stripped_title,
+                    flags=re.IGNORECASE,
+                )
+            else:
+                identity_stripped_title = identity_stripped_title.replace(identity_term, "")
+        stripped_key = self._compact_lookup_key(identity_stripped_title)
+        stripped_key = re.sub(r"^(?:的|与|和|及)+", "", stripped_key)
+        if (
+            len(stripped_key) >= 3
+            and stripped_key in query_key
+            and not self._dynamic_anchor_term_is_category(stripped_key)
+            and stripped_key not in output
+        ):
+            output.append(stripped_key)
         return output
 
     def _definition_query_literal_terms(self, query: str, bucket: dict) -> list[str]:
@@ -17317,6 +17357,7 @@ class GatewayService:
             item.get("exact_anchor_match")
             or self._planner_lexical_direct_signal(item)
             or item.get("keyword_multi_evidence_signal")
+            or item.get("title_anchor_terms")
             or item.get("category_overview_item")
             or item.get("explicit_relation_edge_match")
             or self._entity_edge_direct_signal(item)
@@ -18027,7 +18068,25 @@ class GatewayService:
 
     def _get_keyword_candidates(self, query: str, buckets: list[dict]) -> dict[str, float]:
         if hasattr(self.bucket_mgr, "calc_topic_scores"):
-            raw_scores = self.bucket_mgr.calc_topic_scores(query, buckets)
+            raw_scores = dict(self.bucket_mgr.calc_topic_scores(query, buckets))
+            identity_keys = {
+                self._compact_lookup_key(term)
+                for term in self._identity_match_terms()
+                if self._compact_lookup_key(term)
+            }
+            rescue_terms = []
+            for term in self._query_anchor_terms_for_diversity(query):
+                key = self._compact_lookup_key(term)
+                if not key or key in identity_keys or term in rescue_terms:
+                    continue
+                rescue_terms.append(term)
+            for term in rescue_terms[:4]:
+                for bucket_id, score in self.bucket_mgr.calc_topic_scores(term, buckets).items():
+                    key = str(bucket_id)
+                    raw_scores[key] = max(
+                        self._safe_float(raw_scores.get(key), 0.0),
+                        self._safe_float(score, 0.0),
+                    )
             scored = [
                 (str(bucket_id), self._clamp(score))
                 for bucket_id, score in raw_scores.items()
@@ -19219,6 +19278,7 @@ class GatewayService:
             "legacy_distinctive_anchor_would_block": bool(
                 item.get("legacy_distinctive_anchor_would_block")
             ),
+            "title_anchor_terms": list(item.get("title_anchor_terms") or []),
             "distinctive_anchor_match": bool(item.get("distinctive_anchor_match")),
             "distinctive_anchor_terms": list(item.get("distinctive_anchor_terms") or []),
             "distinctive_anchor_missing_terms": list(item.get("distinctive_anchor_missing_terms") or []),
@@ -19328,6 +19388,7 @@ class GatewayService:
             "legacy_distinctive_anchor_would_block": bool(
                 moment.get("legacy_distinctive_anchor_would_block")
             ),
+            "title_anchor_terms": list(moment.get("title_anchor_terms") or []),
             "distinctive_anchor_match": bool(moment.get("distinctive_anchor_match")),
             "distinctive_anchor_terms": list(moment.get("distinctive_anchor_terms") or []),
             "distinctive_anchor_missing_terms": list(moment.get("distinctive_anchor_missing_terms") or []),
