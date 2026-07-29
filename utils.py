@@ -275,6 +275,7 @@ def load_config(config_path: str = None) -> dict:
             "semantic_session_dedupe_lexical_threshold": 0.82,
             "memory_sentinel_enabled": True,
             "semantic_recall_router": {
+                "mode": "",
                 "shadow_enabled": False,
                 "routes_path": "",
                 "index_path": "",

@@ -369,9 +369,10 @@ gateway:
   just_now_context_max_turns: 5
   just_now_context_budget: 420
   conversation_turns_max_entries: 500
-  memory_sentinel_enabled: true     # grey-zone routing: search | tone_only | skip; hard recall signals bypass it
+  memory_sentinel_enabled: true     # legacy comparison/debug; active semantic mode removes its veto
   semantic_recall_router:
-    shadow_enabled: false           # observe only; never changes recall admission
+    mode: "off"                     # off | shadow | active; active only skips high-confidence no-recall routes
+    shadow_enabled: false           # legacy compatibility; used only when mode is omitted
     routes_path: ""                 # empty = resources/semantic_recall_routes.json
     index_path: ""                  # empty = buckets_dir/semantic_recall_routes.v1.json
     min_score: 0.72

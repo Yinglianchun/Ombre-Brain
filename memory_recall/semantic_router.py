@@ -185,7 +185,7 @@ async def build_route_index(
 
 
 class SemanticRecallRouter:
-    """Shadow-only semantic decision layer for long-term memory recall."""
+    """Semantic decision layer for long-term memory recall."""
 
     def __init__(self, config: dict[str, Any], embedding_engine: Any):
         self.embedding_engine = embedding_engine
@@ -195,7 +195,16 @@ class SemanticRecallRouter:
         cfg = cfg if isinstance(cfg, dict) else {}
         project_dir = Path(__file__).resolve().parent.parent
         state_dir = Path(str(config.get("buckets_dir") or project_dir)).resolve()
-        self.shadow_enabled = bool(cfg.get("shadow_enabled", False))
+        configured_mode = str(cfg.get("mode") or "").strip().lower()
+        if not configured_mode:
+            configured_mode = "shadow" if bool(cfg.get("shadow_enabled", False)) else "off"
+        if configured_mode not in {"off", "shadow", "active"}:
+            configured_mode = "off"
+        self.mode = configured_mode
+        self.enabled = self.mode in {"shadow", "active"}
+        self.active = self.mode == "active"
+        # Compatibility for callers and old config readers.
+        self.shadow_enabled = self.enabled
         self.min_score = max(0.0, min(1.0, float(cfg.get("min_score", 0.72))))
         self.min_margin = max(0.0, min(1.0, float(cfg.get("min_margin", 0.04))))
         self.aggregation_top_k = max(
@@ -217,18 +226,22 @@ class SemanticRecallRouter:
 
     def debug_base(self, query: str) -> dict[str, Any]:
         return {
-            "enabled": self.shadow_enabled,
-            "shadow_only": True,
+            "enabled": self.enabled,
+            "mode": self.mode,
+            "active": self.active,
+            "shadow_only": not self.active,
             "called": False,
             "query_preview": str(query or "")[:500],
             "route": "",
             "route_action": "recall",
             "recommended_action": "recall",
             "would_skip": False,
+            "applied_action": "recall",
+            "skip_applied": False,
             "confidence": 0.0,
             "margin": 0.0,
             "threshold": self.min_score,
-            "reason": "disabled" if not self.shadow_enabled else "",
+            "reason": "disabled" if not self.enabled else "",
             "model": str(getattr(self.embedding_engine, "model", "") or ""),
             "dimension": 0,
             "query_vector_ready": False,
@@ -246,7 +259,7 @@ class SemanticRecallRouter:
     ) -> tuple[dict[str, Any], list[float] | None]:
         debug = self.debug_base(query)
         text = str(query or "").strip()
-        if not self.shadow_enabled:
+        if not self.enabled:
             return debug, None
         if not text:
             debug["reason"] = "empty_query"
@@ -333,6 +346,13 @@ class SemanticRecallRouter:
         debug["would_skip"] = True
         debug["reason"] = "matched_skip_route"
         return debug, query_vector
+
+    def should_apply_skip(self, debug: dict[str, Any] | None) -> bool:
+        return bool(
+            self.active
+            and isinstance(debug, dict)
+            and debug.get("would_skip")
+        )
 
     def _load_index(self) -> tuple[dict[str, Any], str]:
         if not self.source_path.exists():

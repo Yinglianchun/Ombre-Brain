@@ -905,6 +905,11 @@ class GatewayService:
                 "just_now_context_max_turns": self.just_now_context_max_turns,
                 "just_now_context_budget": self.just_now_context_budget,
                 "memory_sentinel_enabled": self.memory_sentinel_enabled,
+                "semantic_recall_router": {
+                    "mode": self.semantic_recall_router.mode,
+                    "enabled": self.semantic_recall_router.enabled,
+                    "active": self.semantic_recall_router.active,
+                },
                 "domain_sentinel_enabled": self.domain_sentinel_enabled,
                 "domain_sentinel_model": self.domain_sentinel_model,
                 "domain_sentinel_base_url": self.domain_sentinel_base_url,
@@ -981,6 +986,11 @@ class GatewayService:
             "just_now_context_budget": self.just_now_context_budget,
             "conversation_turns_max_entries": self.conversation_turns_max_entries,
             "memory_sentinel_enabled": self.memory_sentinel_enabled,
+            "semantic_recall_router": {
+                "mode": self.semantic_recall_router.mode,
+                "enabled": self.semantic_recall_router.enabled,
+                "active": self.semantic_recall_router.active,
+            },
             "domain_sentinel_enabled": self.domain_sentinel_enabled,
             "domain_sentinel_model": self.domain_sentinel_model,
             "domain_sentinel_base_url": self.domain_sentinel_base_url,
@@ -2758,6 +2768,8 @@ class GatewayService:
         )
         semantic_recall_query_vector: list[float] | None = None
         skip_broad_dynamic_recall = False
+        legacy_skip_broad_dynamic_recall = False
+        legacy_entry_skip_reason = ""
         date_persona_trace_requested = False
 
         if is_new_user_turn:
@@ -2787,16 +2799,47 @@ class GatewayService:
             )
             mark_step("memory_sentinel", stage_started_at)
             sentinel_route = str(memory_sentinel_debug.get("route") or "")
-            sentinel_skip_broad = sentinel_route in {"tone_only", "skip"}
+            (
+                semantic_skip_broad,
+                sentinel_skip_broad,
+                legacy_sentinel_skip_broad,
+                low_signal_skip_broad,
+            ) = self._recall_entry_skip_routes(
+                semantic_recall_debug,
+                sentinel_route=sentinel_route,
+                low_signal_auto_recall=low_signal_auto_recall,
+            )
+            semantic_recall_debug["skip_applied"] = semantic_skip_broad
+            semantic_recall_debug["applied_action"] = (
+                "skip" if semantic_skip_broad else "recall"
+            )
+            memory_sentinel_debug["would_skip"] = legacy_sentinel_skip_broad
+            memory_sentinel_debug["decision_applied"] = sentinel_skip_broad
+            memory_sentinel_debug["shadow_only"] = bool(
+                self.semantic_recall_router.active
+            )
             sentinel_search = sentinel_route == "search"
-            pre_domain_skip_broad = (
+            fixed_pre_domain_skip_broad = (
                 skip_for_targeted_detail
                 or needs_handoff_first
                 or just_now_context_requested
                 or date_recall_requested
+            )
+            pre_domain_skip_broad = (
+                fixed_pre_domain_skip_broad
+                or semantic_skip_broad
                 or sentinel_skip_broad
+                or (low_signal_skip_broad and not sentinel_search)
+            )
+            legacy_pre_domain_skip_broad = (
+                fixed_pre_domain_skip_broad
+                or legacy_sentinel_skip_broad
                 or (low_signal_auto_recall and not sentinel_search)
             )
+            if legacy_sentinel_skip_broad:
+                legacy_entry_skip_reason = f"memory_sentinel_{sentinel_route}"
+            elif low_signal_auto_recall and not sentinel_search:
+                legacy_entry_skip_reason = "low_signal_auto_recall"
             domain_sentinel_skip_broad = False
             if not pre_domain_skip_broad:
                 stage_started_at = time.perf_counter()
@@ -2810,6 +2853,10 @@ class GatewayService:
                 domain_sentinel_debug["skip_applied"] = True
             skip_broad_dynamic_recall = (
                 pre_domain_skip_broad
+                or domain_sentinel_skip_broad
+            )
+            legacy_skip_broad_dynamic_recall = (
+                legacy_pre_domain_skip_broad
                 or domain_sentinel_skip_broad
             )
             recall_plan_skip_reason = str(
@@ -2851,11 +2898,15 @@ class GatewayService:
                     all_buckets,
                 )
                 mark_step("date_recall", stage_started_at)
+            elif semantic_skip_broad:
+                query_planner_debug["skip_reason"] = (
+                    f"semantic_recall_{semantic_recall_debug.get('route') or 'skip'}"
+                )
             elif sentinel_skip_broad:
                 query_planner_debug["skip_reason"] = f"memory_sentinel_{sentinel_route}"
             elif domain_sentinel_skip_broad:
                 query_planner_debug["skip_reason"] = "domain_sentinel_skip"
-            elif low_signal_auto_recall:
+            elif low_signal_skip_broad:
                 query_planner_debug["skip_reason"] = (
                     recall_plan_skip_reason
                     if recall_plan_skip_reason == "recall_meta_without_target"
@@ -3344,22 +3395,29 @@ class GatewayService:
             semantic_action = str(
                 semantic_recall_debug.get("recommended_action") or "recall"
             )
-            legacy_action = "skip" if skip_broad_dynamic_recall else "recall"
+            legacy_action = "skip" if legacy_skip_broad_dynamic_recall else "recall"
+            applied_action = "skip" if skip_broad_dynamic_recall else "recall"
             semantic_recall_debug["legacy_comparison"] = {
                 "legacy_action": legacy_action,
                 "legacy_skip_reason": str(
-                    query_planner_debug.get("skip_reason") or ""
+                    legacy_entry_skip_reason
+                    or query_planner_debug.get("skip_reason")
+                    or ""
                 ),
                 "agrees": semantic_action == legacy_action,
+                "applied_action": applied_action,
                 "final_injected_ids": list(injected_ids or []),
             }
             if semantic_recall_debug.get("called"):
                 logger.info(
-                    "Semantic recall shadow | session=%s semantic=%s legacy=%s agrees=%s "
-                    "route=%s confidence=%s margin=%s reason=%s injected_ids=%s",
+                    "Semantic recall route | session=%s mode=%s semantic=%s legacy=%s "
+                    "applied=%s agrees=%s route=%s confidence=%s margin=%s reason=%s "
+                    "injected_ids=%s",
                     session_id,
+                    semantic_recall_debug.get("mode") or "shadow",
                     semantic_action,
                     legacy_action,
+                    applied_action,
                     semantic_action == legacy_action,
                     semantic_recall_debug.get("route") or "",
                     semantic_recall_debug.get("confidence") or 0,
@@ -13044,9 +13102,30 @@ class GatewayService:
             "confidence": None,
             "hard_bypass_reason": "",
             "rule_route": False,
+            "would_skip": False,
+            "decision_applied": False,
+            "shadow_only": False,
             "searchable_residue_terms": [],
             "original_query": self._clip_text(str(query or ""), 500),
         }
+
+    def _recall_entry_skip_routes(
+        self,
+        semantic_debug: dict[str, Any] | None,
+        *,
+        sentinel_route: str,
+        low_signal_auto_recall: bool,
+    ) -> tuple[bool, bool, bool, bool]:
+        """Return active semantic, active sentinel, legacy sentinel, and active low-signal skips."""
+        legacy_sentinel_skip = str(sentinel_route or "") in {"tone_only", "skip"}
+        semantic_active = bool(self.semantic_recall_router.active)
+        semantic_skip = self.semantic_recall_router.should_apply_skip(semantic_debug)
+        return (
+            semantic_skip,
+            legacy_sentinel_skip and not semantic_active,
+            legacy_sentinel_skip,
+            bool(low_signal_auto_recall) and not semantic_active,
+        )
 
     async def _route_memory_sentinel(
         self,
