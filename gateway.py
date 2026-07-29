@@ -2974,6 +2974,7 @@ class GatewayService:
                             memory_sentinel_debug,
                         ),
                         query_embedding=semantic_recall_query_vector,
+                        semantic_entry_routed=self.semantic_recall_router.active,
                         include_query_planner_debug=True,
                     )
                     mark_step("dynamic_recall_bucket_select", stage_started_at)
@@ -3033,6 +3034,7 @@ class GatewayService:
                             memory_sentinel_debug,
                         ),
                         query_embedding=semantic_recall_query_vector,
+                        semantic_entry_routed=self.semantic_recall_router.active,
                         include_query_planner_debug=True,
                     )
                     mark_step("dynamic_recall_graph_select", stage_started_at)
@@ -10008,6 +10010,7 @@ class GatewayService:
         all_moments: list[dict] | None = None,
         search_query: str = "",
         query_embedding: list[float] | None = None,
+        semantic_entry_routed: bool = False,
         include_query_planner_debug: bool = False,
     ) -> tuple[list[dict], list[dict], list[dict], list[dict]] | tuple[
         list[dict], list[dict], list[dict], list[dict], dict[str, Any]
@@ -10019,9 +10022,14 @@ class GatewayService:
                 include_query_planner_debug=include_query_planner_debug,
                 query_planner_debug=query_planner_debug,
             )
-        if (
+        legacy_auto_vague_would_skip = (
             self._auto_query_too_vague(query)
             and not self._has_named_exact_anchor_candidate(query, all_buckets)
+        )
+        query_planner_debug["legacy_auto_vague_would_skip"] = legacy_auto_vague_would_skip
+        if self._legacy_auto_vague_skip_applies(
+            legacy_auto_vague_would_skip,
+            semantic_entry_routed=semantic_entry_routed,
         ):
             query_planner_debug["skip_reason"] = "auto_vague_query"
             return self._empty_moment_selection(
@@ -10065,6 +10073,7 @@ class GatewayService:
             all_buckets,
             search_query=search_query,
             query_embedding=query_embedding,
+            semantic_entry_routed=semantic_entry_routed,
             include_query_planner_debug=True,
         )
         timing_debug = query_planner_debug.setdefault("timing_ms", {})
@@ -13126,6 +13135,14 @@ class GatewayService:
             legacy_sentinel_skip,
             bool(low_signal_auto_recall) and not semantic_active,
         )
+
+    @staticmethod
+    def _legacy_auto_vague_skip_applies(
+        legacy_would_skip: bool,
+        *,
+        semantic_entry_routed: bool,
+    ) -> bool:
+        return bool(legacy_would_skip) and not bool(semantic_entry_routed)
 
     async def _route_memory_sentinel(
         self,
@@ -16328,6 +16345,7 @@ class GatewayService:
         *,
         search_query: str = "",
         query_embedding: list[float] | None = None,
+        semantic_entry_routed: bool = False,
         include_query_planner_debug: bool = False,
         allow_semantic: bool = True,
         allow_query_planner: bool = True,
@@ -16352,10 +16370,15 @@ class GatewayService:
                 ),
             }
             all_buckets = suppress_migrated_legacy_sources(all_buckets)
-        if (
+        legacy_auto_vague_would_skip = (
             self._auto_query_too_vague(query)
             and not str(search_query or "").strip()
             and not self._has_named_exact_anchor_candidate(query, all_buckets)
+        )
+        planner_debug["legacy_auto_vague_would_skip"] = legacy_auto_vague_would_skip
+        if self._legacy_auto_vague_skip_applies(
+            legacy_auto_vague_would_skip,
+            semantic_entry_routed=semantic_entry_routed,
         ):
             planner_debug["skip_reason"] = "auto_vague_query"
             if include_query_planner_debug:

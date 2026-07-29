@@ -70,4 +70,15 @@ assert shadow_service._recall_entry_skip_routes(
     low_signal_auto_recall=True,
 ) == (False, True, True, True)
 
+assert active_service.semantic_recall_router.active is True
+assert shadow_service.semantic_recall_router.active is False
+assert GatewayService._legacy_auto_vague_skip_applies(
+    True,
+    semantic_entry_routed=True,
+) is False
+assert GatewayService._legacy_auto_vague_skip_applies(
+    True,
+    semantic_entry_routed=False,
+) is True
+
 print("semantic recall cutover verification passed")
