@@ -19319,6 +19319,15 @@ class GatewayService:
             "rare_name_match": bool(moment.get("rare_name_match")),
             "rare_name_terms": list(moment.get("rare_name_terms") or []),
             "rare_name_sources": list(moment.get("rare_name_sources") or []),
+            "specific_matched_query_terms": list(moment.get("specific_matched_query_terms") or []),
+            "keyword_direct_terms": list(moment.get("keyword_direct_terms") or []),
+            "keyword_multi_evidence_signal": bool(moment.get("keyword_multi_evidence_signal")),
+            "legacy_distinctive_keyword_match": bool(
+                moment.get("legacy_distinctive_keyword_match")
+            ),
+            "legacy_distinctive_anchor_would_block": bool(
+                moment.get("legacy_distinctive_anchor_would_block")
+            ),
             "distinctive_anchor_match": bool(moment.get("distinctive_anchor_match")),
             "distinctive_anchor_terms": list(moment.get("distinctive_anchor_terms") or []),
             "distinctive_anchor_missing_terms": list(moment.get("distinctive_anchor_missing_terms") or []),
