@@ -2682,7 +2682,8 @@ class GatewayService:
         has_handoff_context = self._messages_contain_handoff_context(messages)
         is_session_start = self.state_store.get_last_success_at(session_id) is None
         just_now_context_requested = (
-            self.just_now_context_enabled
+            include_recent_context
+            and self.just_now_context_enabled
             and self._query_requests_just_now_context(current_user_query)
         )
         is_handoff_trigger_query = self._query_is_handoff_trigger(current_user_query)
