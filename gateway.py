@@ -98,6 +98,7 @@ from query_terms import (
 from recall_eval import RECALL_EVAL_BLOCKED_SECTIONS, RECALL_EVAL_DEFAULT_CASES
 from recall_policy import QueryAnchorPlan, RecallPolicy, diffusion_seed_topic_term_has_specific_residue
 from memory_nodes import MemoryNodeStore
+from memory_recall import SemanticRecallRouter
 from persona_engine import PersonaStateEngine
 from persona_event_selection import (
     format_persona_event_trace_line,
@@ -477,6 +478,7 @@ class GatewayService:
         self.bucket_mgr = bucket_mgr or BucketManager(config)
         self.dehydrator = dehydrator or Dehydrator(config)
         self.embedding_engine = embedding_engine or EmbeddingEngine(config)
+        self.semantic_recall_router = SemanticRecallRouter(config, self.embedding_engine)
         self.reranker_engine = reranker_engine or RerankerEngine(config)
         self.memory_edge_store = MemoryEdgeStore(config)
         self.scene_edge_store = SceneEdgeStore(config, create=False)
@@ -2738,10 +2740,22 @@ class GatewayService:
         query_planner_debug: dict[str, Any] = self._query_planner_debug_base(current_user_query)
         memory_sentinel_debug: dict[str, Any] = self._memory_sentinel_debug_base(current_user_query)
         domain_sentinel_debug: dict[str, Any] = self._domain_sentinel_rule_plan(current_user_query)
+        semantic_recall_debug: dict[str, Any] = self.semantic_recall_router.debug_base(
+            current_user_query
+        )
+        semantic_recall_query_vector: list[float] | None = None
         skip_broad_dynamic_recall = False
         date_persona_trace_requested = False
 
         if is_new_user_turn:
+            stage_started_at = time.perf_counter()
+            (
+                semantic_recall_debug,
+                semantic_recall_query_vector,
+            ) = await self.semantic_recall_router.route_with_vector(
+                current_user_query
+            )
+            mark_step("semantic_recall_shadow", stage_started_at)
             stage_started_at = time.perf_counter()
             skip_for_targeted_detail = self._query_should_skip_broad_for_targeted_memory_detail(
                 current_user_query,
@@ -2895,6 +2909,7 @@ class GatewayService:
                             current_user_query,
                             memory_sentinel_debug,
                         ),
+                        query_embedding=semantic_recall_query_vector,
                         include_query_planner_debug=True,
                     )
                     mark_step("dynamic_recall_bucket_select", stage_started_at)
@@ -2953,6 +2968,7 @@ class GatewayService:
                             current_user_query,
                             memory_sentinel_debug,
                         ),
+                        query_embedding=semantic_recall_query_vector,
                         include_query_planner_debug=True,
                     )
                     mark_step("dynamic_recall_graph_select", stage_started_at)
@@ -3305,6 +3321,34 @@ class GatewayService:
                 json.dumps(prepare_timing_debug["steps_ms"], ensure_ascii=False, separators=(",", ":")),
             )
 
+        if semantic_recall_debug.get("enabled"):
+            semantic_action = str(
+                semantic_recall_debug.get("recommended_action") or "recall"
+            )
+            legacy_action = "skip" if skip_broad_dynamic_recall else "recall"
+            semantic_recall_debug["legacy_comparison"] = {
+                "legacy_action": legacy_action,
+                "legacy_skip_reason": str(
+                    query_planner_debug.get("skip_reason") or ""
+                ),
+                "agrees": semantic_action == legacy_action,
+                "final_injected_ids": list(injected_ids or []),
+            }
+            if semantic_recall_debug.get("called"):
+                logger.info(
+                    "Semantic recall shadow | session=%s semantic=%s legacy=%s agrees=%s "
+                    "route=%s confidence=%s margin=%s reason=%s injected_ids=%s",
+                    session_id,
+                    semantic_action,
+                    legacy_action,
+                    semantic_action == legacy_action,
+                    semantic_recall_debug.get("route") or "",
+                    semantic_recall_debug.get("confidence") or 0,
+                    semantic_recall_debug.get("margin") or 0,
+                    semantic_recall_debug.get("reason") or "",
+                    json.dumps(list(injected_ids or []), ensure_ascii=False),
+                )
+
         if include_debug:
             stage_started_at = time.perf_counter()
             debug_payload = self._build_injection_debug_payload(
@@ -3341,6 +3385,7 @@ class GatewayService:
                 query_planner_debug=query_planner_debug,
                 memory_sentinel_debug=memory_sentinel_debug,
                 domain_sentinel_debug=domain_sentinel_debug,
+                semantic_recall_debug=semantic_recall_debug,
                 debug_detail=debug_detail,
             )
             mark_step("build_debug_payload", stage_started_at)
@@ -9905,6 +9950,7 @@ class GatewayService:
         *,
         all_moments: list[dict] | None = None,
         search_query: str = "",
+        query_embedding: list[float] | None = None,
         include_query_planner_debug: bool = False,
     ) -> tuple[list[dict], list[dict], list[dict], list[dict]] | tuple[
         list[dict], list[dict], list[dict], list[dict], dict[str, Any]
@@ -9961,6 +10007,7 @@ class GatewayService:
             session_id,
             all_buckets,
             search_query=search_query,
+            query_embedding=query_embedding,
             include_query_planner_debug=True,
         )
         timing_debug = query_planner_debug.setdefault("timing_ms", {})
@@ -15670,6 +15717,7 @@ class GatewayService:
         all_buckets: list[dict],
         *,
         search_query: str = "",
+        query_embedding: list[float] | None = None,
         required_terms: list[str] | None = None,
         planner_query: dict[str, Any] | None = None,
         allow_semantic: bool = True,
@@ -15796,7 +15844,15 @@ class GatewayService:
         stage_started_at = time.perf_counter()
         if allow_semantic:
             semantic_query = self._identity_name_semantic_query(raw_query) or raw_query
-            semantic_scores = await self._get_semantic_candidates(semantic_query, set(semantic_bucket_map))
+            semantic_scores = await self._get_semantic_candidates(
+                semantic_query,
+                set(semantic_bucket_map),
+                query_embedding=(
+                    query_embedding
+                    if semantic_query == raw_query
+                    else None
+                ),
+            )
         else:
             semantic_scores = {}
         mark("semantic_candidates", stage_started_at)
@@ -16150,6 +16206,7 @@ class GatewayService:
         all_buckets: list[dict],
         *,
         search_query: str = "",
+        query_embedding: list[float] | None = None,
         include_query_planner_debug: bool = False,
         allow_semantic: bool = True,
         allow_query_planner: bool = True,
@@ -16190,6 +16247,7 @@ class GatewayService:
             session_id,
             all_buckets,
             search_query=search_query,
+            query_embedding=query_embedding,
             allow_semantic=allow_semantic,
             allow_semantic_session_dedupe=allow_semantic_session_dedupe,
             allow_rerank=allow_rerank,
@@ -17882,12 +17940,27 @@ class GatewayService:
         scored.sort(key=lambda item: item[1], reverse=True)
         return {bucket_id: score for bucket_id, score in scored[: self.dynamic_top_k]}
 
-    async def _get_semantic_candidates(self, query: str, eligible_ids: set[str]) -> dict[str, float]:
+    async def _get_semantic_candidates(
+        self,
+        query: str,
+        eligible_ids: set[str],
+        *,
+        query_embedding: list[float] | None = None,
+    ) -> dict[str, float]:
         if not getattr(self.embedding_engine, "enabled", False):
             return {}
 
         try:
-            search = self.embedding_engine.search_similar(query, top_k=self.semantic_candidate_top_k)
+            if query_embedding:
+                search = self.embedding_engine.search_similar_by_embedding(
+                    query_embedding,
+                    top_k=self.semantic_candidate_top_k,
+                )
+            else:
+                search = self.embedding_engine.search_similar(
+                    query,
+                    top_k=self.semantic_candidate_top_k,
+                )
             if self.embedding_query_timeout_seconds > 0:
                 results = await asyncio.wait_for(search, timeout=self.embedding_query_timeout_seconds)
             else:
@@ -19486,6 +19559,7 @@ class GatewayService:
         query_planner_debug: dict[str, Any] | None = None,
         memory_sentinel_debug: dict[str, Any] | None = None,
         domain_sentinel_debug: dict[str, Any] | None = None,
+        semantic_recall_debug: dict[str, Any] | None = None,
         date_persona_trace: str = "",
         date_persona_trace_debug: dict[str, Any] | None = None,
         debug_detail: str = "full",
@@ -19691,6 +19765,8 @@ class GatewayService:
             "moment_chunk_shadow_debug": moment_chunk_shadow_debug,
             "memory_sentinel_debug": memory_sentinel_debug or self._memory_sentinel_debug_base(query),
             "domain_sentinel_debug": domain_sentinel_debug or self._domain_sentinel_rule_plan(query),
+            "semantic_recall_debug": semantic_recall_debug
+            or self.semantic_recall_router.debug_base(query),
             "memory_detail_recall_debug": self._memory_detail_recall_debug_base(injected_bucket_ids),
             "targeted_memory_detail_debug": targeted_memory_detail_debug
             or self._targeted_memory_detail_debug_base(),

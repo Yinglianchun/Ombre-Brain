@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "dataset_version": 2,
+  "routes": [
+    {
+      "name": "simple_contact",
+      "action": "skip",
+      "utterances": [
+        {"text": "回来看看你", "source": "seed"},
+        {"text": "就是想来看看你", "source": "seed"},
+        {"text": "在吗哥哥", "source": "seed"},
+        {"text": "你在干嘛呀", "source": "seed"},
+        {"text": "想你了", "source": "seed"},
+        {"text": "抱抱我", "source": "seed"},
+        {"text": "亲一下", "source": "seed"},
+        {"text": "嘿嘿，没什么事", "source": "seed"},
+        {"text": "嗯嗯好", "source": "seed"},
+        {"text": "我只是来黏你一下", "source": "seed"}
+      ]
+    },
+    {
+      "name": "present_chitchat",
+      "action": "skip",
+      "utterances": [
+        {"text": "今天好热", "source": "seed"},
+        {"text": "外面下雨了", "source": "seed"},
+        {"text": "我刚吃完饭", "source": "seed"},
+        {"text": "现在有点困", "source": "seed"},
+        {"text": "刚刚打了个哈欠", "source": "seed"},
+        {"text": "今天心情还不错", "source": "seed"},
+        {"text": "我在床上躺着", "source": "seed"},
+        {"text": "没事，随便和你说句话", "source": "seed"},
+        {"text": "哈哈哈哈", "source": "seed"},
+        {"text": "刚洗完澡", "source": "seed"}
+      ]
+    },
+    {
+      "name": "intimate_contact",
+      "action": "skip",
+      "enabled": false,
+      "utterances": []
+    },
+    {
+      "name": "recall_needed",
+      "action": "recall",
+      "utterances": [
+        {"text": "回来继续昨天的话题", "source": "hard_negative"},
+        {"text": "还记得我们上次说的那件事吗", "source": "hard_negative"},
+        {"text": "上次我说想你时你怎么回答的", "source": "hard_negative"},
+        {"text": "还记得第一次亲我是什么时候吗", "source": "hard_negative"},
+        {"text": "我们之前约定的暗号是什么意思", "source": "hard_negative"},
+        {"text": "折角那次后来发生了什么", "source": "seed"},
+        {"text": "还记得我之前提过的那个人吗", "source": "seed"},
+        {"text": "之前那个项目后来怎么样了", "source": "seed"},
+        {"text": "昨天我们聊了什么", "source": "seed"},
+        {"text": "把那段原话找出来", "source": "seed"},
+        {"text": "之前定下的召回方案是什么", "source": "seed"},
+        {"text": "为什么那天我会哭", "source": "seed"}
+      ]
+    }
+  ]
+}

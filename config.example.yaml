@@ -370,6 +370,13 @@ gateway:
   just_now_context_budget: 420
   conversation_turns_max_entries: 500
   memory_sentinel_enabled: true     # grey-zone routing: search | tone_only | skip; hard recall signals bypass it
+  semantic_recall_router:
+    shadow_enabled: false           # observe only; never changes recall admission
+    routes_path: ""                 # empty = resources/semantic_recall_routes.json
+    index_path: ""                  # empty = buckets_dir/semantic_recall_routes.v1.json
+    min_score: 0.72
+    min_margin: 0.04
+    aggregation_top_k: 1
   domain_sentinel_enabled: true      # coarse routing: message_type, primary domain, optional should_recall=false
   domain_sentinel_model: ""          # empty = use dehydration.model; prefer cheap/fast models
   domain_sentinel_base_url: ""       # empty = reuse dehydration.base_url
