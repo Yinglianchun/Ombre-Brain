@@ -2252,6 +2252,14 @@ class GatewayService:
             "true",
             "yes",
         }
+        include_recent_context = (
+            str(body.get("include_recent_context", "1")).strip().lower()
+            not in {
+                "0",
+                "false",
+                "no",
+            }
+        )
         include_debug = self._truthy_header(
             str(body.get("include_debug")) if body.get("include_debug") is not None else None
         )
@@ -2293,6 +2301,7 @@ class GatewayService:
                 include_diffused=include_diffused,
                 include_context_debug=include_context_debug,
                 include_debug=include_debug,
+                include_recent_context=include_recent_context,
             )
 
         try:
@@ -2363,6 +2372,7 @@ class GatewayService:
         include_diffused: bool,
         include_context_debug: bool,
         include_debug: bool,
+        include_recent_context: bool,
     ) -> JSONResponse:
         """Run the normal Gateway recall pipeline without forwarding upstream."""
         try:
@@ -2375,6 +2385,7 @@ class GatewayService:
                 session_id,
                 include_debug=True,
                 debug_detail="compact",
+                include_recent_context=include_recent_context,
             )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
@@ -2637,6 +2648,7 @@ class GatewayService:
         include_debug: bool = False,
         manage_turn_snapshot: bool = False,
         debug_detail: str = "full",
+        include_recent_context: bool = True,
     ) -> tuple[dict, list[str] | None] | tuple[dict, list[str] | None, dict[str, Any]]:
         prepare_started_at = time.perf_counter()
         prepare_steps_ms: dict[str, int] = {}
@@ -3090,11 +3102,17 @@ class GatewayService:
                 )
             reliable_dynamic_context = bool(recalled_memory.strip() or related_memory.strip())
             memory_sentinel_blocks_context = str(memory_sentinel_debug.get("route") or "") in {"tone_only", "skip"}
-            if not memory_sentinel_blocks_context and not just_now_context_requested and not date_recall_requested and self._should_inject_recent_context(
-                session_id,
-                current_user_query,
-                has_reliable_dynamic_context=reliable_dynamic_context,
-                has_handoff_context=has_handoff_context or needs_handoff_first,
+            if (
+                include_recent_context
+                and not memory_sentinel_blocks_context
+                and not just_now_context_requested
+                and not date_recall_requested
+                and self._should_inject_recent_context(
+                    session_id,
+                    current_user_query,
+                    has_reliable_dynamic_context=reliable_dynamic_context,
+                    has_handoff_context=has_handoff_context or needs_handoff_first,
+                )
             ):
                 explicit_recent_query = self._query_requests_recent_context(current_user_query)
                 stage_started_at = time.perf_counter()
@@ -7783,17 +7801,7 @@ class GatewayService:
     ) -> bool:
         if self.recent_budget <= 0 or self.head_recent_hours <= 0:
             return False
-        if self._query_requests_recent_context(query_text):
-            return True
-        if has_handoff_context:
-            return False
-        if self._auto_recall_low_signal_query(query_text):
-            return False
-        if self._auto_query_too_vague(query_text):
-            return False
-        if self._recent_context_in_cooldown(session_id):
-            return False
-        return bool(self._recent_context_reason(session_id, query_text, has_reliable_dynamic_context))
+        return self._query_requests_recent_context(query_text)
 
     def _recent_context_reason(
         self,
@@ -7803,17 +7811,6 @@ class GatewayService:
     ) -> str:
         if self._query_requests_recent_context(query_text):
             return "explicit_recent_query"
-        if has_reliable_dynamic_context:
-            return "reliable_dynamic_context"
-        if self.state_store.get_current_round(session_id) <= 0:
-            return "new_session"
-        idle_hours = self._session_idle_hours(session_id)
-        if (
-            idle_hours is not None
-            and self.recent_context_reentry_idle_hours > 0
-            and idle_hours >= self.recent_context_reentry_idle_hours
-        ):
-            return "session_reentry"
         return ""
 
     def _recent_context_in_cooldown(self, session_id: str) -> bool:
