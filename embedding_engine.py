@@ -120,6 +120,12 @@ class EmbeddingEngine:
             logger.warning(f"Embedding API call failed: {e}")
             return []
 
+    async def embed_query(self, text: str) -> list[float]:
+        """Generate one query-space vector without searching the bucket index."""
+        if not self.enabled or not str(text or "").strip():
+            return []
+        return await self._generate_embedding(text, kind="query")
+
     def _store_embedding(self, bucket_id: str, embedding: list[float]):
         """Store embedding in SQLite."""
         from utils import now_iso
@@ -199,11 +205,23 @@ class EmbeddingEngine:
             return []
 
         try:
-            query_embedding = await self._generate_embedding(query, kind="query")
+            query_embedding = await self.embed_query(query)
             if not query_embedding:
                 return []
         except Exception as e:
             logger.warning(f"Query embedding failed: {e}")
+            return []
+
+        return await self.search_similar_by_embedding(query_embedding, top_k=top_k)
+
+    async def search_similar_by_embedding(
+        self,
+        query_embedding: list[float],
+        *,
+        top_k: int = 10,
+    ) -> list[tuple[str, float]]:
+        """Search the bucket index using an already-generated query vector."""
+        if not self.enabled or not query_embedding:
             return []
 
         # Load all embeddings from SQLite
