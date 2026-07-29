@@ -9410,6 +9410,11 @@ class GatewayService:
             "metadata_adjustment",
             "cooldown_penalty",
             "matched_query_terms",
+            "specific_matched_query_terms",
+            "keyword_direct_terms",
+            "keyword_multi_evidence_signal",
+            "legacy_distinctive_keyword_match",
+            "legacy_distinctive_anchor_would_block",
             "dynamic_anchor_plan",
             "distinctive_anchor_match",
             "distinctive_anchor_terms",
@@ -9488,7 +9493,7 @@ class GatewayService:
         if (
             self._planner_lexical_direct_signal(row)
             or row.get("exact_anchor_match")
-            or row.get("distinctive_anchor_match")
+            or row.get("keyword_multi_evidence_signal")
             or row.get("category_overview_item")
         ):
             return True
@@ -9515,7 +9520,6 @@ class GatewayService:
                 "exact_anchor",
                 "planner_lexical",
                 "explicit_relation_edge",
-                "distinctive_anchor",
                 "category_overview_item",
             }:
                 return True
@@ -9535,7 +9539,7 @@ class GatewayService:
         if (
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
-            or item.get("distinctive_anchor_match")
+            or item.get("keyword_multi_evidence_signal")
             or item.get("category_overview_item")
         ):
             return True
@@ -9685,7 +9689,7 @@ class GatewayService:
         if (
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
-            or item.get("distinctive_anchor_match")
+            or item.get("keyword_multi_evidence_signal")
             or item.get("category_overview_item")
         ):
             return True
@@ -12478,27 +12482,37 @@ class GatewayService:
 
     def _dynamic_recall_search_query(self, query: str, sentinel_debug: dict[str, Any] | None = None) -> str:
         identity_name_terms = self._identity_name_search_terms(query)
-        if identity_name_terms:
-            base = " ".join(identity_name_terms[:8])
+        residue_terms = self._memory_sentinel_searchable_residue_terms(query)
+        if residue_terms:
+            word_map_terms = [
+                term
+                for term in self._word_map_query_terms(query)
+                if self._compact_lookup_key(term)
+                and self._compact_lookup_key(term) not in {
+                    self._compact_lookup_key(existing)
+                    for existing in residue_terms
+                }
+            ]
+            base_terms = [*residue_terms, *word_map_terms]
         else:
-            residue_terms = self._memory_sentinel_searchable_residue_terms(query)
-            if residue_terms:
-                word_map_terms = [
-                    term
-                    for term in self._word_map_query_terms(query)
-                    if self._compact_lookup_key(term)
-                    and self._compact_lookup_key(term) not in {
-                        self._compact_lookup_key(existing)
-                        for existing in residue_terms
-                    }
-                ]
-                base = " ".join([*residue_terms, *word_map_terms][:8])
-            else:
-                word_map_terms = self._word_map_query_terms(query)
-                if word_map_terms:
-                    base = " ".join(word_map_terms[:8])
-                else:
-                    base = self._entity_priority_recall_search_query(query)
+            base_terms = list(self._word_map_query_terms(query))
+        if not base_terms:
+            fallback = self._entity_priority_recall_search_query(query)
+            base_terms = [fallback] if fallback else []
+        existing_keys = {
+            self._compact_lookup_key(term)
+            for term in base_terms
+            if self._compact_lookup_key(term)
+        }
+        identity_extras: list[str] = []
+        for term in identity_name_terms:
+            key = self._compact_lookup_key(term)
+            if not key or key in existing_keys or len(identity_extras) >= 2:
+                continue
+            existing_keys.add(key)
+            identity_extras.append(term)
+        core_limit = max(1, 8 - len(identity_extras))
+        base = " ".join([*base_terms[:core_limit], *identity_extras])
         anchors = []
         if isinstance(sentinel_debug, dict) and sentinel_debug.get("route") == "search":
             anchors = self._normalize_planner_terms(sentinel_debug.get("anchors"))
@@ -15897,6 +15911,12 @@ class GatewayService:
             else (normalized_query or raw_query)
         )
         diversity_terms = self._query_anchor_terms_for_diversity(diversity_query)
+        specific_diversity_terms = self.bucket_mgr.filter_specific_lexical_terms(
+            diversity_terms,
+            list(alias_eligible_map.values()),
+            min_specificity=0.34,
+            max_document_ratio=0.45,
+        )
         mark("lexical_candidates", stage_started_at)
         candidate_ids = (
             set(keyword_scores)
@@ -15982,6 +16002,10 @@ class GatewayService:
             if relevance_score <= 0:
                 continue
             matched_query_terms = self._bucket_matched_query_terms(bucket, diversity_terms)
+            specific_matched_query_terms = self._bucket_matched_query_terms(
+                bucket,
+                specific_diversity_terms,
+            )
             if exact_match:
                 matched_query_terms = list(
                     dict.fromkeys(
@@ -15997,6 +16021,18 @@ class GatewayService:
                     + list(dynamic_anchor.get("retrieval_alias_terms") or [])
                 )
             )
+            keyword_signal_item = {
+                "keyword_score": keyword_score,
+                "semantic_score": semantic_score,
+                "matched_query_terms": matched_query_terms,
+                "specific_matched_query_terms": specific_matched_query_terms,
+            }
+            keyword_multi_evidence_signal = self._keyword_multi_evidence_signal(
+                policy_query,
+                keyword_signal_item,
+                bucket,
+            )
+            keyword_direct_terms = list(keyword_signal_item.get("keyword_direct_terms") or [])
             planner_lexical_direct_match = lexical_match and self._matched_query_terms_have_specific_evidence(
                 {"matched_query_terms": matched_query_terms}
             )
@@ -16053,7 +16089,7 @@ class GatewayService:
             if (
                 planner_lexical_direct_match
                 or exact_match
-                or dynamic_anchor.get("distinctive_anchor_match")
+                or keyword_multi_evidence_signal
                 or dynamic_anchor.get("category_overview_item")
             ):
                 final_score = max(final_score, self.first_card_min_score)
@@ -16113,6 +16149,9 @@ class GatewayService:
                     "planner_lexical_direct_match": planner_lexical_direct_match,
                     "planner_queries": [planner_query] if planner_query else [],
                     "matched_query_terms": matched_query_terms,
+                    "specific_matched_query_terms": specific_matched_query_terms,
+                    "keyword_direct_terms": keyword_direct_terms,
+                    "keyword_multi_evidence_signal": keyword_multi_evidence_signal,
                     **dynamic_anchor,
                 }
             )
@@ -16145,7 +16184,7 @@ class GatewayService:
             if item["bucket"]["id"] not in recent_ids
             or self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
-            or item.get("distinctive_anchor_match")
+            or item.get("keyword_multi_evidence_signal")
             or item.get("category_overview_item")
             or self._is_high_confidence_match(
                 self._safe_float(item.get("semantic_score"), 0.0),
@@ -16682,6 +16721,11 @@ class GatewayService:
                 "cooldown_penalty",
                 "admission_reason",
                 "matched_query_terms",
+                "specific_matched_query_terms",
+                "keyword_direct_terms",
+                "keyword_multi_evidence_signal",
+                "legacy_distinctive_keyword_match",
+                "legacy_distinctive_anchor_would_block",
                 "recall_policy_debug",
                 "dynamic_anchor_plan",
                 "distinctive_anchor_match",
@@ -16747,6 +16791,57 @@ class GatewayService:
         if not terms:
             return False
         return any(self._matched_query_term_is_specific(term) for term in terms)
+
+    def _independent_keyword_evidence_terms(self, item: dict) -> list[str]:
+        terms = self._debug_str_list(
+            item.get("specific_matched_query_terms")
+            or item.get("matched_query_terms")
+        )
+        identity_keys = {
+            self._compact_lookup_key(term)
+            for term in self._identity_match_terms(compact=True)
+            if self._compact_lookup_key(term)
+        }
+        candidates: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for term in terms:
+            key = self._compact_lookup_key(term)
+            if (
+                not key
+                or key in seen
+                or key in identity_keys
+                or not self._matched_query_term_is_specific(term)
+            ):
+                continue
+            seen.add(key)
+            candidates.append((term, key))
+        candidates.sort(key=lambda row: len(row[1]), reverse=True)
+        independent: list[tuple[str, str]] = []
+        for term, key in candidates:
+            if any(key in kept_key for _kept_term, kept_key in independent):
+                continue
+            independent.append((term, key))
+        return [term for term, _key in independent]
+
+    def _keyword_multi_evidence_signal(self, query: str, item: dict, bucket: dict) -> bool:
+        terms = self._independent_keyword_evidence_terms(item)
+        item["keyword_direct_terms"] = terms
+        signal = bool(
+            isinstance(bucket, dict)
+            and self._safe_float(item.get("keyword_score"), 0.0)
+            >= self.high_confidence_keyword_score
+            and self._bucket_has_query_topic_evidence(query, bucket)
+            and (
+                len(terms) >= 2
+                or (
+                    len(terms) == 1
+                    and self._safe_float(item.get("semantic_score"), 0.0)
+                    >= self.high_confidence_semantic_score
+                )
+            )
+        )
+        item["keyword_multi_evidence_signal"] = signal
+        return signal
 
     def _matched_query_term_is_specific(self, term: Any) -> bool:
         key = self._compact_lookup_key(term)
@@ -16900,13 +16995,15 @@ class GatewayService:
             list(item.get("word_map_terms") or []) + list(item.get("low_frequency_terms") or [])
         ):
             labels.append("category_seed")
-        if (
+        legacy_distinctive_keyword_match = bool(
             isinstance(bucket, dict)
             and self._safe_float(item.get("keyword_score"), 0.0) > 0
             and item.get("distinctive_anchor_match")
             and self._bucket_has_query_topic_evidence(query, bucket)
             and self._matched_query_terms_have_specific_evidence(item)
-        ):
+        )
+        item["legacy_distinctive_keyword_match"] = legacy_distinctive_keyword_match
+        if self._keyword_multi_evidence_signal(query, item, bucket):
             labels.append("keyword_match")
         if self._safe_float(item.get("semantic_score"), 0.0) > 0:
             labels.append("semantic_hit")
@@ -16932,7 +17029,6 @@ class GatewayService:
             "exact_anchor",
             "entity_match",
             "keyword_match",
-            "distinctive_anchor",
             "category_overview_item",
             "identity_name_match",
             "source_record_exact",
@@ -16968,13 +17064,7 @@ class GatewayService:
     ) -> bool:
         if self.recall_policy.is_explicit_lookup_query(query):
             return True
-        if item.get("distinctive_anchor_match"):
-            return True
-        if (
-            item.get("distinctive_anchor_terms")
-            and self._safe_float(item.get("semantic_score"), 0.0)
-            >= self._safe_float(getattr(self.recall_policy, "semantic_threshold", 0.72), 0.72)
-        ):
+        if "keyword_match" in evidence_labels:
             return True
         label_set = {
             str(label or "").strip()
@@ -17069,7 +17159,7 @@ class GatewayService:
             return (
                 not bool(item.get("exact_anchor_match")),
                 not bool(self._planner_lexical_direct_signal(item)),
-                not bool(item.get("distinctive_anchor_match") or item.get("category_overview_item")),
+                not bool(item.get("keyword_multi_evidence_signal") or item.get("category_overview_item")),
                 not bool(self._entity_edge_direct_signal(item)),
                 -self._safe_float(item.get("score"), 0.0),
                 self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
@@ -17083,7 +17173,7 @@ class GatewayService:
             return (
                 not bool(item.get("exact_anchor_match")),
                 not bool(self._planner_lexical_direct_signal(item)),
-                not bool(item.get("distinctive_anchor_match") or item.get("category_overview_item")),
+                not bool(item.get("keyword_multi_evidence_signal") or item.get("category_overview_item")),
                 not bool(self._entity_edge_direct_signal(item)),
                 item.get("rerank_score") is None,
                 -self._safe_float(item.get("combined_score", item.get("score")), 0.0),
@@ -17101,7 +17191,7 @@ class GatewayService:
         return (
             not bool(item.get("exact_anchor_match")),
             not bool(self._planner_lexical_direct_signal(item)),
-            not bool(item.get("distinctive_anchor_match") or item.get("category_overview_item")),
+            not bool(item.get("keyword_multi_evidence_signal") or item.get("category_overview_item")),
             not bool(self._entity_edge_direct_signal(item)),
             -self._safe_float(item.get("semantic_score"), 0.0),
             -self._safe_float(item.get("keyword_score"), 0.0),
@@ -17226,7 +17316,7 @@ class GatewayService:
         if (
             item.get("exact_anchor_match")
             or self._planner_lexical_direct_signal(item)
-            or item.get("distinctive_anchor_match")
+            or item.get("keyword_multi_evidence_signal")
             or item.get("category_overview_item")
             or item.get("explicit_relation_edge_match")
             or self._entity_edge_direct_signal(item)
@@ -17407,7 +17497,7 @@ class GatewayService:
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
             or self._word_map_direct_signal(item)
-            or item.get("distinctive_anchor_match")
+            or item.get("keyword_multi_evidence_signal")
             or item.get("category_overview_item")
             or item.get("semantic_rescue_direct_span")
         ):
@@ -17521,7 +17611,7 @@ class GatewayService:
             or item.get("exact_anchor_match")
             or item.get("explicit_relation_edge_match")
             or self._entity_edge_direct_signal(item)
-            or item.get("distinctive_anchor_match")
+            or item.get("keyword_multi_evidence_signal")
         )
 
     def _item_has_high_confidence_direct_semantic_evidence(self, item: dict) -> bool:
@@ -17603,16 +17693,18 @@ class GatewayService:
             or item.get("explicit_relation_edge_match")
             or self._entity_edge_direct_signal(item)
             or self._is_identity_name_candidate_bucket(query, bucket)
+            or "keyword_match" in hard_evidence_labels
             or "title_anchor" in hard_evidence_labels
             or "semantic_rescue_direct_span" in hard_evidence_labels
             or "strong_semantic" in hard_evidence_labels
             or "strong_rerank" in hard_evidence_labels
         )
-        dynamic_anchor_missing = bool(
+        legacy_dynamic_anchor_missing = bool(
             dynamic_plan.get("required_terms")
             and not item.get("distinctive_anchor_match")
             and not independent_anchor_evidence
         )
+        item["legacy_distinctive_anchor_would_block"] = legacy_dynamic_anchor_missing
         category_overview_missing = bool(
             dynamic_plan.get("category_overview")
             and dynamic_plan.get("category_terms")
@@ -17652,6 +17744,7 @@ class GatewayService:
                 or self._word_map_direct_signal(item)
                 or self._entity_edge_direct_signal(item)
                 or item.get("semantic_rescue_direct_span")
+                or "keyword_match" in hard_evidence_labels
                 or "title_anchor" in hard_evidence_labels
             ),
             auto=True,
@@ -17677,18 +17770,18 @@ class GatewayService:
             if not self._bucket_has_reliable_recall_signal(query, item):
                 item["admission_reason"] = "low_recall_evidence"
                 return False
-        if decision.admit_direct and dynamic_anchor_missing:
-            item["admission_reason"] = "discriminative_anchor_missing"
-            item["blocked_reason"] = "discriminative_anchor_missing"
+        if legacy_dynamic_anchor_missing:
             item["recall_policy_debug"] = {
                 **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
-                "required_terms": list(dynamic_plan.get("required_terms") or []),
-                "matched_terms": list(item.get("distinctive_anchor_terms") or []),
-                "missing_terms": list(item.get("distinctive_anchor_missing_terms") or []),
-                "anchor_coverage": self._safe_float(item.get("anchor_coverage"), 0.0),
-                "auto": True,
+                "distinctive_anchor_shadow": {
+                    "would_block": True,
+                    "required_terms": list(dynamic_plan.get("required_terms") or []),
+                    "matched_terms": list(item.get("distinctive_anchor_terms") or []),
+                    "missing_terms": list(item.get("distinctive_anchor_missing_terms") or []),
+                    "anchor_coverage": self._safe_float(item.get("anchor_coverage"), 0.0),
+                    "auto": True,
+                },
             }
-            return False
         if decision.admit_direct and category_overview_missing:
             item["admission_reason"] = "category_overview_item_missing"
             item["blocked_reason"] = "category_overview_item_missing"
@@ -17718,7 +17811,7 @@ class GatewayService:
         if (
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
-            or item.get("distinctive_anchor_match")
+            or item.get("keyword_multi_evidence_signal")
             or item.get("category_overview_item")
             or item.get("semantic_rescue_direct_span")
         ):
@@ -18349,7 +18442,7 @@ class GatewayService:
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
             or self._word_map_direct_signal(item)
-            or item.get("distinctive_anchor_match")
+            or item.get("keyword_multi_evidence_signal")
             or item.get("category_overview_item")
         ):
             return True
@@ -19119,6 +19212,13 @@ class GatewayService:
             "rare_name_match": bool(item.get("rare_name_match")),
             "rare_name_terms": list(item.get("rare_name_terms") or []),
             "rare_name_sources": list(item.get("rare_name_sources") or []),
+            "specific_matched_query_terms": list(item.get("specific_matched_query_terms") or []),
+            "keyword_direct_terms": list(item.get("keyword_direct_terms") or []),
+            "keyword_multi_evidence_signal": bool(item.get("keyword_multi_evidence_signal")),
+            "legacy_distinctive_keyword_match": bool(item.get("legacy_distinctive_keyword_match")),
+            "legacy_distinctive_anchor_would_block": bool(
+                item.get("legacy_distinctive_anchor_would_block")
+            ),
             "distinctive_anchor_match": bool(item.get("distinctive_anchor_match")),
             "distinctive_anchor_terms": list(item.get("distinctive_anchor_terms") or []),
             "distinctive_anchor_missing_terms": list(item.get("distinctive_anchor_missing_terms") or []),
