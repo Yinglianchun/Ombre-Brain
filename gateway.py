@@ -17070,7 +17070,7 @@ class GatewayService:
                 not bool(item.get("exact_anchor_match")),
                 not bool(self._planner_lexical_direct_signal(item)),
                 not bool(item.get("distinctive_anchor_match") or item.get("category_overview_item")),
-                not bool(item.get("entity_edge_match")),
+                not bool(self._entity_edge_direct_signal(item)),
                 -self._safe_float(item.get("score"), 0.0),
                 self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
                 -self._safe_float(item.get("semantic_score"), 0.0),
@@ -17084,7 +17084,7 @@ class GatewayService:
                 not bool(item.get("exact_anchor_match")),
                 not bool(self._planner_lexical_direct_signal(item)),
                 not bool(item.get("distinctive_anchor_match") or item.get("category_overview_item")),
-                not bool(item.get("entity_edge_match")),
+                not bool(self._entity_edge_direct_signal(item)),
                 item.get("rerank_score") is None,
                 -self._safe_float(item.get("combined_score", item.get("score")), 0.0),
                 -self._safe_float(item.get("score"), 0.0),
@@ -17102,7 +17102,7 @@ class GatewayService:
             not bool(item.get("exact_anchor_match")),
             not bool(self._planner_lexical_direct_signal(item)),
             not bool(item.get("distinctive_anchor_match") or item.get("category_overview_item")),
-            not bool(item.get("entity_edge_match")),
+            not bool(self._entity_edge_direct_signal(item)),
             -self._safe_float(item.get("semantic_score"), 0.0),
             -self._safe_float(item.get("keyword_score"), 0.0),
             -self._safe_float(item.get("word_map_score"), 0.0),
@@ -17229,7 +17229,7 @@ class GatewayService:
             or item.get("distinctive_anchor_match")
             or item.get("category_overview_item")
             or item.get("explicit_relation_edge_match")
-            or item.get("entity_edge_match")
+            or self._entity_edge_direct_signal(item)
         ):
             evidence_tier = 0
         elif self.recall_policy.has_strong_score(
@@ -17744,7 +17744,7 @@ class GatewayService:
         if not isinstance(item, dict) or not item.get("entity_edge_match"):
             return False
         relation = str(item.get("entity_edge_relation") or "")
-        if relation not in {"likes", "dislikes", "prefers", "boundary", "participates_in", "shared_anchor"}:
+        if relation not in {"likes", "dislikes", "prefers", "boundary", "participates_in"}:
             return False
         return self._safe_float(item.get("entity_edge_score"), 0.0) >= 0.72
 
