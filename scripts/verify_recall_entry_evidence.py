@@ -383,6 +383,39 @@ def verify_frequency_anchors_are_shadow_only() -> None:
     assert category_row["legacy_category_overview_would_block"] is True
     assert category_row["category_overview_shadow"]["category_terms"] == ["视频"]
 
+    weak_explicit_edge = {
+        "moment": {"bucket_id": "birthday", "moment_id": "birthday:1"},
+        "runtime_allowed": True,
+        "confidence": 0.9,
+        "why": "explicit_edge",
+        "path_len": 1,
+        "has_topic_evidence": True,
+        "strong_topic_evidence": False,
+        "topic_evidence_terms": ["命名"],
+    }
+    assert service._diffusion_candidate_injection_decision(
+        weak_explicit_edge,
+        SimpleNamespace(
+            activated_axis_groups=(),
+            activated_axis_multi=False,
+            query="Haven 的命名日是哪一天",
+        ),
+    ) == (False, "query_topic_evidence_not_strong")
+
+    strong_explicit_edge = {
+        **weak_explicit_edge,
+        "strong_topic_evidence": True,
+        "topic_evidence_terms": ["命名日", "生日蛋糕"],
+    }
+    assert service._diffusion_candidate_injection_decision(
+        strong_explicit_edge,
+        SimpleNamespace(
+            activated_axis_groups=(),
+            activated_axis_multi=False,
+            query="命名日和生日蛋糕有什么联系",
+        ),
+    ) == (True, "")
+
 
 def verify_entity_edges_are_shadow_only() -> None:
     service = build_service()

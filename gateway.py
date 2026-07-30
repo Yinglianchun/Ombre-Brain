@@ -11989,6 +11989,10 @@ class GatewayService:
             return True, ""
         if why in {"same_topic", "date_neighbor"}:
             return True, ""
+        if why == "explicit_edge":
+            if row.get("strong_topic_evidence") or explicit_edge_axis_bypass:
+                return True, ""
+            return False, "query_topic_evidence_not_strong"
         if row.get("has_topic_evidence"):
             if (
                 why == "semantic_neighbor"
@@ -11999,10 +12003,6 @@ class GatewayService:
             return True, ""
         if why == "semantic_neighbor":
             if self._semantic_neighbor_has_strong_confidence(row):
-                return True, ""
-            return False, "query_topic_evidence_missing"
-        if why == "explicit_edge":
-            if explicit_edge_axis_bypass:
                 return True, ""
             return False, "query_topic_evidence_missing"
         return False, "unknown_diffusion_reason"
