@@ -175,6 +175,51 @@ def verify_identity_title_and_keyword_rescue() -> None:
         keyword_item,
     )
 
+    service.inject_max_cards = 2
+    service.first_card_min_score = 0.55
+    service.second_card_min_score = 0.50
+    service.second_card_relative_score = 0.85
+    service._pick_axis_diverse_dynamic_cards = lambda candidates, query: []
+    service._dynamic_bucket_item_has_reliable_recall_signal = (
+        lambda query, item: bool(item.get("keyword_multi_evidence_signal"))
+    )
+    title_item.update(
+        {
+            "matched_query_terms": ["命名", "命名日"],
+            "specific_matched_query_terms": ["命名"],
+            "keyword_multi_evidence_signal": True,
+        }
+    )
+    same_coverage_item = {
+        "bucket": {"id": "same-coverage-body"},
+        "score": 0.75,
+        "matched_query_terms": ["命名", "命名日"],
+        "specific_matched_query_terms": ["命名"],
+        "keyword_multi_evidence_signal": True,
+    }
+    assert [
+        item["bucket"]["id"]
+        for item in service._pick_dynamic_cards(
+            [title_item, same_coverage_item],
+            query=query,
+        )
+    ] == ["title"]
+
+    expanding_item = {
+        "bucket": {"id": "new-specific-coverage"},
+        "score": 0.75,
+        "matched_query_terms": ["生日蛋糕"],
+        "specific_matched_query_terms": ["蛋糕"],
+        "keyword_multi_evidence_signal": True,
+    }
+    assert [
+        item["bucket"]["id"]
+        for item in service._pick_dynamic_cards(
+            [title_item, expanding_item],
+            query="命名日和生日蛋糕",
+        )
+    ] == ["title", "new-specific-coverage"]
+
 
 def verify_latin_subject_does_not_cut_other_names() -> None:
     patterns = _compact_retrieval_alias_patterns(["Haven", "小雨"])

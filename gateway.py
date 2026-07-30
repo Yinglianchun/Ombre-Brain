@@ -18548,6 +18548,27 @@ class GatewayService:
         if self.inject_max_cards < 2 or not remaining_candidates:
             return chosen
 
+        first_has_focused_anchor = bool(
+            first.get("exact_anchor_match")
+            or first.get("title_anchor_terms")
+        )
+        if first_has_focused_anchor:
+            covered_specific_terms = set(first.get("specific_matched_query_terms") or [])
+            remaining_candidates = [
+                candidate
+                for candidate in remaining_candidates
+                if (
+                    candidate.get("exact_anchor_match")
+                    or candidate.get("title_anchor_terms")
+                    or (
+                        set(candidate.get("specific_matched_query_terms") or [])
+                        - covered_specific_terms
+                    )
+                )
+            ]
+            if not remaining_candidates:
+                return chosen
+
         covered_terms = set(first.get("matched_query_terms") or [])
         if covered_terms:
             for candidate in remaining_candidates:
