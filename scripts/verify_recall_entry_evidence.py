@@ -416,6 +416,55 @@ def verify_frequency_anchors_are_shadow_only() -> None:
         ),
     ) == (True, "")
 
+    relation_query_plan = SimpleNamespace(
+        activated_axis_groups=(("命名日",), ("生日蛋糕",)),
+        activated_axis_multi=True,
+        query="命名日和生日蛋糕有什么联系",
+    )
+    service._diffusion_explicit_edge_can_bridge_axis = lambda query_plan: True
+    reverse_evidence_path = SimpleNamespace(
+        steps=(
+            SimpleNamespace(
+                relation_type="evidenced_by",
+                direction="incoming",
+            ),
+        ),
+    )
+    reverse_evidence_edge = {
+        **weak_explicit_edge,
+        "path": reverse_evidence_path,
+    }
+    assert service._diffusion_candidate_injection_decision(
+        reverse_evidence_edge,
+        relation_query_plan,
+    ) == (False, "reverse_evidence_edge_without_strong_topic_evidence")
+
+    reverse_evidence_with_strong_topic = {
+        **reverse_evidence_edge,
+        "strong_topic_evidence": True,
+        "topic_evidence_terms": ["命名日", "生日蛋糕"],
+    }
+    assert service._diffusion_candidate_injection_decision(
+        reverse_evidence_with_strong_topic,
+        relation_query_plan,
+    ) == (True, "")
+
+    forward_evidence_edge = {
+        **weak_explicit_edge,
+        "path": SimpleNamespace(
+            steps=(
+                SimpleNamespace(
+                    relation_type="evidenced_by",
+                    direction="outgoing",
+                ),
+            ),
+        ),
+    }
+    assert service._diffusion_candidate_injection_decision(
+        forward_evidence_edge,
+        relation_query_plan,
+    ) == (True, "")
+
 
 def verify_entity_edges_are_shadow_only() -> None:
     service = build_service()

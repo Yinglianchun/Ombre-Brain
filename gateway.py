@@ -11940,9 +11940,13 @@ class GatewayService:
             row.get("path"),
             query_plan,
         )
+        has_reverse_evidence_edge = self._diffusion_path_has_reverse_evidence_edge(
+            row.get("path")
+        )
         explicit_edge_axis_bypass = (
             strong_explicit_edge
             and self._diffusion_explicit_edge_can_bridge_axis(query_plan)
+            and not has_reverse_evidence_edge
         )
         topic_supported_local_chain = (
             bool(row.get("chain_bundle"))
@@ -11990,7 +11994,11 @@ class GatewayService:
         if why in {"same_topic", "date_neighbor"}:
             return True, ""
         if why == "explicit_edge":
-            if row.get("strong_topic_evidence") or explicit_edge_axis_bypass:
+            if row.get("strong_topic_evidence"):
+                return True, ""
+            if has_reverse_evidence_edge:
+                return False, "reverse_evidence_edge_without_strong_topic_evidence"
+            if explicit_edge_axis_bypass:
                 return True, ""
             return False, "query_topic_evidence_not_strong"
         if row.get("has_topic_evidence"):
@@ -12012,6 +12020,14 @@ class GatewayService:
             return False
         query = str(getattr(query_plan, "query", "") or "")
         return bool(query and self.recall_policy.has_axis_relation_marker(query))
+
+    @staticmethod
+    def _diffusion_path_has_reverse_evidence_edge(path: Any) -> bool:
+        return any(
+            str(getattr(step, "relation_type", "") or "").lower() == "evidenced_by"
+            and str(getattr(step, "direction", "") or "outgoing").lower() == "incoming"
+            for step in tuple(getattr(path, "steps", ()) or ())
+        )
 
     def _semantic_neighbor_has_strong_confidence(self, row: dict[str, Any]) -> bool:
         if str(row.get("why") or "") != "semantic_neighbor":
