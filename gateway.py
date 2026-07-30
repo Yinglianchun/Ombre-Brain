@@ -19535,6 +19535,14 @@ class GatewayService:
             "legacy_distinctive_keyword_match": bool(
                 moment.get("legacy_distinctive_keyword_match")
             ),
+            "legacy_passive_statement_would_block": bool(
+                moment.get("legacy_passive_statement_would_block")
+            ),
+            "passive_statement_shadow": (
+                dict(moment.get("passive_statement_shadow"))
+                if isinstance(moment.get("passive_statement_shadow"), dict)
+                else {}
+            ),
             "legacy_distinctive_anchor_would_block": bool(
                 moment.get("legacy_distinctive_anchor_would_block")
             ),
@@ -19829,6 +19837,14 @@ class GatewayService:
                 moment.get("admission_reason") or moment.get("_admission_reason") or "suppressed"
             ),
             "score": self._safe_float(moment.get("score"), 0.0),
+            "legacy_passive_statement_would_block": bool(
+                moment.get("legacy_passive_statement_would_block")
+            ),
+            "passive_statement_shadow": (
+                dict(moment.get("passive_statement_shadow"))
+                if isinstance(moment.get("passive_statement_shadow"), dict)
+                else {}
+            ),
             "category_overview_item": bool(moment.get("category_overview_item")),
             "category_overview_terms": list(moment.get("category_overview_terms") or []),
             "legacy_category_overview_would_block": bool(

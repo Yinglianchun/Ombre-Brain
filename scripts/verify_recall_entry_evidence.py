@@ -487,6 +487,22 @@ def verify_passive_statement_gate_is_shadow_only() -> None:
     assert action_item["legacy_passive_statement_would_block"] is True
     assert action_item["passive_statement_shadow"]["active"] is False
     assert action_item["passive_statement_shadow"]["would_block"] is True
+    action_bucket = service._bucket_with_recall_signal(action_item)
+    action_moment = service._moment_with_bucket_recall_signal(
+        {
+            "bucket_id": "memory-repair",
+            "moment_id": "memory-repair:1",
+            "section": "body",
+        },
+        action_bucket["_recall_signal"],
+    )
+    action_debug = service._format_moment_debug(action_moment)
+    assert action_debug["legacy_passive_statement_would_block"] is True
+    assert action_debug["passive_statement_shadow"]["active"] is False
+    assert action_debug["passive_statement_shadow"]["would_block"] is True
+    compact_action_debug = service._compact_suppressed_moment_debug(action_moment)
+    assert compact_action_debug["legacy_passive_statement_would_block"] is True
+    assert compact_action_debug["passive_statement_shadow"]["would_block"] is True
 
     weak_tech_item = {
         "bucket": {
