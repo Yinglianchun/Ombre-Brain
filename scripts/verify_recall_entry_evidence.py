@@ -338,12 +338,107 @@ def verify_frequency_anchors_are_shadow_only() -> None:
     assert category_row["category_overview_shadow"]["category_terms"] == ["视频"]
 
 
+def verify_entity_edges_are_shadow_only() -> None:
+    service = build_service()
+
+    class RecallPolicy:
+        semantic_threshold = 0.72
+        rerank_threshold = 0.65
+
+        @staticmethod
+        def has_strong_score(**kwargs):
+            _ = kwargs
+            return False
+
+        @staticmethod
+        def is_detail_read_query(query):
+            _ = query
+            return False
+
+        @staticmethod
+        def _short_taste_query_terms(query):
+            _ = query
+            return []
+
+    service.recall_policy = RecallPolicy()
+    service.recall_fusion_mode = "dynamic"
+    service._bucket_recall_rank = lambda query, bucket, score: (0,)
+    service._planner_lexical_direct_signal = lambda item: False
+    service._query_requests_direct_detail = lambda query: False
+    service._word_map_direct_signal = lambda item: False
+    service._bucket_has_query_topic_evidence = lambda query, bucket: False
+    service._bucket_title_anchor_terms = lambda query, bucket: []
+    service._definition_query_literal_terms = lambda query, bucket: []
+    service._is_identity_name_candidate_bucket = lambda query, bucket: False
+    service._source_record_explicit_bucket_match_reason = lambda query, bucket: ""
+    service._word_map_category_seed_terms = lambda terms: []
+    service._keyword_multi_evidence_signal = lambda query, item, bucket: False
+    service._is_source_record_bucket = lambda bucket: False
+
+    plain = {
+        "bucket": {"id": "plain"},
+        "score": 0.5,
+        "semantic_score": 0.0,
+        "keyword_score": 0.0,
+        "word_map_score": 0.0,
+    }
+    edge_only = {
+        **plain,
+        "bucket": {"id": "edge"},
+        "entity_edge_match": True,
+        "entity_edge_score": 0.8,
+        "entity_edge_relation": "likes",
+        "entity_edge_shadow": service._entity_edge_shadow_debug(
+            score=0.8,
+            relation="likes",
+        ),
+    }
+    assert edge_only["entity_edge_shadow"] == {
+        "mode": "shadow",
+        "active": False,
+        "would_add_final_score": 0.064,
+        "would_add_legacy_fusion_component": 0.064,
+        "would_direct_signal": True,
+    }
+    assert service._bucket_primary_candidate_rank("普通短句", edge_only) == (
+        service._bucket_primary_candidate_rank("普通短句", plain)
+    )
+    assert service._bucket_reranked_candidate_rank("普通短句", edge_only) == (
+        service._bucket_reranked_candidate_rank("普通短句", plain)
+    )
+    assert service._bucket_rerank_candidate_priority("普通短句", edge_only) == (
+        service._bucket_rerank_candidate_priority("普通短句", plain)
+    )
+    assert service._bucket_final_candidate_rank("普通短句", edge_only) == (
+        service._bucket_final_candidate_rank("普通短句", plain)
+    )
+    assert service._axis_lite_bypass_for_item("普通短句", edge_only) is False
+    assert service._item_has_direct_tech_evidence(edge_only) is False
+    assert service._bucket_has_reliable_recall_signal("普通短句", edge_only) is False
+    assert service._bucket_evidence_labels("普通短句", edge_only) == ["graph_related"]
+
+    formal_relation = {
+        **plain,
+        "bucket": {"id": "formal"},
+        "explicit_relation_edge_match": True,
+    }
+    assert "entity_match" in service._bucket_evidence_labels(
+        "普通短句",
+        formal_relation,
+    )
+    assert service._bucket_final_candidate_rank(
+        "普通短句",
+        formal_relation,
+    ) < service._bucket_final_candidate_rank("普通短句", plain)
+
+
 def main() -> int:
     verify_search_query_keeps_sentence_residue()
     verify_keyword_evidence_coverage()
     verify_identity_title_and_keyword_rescue()
     verify_latin_subject_does_not_cut_other_names()
     verify_frequency_anchors_are_shadow_only()
+    verify_entity_edges_are_shadow_only()
     print("recall entry evidence verification passed")
     return 0
 

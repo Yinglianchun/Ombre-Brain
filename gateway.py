@@ -9456,6 +9456,7 @@ class GatewayService:
             "entity_edge_subject",
             "entity_edge_relation",
             "entity_edge_object",
+            "entity_edge_shadow",
             "explicit_relation_edge_match",
             "explicit_relation_edge_confidence",
             "explicit_relation_edge_peer_bucket_id",
@@ -16050,15 +16051,12 @@ class GatewayService:
             | set(word_map_scores)
             | set(retrieval_alias_scores)
         )
-        all_bucket_ids = {
-            str(bucket.get("id") or "")
-            for bucket in all_buckets
-            if isinstance(bucket, dict) and str(bucket.get("id") or "").strip()
-        }
-        entity_edge_boosts = self._get_entity_edge_boosts(raw_query, all_bucket_ids)
-        candidate_ids |= set(entity_edge_boosts)
         if not candidate_ids:
             return [], []
+        entity_edge_shadow_matches = self._get_entity_edge_boosts(
+            raw_query,
+            set(candidate_ids),
+        )
 
         stage_started_at = time.perf_counter()
         semantic_norms = self._normalized_score_map(semantic_scores)
@@ -16095,7 +16093,7 @@ class GatewayService:
             keyword_score = self._clamp(keyword_scores.get(bucket_id, 0.0))
             exact_score = self._clamp(exact_scores.get(bucket_id, 0.0))
             word_map_score = self._clamp(word_map_scores.get(bucket_id, 0.0))
-            entity_edge = entity_edge_boosts.get(bucket_id) or {}
+            entity_edge = entity_edge_shadow_matches.get(bucket_id) or {}
             entity_edge_score = self._clamp(entity_edge.get("score") or 0.0)
             word_map_item_debug = word_map_debug.get(bucket_id) or {}
             rare_name_terms = list(word_map_item_debug.get("rare_name_terms") or [])
@@ -16203,13 +16201,14 @@ class GatewayService:
                     semantic_score * self.semantic_weight
                     + keyword_score * self.keyword_weight
                     + word_map_adjustment
-                    + entity_edge_score * 0.08
                     + importance_score * self.importance_weight
                     + freshness_score * self.freshness_weight
                 ) * relevance_score
                 final_score = round(fusion_score * cooldown_multiplier, 4)
-            if entity_edge_score > 0:
-                final_score = round(self._clamp(final_score + min(0.08, entity_edge_score * 0.08)), 4)
+            entity_edge_shadow = self._entity_edge_shadow_debug(
+                score=entity_edge_score,
+                relation=str(entity_edge.get("relation") or ""),
+            )
             if (
                 planner_lexical_direct_match
                 or exact_match
@@ -16233,6 +16232,7 @@ class GatewayService:
                     "entity_edge_subject": str(entity_edge.get("subject") or ""),
                     "entity_edge_relation": str(entity_edge.get("relation") or ""),
                     "entity_edge_object": str(entity_edge.get("object_text") or ""),
+                    "entity_edge_shadow": entity_edge_shadow,
                     "word_map_terms": list(word_map_item_debug.get("direct_terms") or []),
                     "word_map_variant_terms": list(word_map_item_debug.get("variant_terms") or []),
                     "word_map_neighbor_terms": list(
@@ -16834,6 +16834,7 @@ class GatewayService:
                 "entity_edge_subject",
                 "entity_edge_relation",
                 "entity_edge_object",
+                "entity_edge_shadow",
                 "explicit_relation_edge_match",
                 "explicit_relation_edge_confidence",
                 "explicit_relation_edge_peer_bucket_id",
@@ -17139,7 +17140,7 @@ class GatewayService:
                 labels.append("protected_phrase")
         if self._planner_lexical_direct_signal(item):
             labels.append("entity_match")
-        if item.get("explicit_relation_edge_match") or self._entity_edge_direct_signal(item):
+        if item.get("explicit_relation_edge_match"):
             labels.append("entity_match")
         if isinstance(bucket, dict) and self._is_identity_name_candidate_bucket(query, bucket):
             labels.append("identity_name_match")
@@ -17327,7 +17328,6 @@ class GatewayService:
                 not bool(item.get("exact_anchor_match")),
                 not bool(self._planner_lexical_direct_signal(item)),
                 not bool(item.get("keyword_multi_evidence_signal")),
-                not bool(self._entity_edge_direct_signal(item)),
                 -self._safe_float(item.get("score"), 0.0),
                 self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
                 -self._safe_float(item.get("semantic_score"), 0.0),
@@ -17341,7 +17341,6 @@ class GatewayService:
                 not bool(item.get("exact_anchor_match")),
                 not bool(self._planner_lexical_direct_signal(item)),
                 not bool(item.get("keyword_multi_evidence_signal")),
-                not bool(self._entity_edge_direct_signal(item)),
                 item.get("rerank_score") is None,
                 -self._safe_float(item.get("combined_score", item.get("score")), 0.0),
                 -self._safe_float(item.get("score"), 0.0),
@@ -17359,7 +17358,6 @@ class GatewayService:
             not bool(item.get("exact_anchor_match")),
             not bool(self._planner_lexical_direct_signal(item)),
             not bool(item.get("keyword_multi_evidence_signal")),
-            not bool(self._entity_edge_direct_signal(item)),
             -self._safe_float(item.get("semantic_score"), 0.0),
             -self._safe_float(item.get("keyword_score"), 0.0),
             -self._safe_float(item.get("word_map_score"), 0.0),
@@ -17380,6 +17378,22 @@ class GatewayService:
         except Exception as exc:
             logger.warning("Gateway entity edge boost failed: %s", exc)
             return {}
+
+    @staticmethod
+    def _entity_edge_shadow_debug(*, score: Any, relation: str) -> dict[str, Any]:
+        edge_score = max(0.0, min(1.0, GatewayService._safe_float(score, 0.0)))
+        relation_name = str(relation or "")
+        return {
+            "mode": "shadow",
+            "active": False,
+            "would_add_final_score": round(min(0.08, edge_score * 0.08), 4),
+            "would_add_legacy_fusion_component": round(edge_score * 0.08, 4),
+            "would_direct_signal": bool(
+                relation_name
+                in {"likes", "dislikes", "prefers", "boundary", "participates_in"}
+                and edge_score >= 0.72
+            ),
+        }
 
     def _boost_explicit_relation_edge_bucket_items(self, query: str, items: list[dict]) -> list[dict]:
         if not items or not self.recall_policy.has_axis_relation_marker(query):
@@ -17484,7 +17498,6 @@ class GatewayService:
             item.get("exact_anchor_match")
             or self._planner_lexical_direct_signal(item)
             or item.get("explicit_relation_edge_match")
-            or self._entity_edge_direct_signal(item)
         ):
             evidence_tier = 0
         elif item.get("title_anchor_terms"):
@@ -17670,8 +17683,6 @@ class GatewayService:
             or item.get("semantic_rescue_direct_span")
         ):
             return True
-        if self._entity_edge_direct_signal(item):
-            return True
         return self.recall_policy.has_strong_score(
             semantic_score=item.get("semantic_score"),
             rerank_score=item.get("rerank_score"),
@@ -17778,7 +17789,6 @@ class GatewayService:
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
             or item.get("explicit_relation_edge_match")
-            or self._entity_edge_direct_signal(item)
             or item.get("keyword_multi_evidence_signal")
         )
 
@@ -17859,7 +17869,6 @@ class GatewayService:
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
             or item.get("explicit_relation_edge_match")
-            or self._entity_edge_direct_signal(item)
             or self._is_identity_name_candidate_bucket(query, bucket)
             or "keyword_match" in hard_evidence_labels
             or "title_anchor" in hard_evidence_labels
@@ -17911,7 +17920,6 @@ class GatewayService:
                 self._planner_lexical_direct_signal(item)
                 or item.get("exact_anchor_match")
                 or self._word_map_direct_signal(item)
-                or self._entity_edge_direct_signal(item)
                 or item.get("semantic_rescue_direct_span")
                 or "keyword_match" in hard_evidence_labels
                 or "title_anchor" in hard_evidence_labels
@@ -17987,30 +17995,13 @@ class GatewayService:
             or item.get("semantic_rescue_direct_span")
         ):
             return True
-        if self._entity_edge_direct_signal(item):
-            return True
         if self.recall_policy.has_strong_score(
             semantic_score=item.get("semantic_score"),
             rerank_score=item.get("rerank_score"),
         ):
             return True
         bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else None
-        if (
-            bucket
-            and item.get("entity_edge_match")
-            and self._safe_float(item.get("entity_edge_score"), 0.0) >= 0.62
-            and self._bucket_has_query_topic_evidence(query, bucket)
-        ):
-            return True
         return bool(bucket and self._bucket_has_query_topic_evidence(query, bucket))
-
-    def _entity_edge_direct_signal(self, item: dict) -> bool:
-        if not isinstance(item, dict) or not item.get("entity_edge_match"):
-            return False
-        relation = str(item.get("entity_edge_relation") or "")
-        if relation not in {"likes", "dislikes", "prefers", "boundary", "participates_in"}:
-            return False
-        return self._safe_float(item.get("entity_edge_score"), 0.0) >= 0.72
 
     def _can_bypass_anchor_with_strong_model_score(
         self,
@@ -19202,11 +19193,17 @@ class GatewayService:
             )
         if item.get("entity_edge_match"):
             add_source(
-                "entity_edge",
+                "entity_edge_shadow",
+                mode="shadow",
                 score=self._safe_float(entity_edge_score, 0.0),
                 subject=str(item.get("entity_edge_subject") or ""),
                 relation=str(item.get("entity_edge_relation") or ""),
                 object=str(item.get("entity_edge_object") or ""),
+                shadow=(
+                    dict(item.get("entity_edge_shadow"))
+                    if isinstance(item.get("entity_edge_shadow"), dict)
+                    else {}
+                ),
             )
         if item.get("explicit_relation_edge_match"):
             add_source(
@@ -19289,6 +19286,12 @@ class GatewayService:
                     self._safe_float(entity_edge_score, 0.0)
                     if entity_edge_score is not None
                     else None
+                ),
+                "entity_edge_active": False,
+                "entity_edge_shadow": (
+                    dict(item.get("entity_edge_shadow"))
+                    if isinstance(item.get("entity_edge_shadow"), dict)
+                    else {}
                 ),
                 "fusion_mode": str(item.get("fusion_mode") or ""),
                 "fusion_score": self._safe_float(item.get("fusion_score"), 0.0),
@@ -19544,6 +19547,11 @@ class GatewayService:
             "entity_edge_subject": str(moment.get("entity_edge_subject") or ""),
             "entity_edge_relation": str(moment.get("entity_edge_relation") or ""),
             "entity_edge_object": str(moment.get("entity_edge_object") or ""),
+            "entity_edge_shadow": (
+                dict(moment.get("entity_edge_shadow"))
+                if isinstance(moment.get("entity_edge_shadow"), dict)
+                else {}
+            ),
             "explicit_relation_edge_match": bool(moment.get("explicit_relation_edge_match")),
             "explicit_relation_edge_confidence": (
                 self._safe_float(moment.get("explicit_relation_edge_confidence"), 0.0)
