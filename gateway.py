@@ -9475,6 +9475,8 @@ class GatewayService:
             "keyword_direct_terms",
             "keyword_multi_evidence_signal",
             "legacy_distinctive_keyword_match",
+            "legacy_passive_statement_would_block",
+            "passive_statement_shadow",
             "legacy_distinctive_anchor_would_block",
             "legacy_category_overview_would_block",
             "title_anchor_terms",
@@ -16854,6 +16856,8 @@ class GatewayService:
                 "keyword_direct_terms",
                 "keyword_multi_evidence_signal",
                 "legacy_distinctive_keyword_match",
+                "legacy_passive_statement_would_block",
+                "passive_statement_shadow",
                 "legacy_distinctive_anchor_would_block",
                 "legacy_category_overview_would_block",
                 "title_anchor_terms",
@@ -17849,21 +17853,25 @@ class GatewayService:
         hard_evidence_labels = self._hard_bucket_evidence_labels(evidence_labels)
         item["evidence_labels"] = evidence_labels
         item["hard_evidence_labels"] = hard_evidence_labels
-        if not self._passive_statement_has_recall_evidence(
+        legacy_passive_statement_would_block = not self._passive_statement_has_recall_evidence(
             query,
             item,
             evidence_labels,
-        ):
-            item["admission_reason"] = "passive_statement_evidence_missing"
-            item["blocked_reason"] = "passive_statement_evidence_missing"
-            item["recall_policy_debug"] = {
-                "passive_statement": True,
+        )
+        item["legacy_passive_statement_would_block"] = legacy_passive_statement_would_block
+        if legacy_passive_statement_would_block:
+            item["passive_statement_shadow"] = {
+                "mode": "shadow",
+                "active": False,
+                "would_block": True,
+                "legacy_reason": "passive_statement_evidence_missing",
                 "evidence_labels": evidence_labels,
                 "hard_evidence_labels": hard_evidence_labels,
                 "required_evidence": "one_strong_cue_or_two_cues_or_one_cue_plus_strong_semantic",
                 "auto": True,
             }
-            return False
+        else:
+            item.pop("passive_statement_shadow", None)
         dynamic_plan = item.get("dynamic_anchor_plan") if isinstance(item.get("dynamic_anchor_plan"), dict) else {}
         independent_anchor_evidence = bool(
             self._planner_lexical_direct_signal(item)
@@ -19406,6 +19414,14 @@ class GatewayService:
             "keyword_direct_terms": list(item.get("keyword_direct_terms") or []),
             "keyword_multi_evidence_signal": bool(item.get("keyword_multi_evidence_signal")),
             "legacy_distinctive_keyword_match": bool(item.get("legacy_distinctive_keyword_match")),
+            "legacy_passive_statement_would_block": bool(
+                item.get("legacy_passive_statement_would_block")
+            ),
+            "passive_statement_shadow": (
+                dict(item.get("passive_statement_shadow"))
+                if isinstance(item.get("passive_statement_shadow"), dict)
+                else {}
+            ),
             "legacy_distinctive_anchor_would_block": bool(
                 item.get("legacy_distinctive_anchor_would_block")
             ),

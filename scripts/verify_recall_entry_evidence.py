@@ -14,6 +14,7 @@ from memory_retrieval_aliases import (
     _compact_retrieval_alias_patterns,
     _retrieval_alias_variants,
 )
+from recall_policy import RecallPolicy
 
 
 def build_service() -> GatewayService:
@@ -432,6 +433,88 @@ def verify_entity_edges_are_shadow_only() -> None:
     ) < service._bucket_final_candidate_rank("普通短句", plain)
 
 
+def verify_passive_statement_gate_is_shadow_only() -> None:
+    service = build_service()
+    service.recall_policy = RecallPolicy(semantic_threshold=0.72)
+    service.semantic_recall_router = SimpleNamespace(active=True)
+    service.first_card_min_score = 0.55
+    service.high_confidence_semantic_score = 0.72
+    service.recall_admission_semantic_score = 0.72
+    service._is_self_anchor_recall_excluded_bucket = lambda bucket: False
+    service._bucket_title_anchor_terms = lambda query, bucket: []
+    service._definition_query_literal_terms = lambda query, bucket: []
+    service._planner_lexical_direct_signal = lambda item: False
+    service._word_map_direct_signal = lambda item: False
+    service._is_identity_name_candidate_bucket = lambda query, bucket: False
+    service._source_record_explicit_bucket_match_reason = lambda query, bucket: ""
+    service._word_map_category_seed_terms = lambda terms: []
+    service._keyword_multi_evidence_signal = lambda query, item, bucket: False
+    service._is_source_record_bucket = lambda bucket: False
+    service._bucket_has_query_topic_evidence = lambda query, bucket: False
+    service._recall_query_plan = service.recall_policy.plan_query
+    service._query_anchor_plan = service.recall_policy.build_query_anchor_plan
+    service._anchor_plan_direct_rejection = lambda node, plan: None
+    service._axis_lite_bucket_rejection = lambda query, item, plan: None
+    service._record_axis_lite_shadow = lambda item, rejection: None
+    service._bucket_relevance_node = lambda bucket: bucket
+    service._extract_explicit_bucket_ids_from_text = lambda query: set()
+    service._extract_explicit_moment_ids_from_text = lambda query: set()
+    service._query_has_explicit_recall_marker = lambda query: False
+    service._query_requests_date_recall = lambda query: False
+    service._query_requests_direct_detail = lambda query: False
+    service._locatable_query_terms = service.recall_policy.locatable_query_terms
+
+    def evidence_labels(query, item):
+        _ = query
+        score = float(item.get("semantic_score") or 0.0)
+        labels = ["semantic_hit"] if score > 0 else []
+        if score >= service.recall_policy.semantic_threshold:
+            labels.append("strong_semantic")
+        return labels
+
+    service._bucket_evidence_labels = evidence_labels
+
+    action_item = {
+        "bucket": {
+            "id": "memory-repair",
+            "content": "上次记忆库召回被时间词污染，我们修了查询入口。",
+            "metadata": {"name": "记忆库时间词故障", "domain": ["memory"]},
+        },
+        "semantic_score": 0.80,
+        "score": 0.80,
+    }
+    assert service._admit_bucket_for_recall("我去修记忆库了", action_item) is True
+    assert action_item["legacy_passive_statement_would_block"] is True
+    assert action_item["passive_statement_shadow"]["active"] is False
+    assert action_item["passive_statement_shadow"]["would_block"] is True
+
+    weak_tech_item = {
+        "bucket": {
+            "id": "old-tech-history",
+            "content": "以前部署过一个无关的 Python 服务。",
+            "metadata": {"name": "旧技术部署", "domain": ["tech"]},
+        },
+        "semantic_score": 0.60,
+        "score": 0.60,
+    }
+    assert service._admit_bucket_for_recall("我去写代码了", weak_tech_item) is False
+    assert weak_tech_item["admission_reason"] == "tech_domain_without_query_anchor"
+    assert weak_tech_item["legacy_passive_statement_would_block"] is True
+
+    strong_tech_item = {
+        "bucket": {
+            "id": "directly-related-tech",
+            "content": "上次写这段代码时，入口规则挡住了语义召回。",
+            "metadata": {"name": "召回入口代码", "domain": ["tech"]},
+        },
+        "semantic_score": 0.80,
+        "score": 0.80,
+    }
+    assert service._admit_bucket_for_recall("我去写代码了", strong_tech_item) is True
+    assert strong_tech_item["legacy_passive_statement_would_block"] is True
+    assert strong_tech_item["recall_policy_debug"]["tech_domain_high_confidence_semantic_bypass"] is True
+
+
 def main() -> int:
     verify_search_query_keeps_sentence_residue()
     verify_keyword_evidence_coverage()
@@ -439,6 +522,7 @@ def main() -> int:
     verify_latin_subject_does_not_cut_other_names()
     verify_frequency_anchors_are_shadow_only()
     verify_entity_edges_are_shadow_only()
+    verify_passive_statement_gate_is_shadow_only()
     print("recall entry evidence verification passed")
     return 0
 
