@@ -9475,6 +9475,7 @@ class GatewayService:
             "keyword_multi_evidence_signal",
             "legacy_distinctive_keyword_match",
             "legacy_distinctive_anchor_would_block",
+            "legacy_category_overview_would_block",
             "title_anchor_terms",
             "dynamic_anchor_plan",
             "distinctive_anchor_match",
@@ -9555,7 +9556,6 @@ class GatewayService:
             self._planner_lexical_direct_signal(row)
             or row.get("exact_anchor_match")
             or row.get("keyword_multi_evidence_signal")
-            or row.get("category_overview_item")
         ):
             return True
         if str(row.get("admission_reason") or "") in {
@@ -9581,7 +9581,6 @@ class GatewayService:
                 "exact_anchor",
                 "planner_lexical",
                 "explicit_relation_edge",
-                "category_overview_item",
             }:
                 return True
         scores = why.get("score") if isinstance(why.get("score"), dict) else {}
@@ -9601,7 +9600,6 @@ class GatewayService:
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
             or item.get("keyword_multi_evidence_signal")
-            or item.get("category_overview_item")
         ):
             return True
         if self.recall_policy.has_strong_score(
@@ -9628,7 +9626,6 @@ class GatewayService:
         if (
             self._planner_lexical_direct_signal(moment)
             or moment.get("exact_anchor_match")
-            or moment.get("category_overview_item")
         ):
             return True
         if str(moment.get("admission_reason") or moment.get("_admission_reason") or "") in {
@@ -9750,7 +9747,6 @@ class GatewayService:
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
             or item.get("keyword_multi_evidence_signal")
-            or item.get("category_overview_item")
         ):
             return True
         return self._is_source_record_bucket(bucket)
@@ -11843,7 +11839,6 @@ class GatewayService:
             self._planner_lexical_direct_signal(moment)
             or moment.get("exact_anchor_match")
             or self._word_map_direct_signal(moment)
-            or moment.get("category_overview_item")
         ):
             return True
         if str(moment.get("admission_reason") or moment.get("_admission_reason") or "") in {
@@ -11922,12 +11917,21 @@ class GatewayService:
                 "stage": "diffusion_candidate",
                 "auto": True,
             }
-        if (
+        legacy_category_overview_missing = bool(
             row.get("dynamic_anchor_category_overview")
             and row.get("dynamic_anchor_category_terms")
             and not row.get("category_overview_item")
-        ):
-            return False, "category_overview_item_missing"
+        )
+        row["legacy_category_overview_would_block"] = legacy_category_overview_missing
+        if row.get("category_overview_item") or legacy_category_overview_missing:
+            row["category_overview_shadow"] = {
+                "would_promote": bool(row.get("category_overview_item")),
+                "would_block": legacy_category_overview_missing,
+                "category_terms": list(row.get("dynamic_anchor_category_terms") or []),
+                "matched_terms": list(row.get("category_overview_terms") or []),
+                "stage": "diffusion_candidate",
+                "auto": True,
+            }
         has_caution_path = bool(row.get("path") is not None and path_has_caution(row.get("path")))
         has_source_record_topic_evidence = self._diffusion_path_source_record_evidence_extends_axis(
             row.get("path"),
@@ -12095,6 +12099,14 @@ class GatewayService:
                 "distinctive_anchor_shadow": (
                     row.get("distinctive_anchor_shadow")
                     if isinstance(row.get("distinctive_anchor_shadow"), dict)
+                    else {}
+                ),
+                "legacy_category_overview_would_block": bool(
+                    row.get("legacy_category_overview_would_block")
+                ),
+                "category_overview_shadow": (
+                    row.get("category_overview_shadow")
+                    if isinstance(row.get("category_overview_shadow"), dict)
                     else {}
                 ),
                 "distinctive_anchor_match": bool(row.get("distinctive_anchor_match")),
@@ -16202,7 +16214,6 @@ class GatewayService:
                 planner_lexical_direct_match
                 or exact_match
                 or keyword_multi_evidence_signal
-                or dynamic_anchor.get("category_overview_item")
             ):
                 final_score = max(final_score, self.first_card_min_score)
             scored_candidates.append(
@@ -16297,7 +16308,6 @@ class GatewayService:
             or self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
             or item.get("keyword_multi_evidence_signal")
-            or item.get("category_overview_item")
             or self._is_high_confidence_match(
                 self._safe_float(item.get("semantic_score"), 0.0),
                 self._safe_float(item.get("keyword_score"), 0.0),
@@ -16844,6 +16854,7 @@ class GatewayService:
                 "keyword_multi_evidence_signal",
                 "legacy_distinctive_keyword_match",
                 "legacy_distinctive_anchor_would_block",
+                "legacy_category_overview_would_block",
                 "title_anchor_terms",
                 "recall_policy_debug",
                 "dynamic_anchor_plan",
@@ -17186,7 +17197,6 @@ class GatewayService:
             "exact_anchor",
             "entity_match",
             "keyword_match",
-            "category_overview_item",
             "identity_name_match",
             "source_record_exact",
             "taste_evidence",
@@ -17316,7 +17326,7 @@ class GatewayService:
             return (
                 not bool(item.get("exact_anchor_match")),
                 not bool(self._planner_lexical_direct_signal(item)),
-                not bool(item.get("keyword_multi_evidence_signal") or item.get("category_overview_item")),
+                not bool(item.get("keyword_multi_evidence_signal")),
                 not bool(self._entity_edge_direct_signal(item)),
                 -self._safe_float(item.get("score"), 0.0),
                 self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
@@ -17330,7 +17340,7 @@ class GatewayService:
             return (
                 not bool(item.get("exact_anchor_match")),
                 not bool(self._planner_lexical_direct_signal(item)),
-                not bool(item.get("keyword_multi_evidence_signal") or item.get("category_overview_item")),
+                not bool(item.get("keyword_multi_evidence_signal")),
                 not bool(self._entity_edge_direct_signal(item)),
                 item.get("rerank_score") is None,
                 -self._safe_float(item.get("combined_score", item.get("score")), 0.0),
@@ -17348,7 +17358,7 @@ class GatewayService:
         return (
             not bool(item.get("exact_anchor_match")),
             not bool(self._planner_lexical_direct_signal(item)),
-            not bool(item.get("keyword_multi_evidence_signal") or item.get("category_overview_item")),
+            not bool(item.get("keyword_multi_evidence_signal")),
             not bool(self._entity_edge_direct_signal(item)),
             -self._safe_float(item.get("semantic_score"), 0.0),
             -self._safe_float(item.get("keyword_score"), 0.0),
@@ -17479,10 +17489,7 @@ class GatewayService:
             evidence_tier = 0
         elif item.get("title_anchor_terms"):
             evidence_tier = 1
-        elif (
-            item.get("keyword_multi_evidence_signal")
-            or item.get("category_overview_item")
-        ):
+        elif item.get("keyword_multi_evidence_signal"):
             evidence_tier = 2
         elif self.recall_policy.has_strong_score(
             semantic_score=item.get("semantic_score"),
@@ -17660,7 +17667,6 @@ class GatewayService:
             or item.get("exact_anchor_match")
             or self._word_map_direct_signal(item)
             or item.get("keyword_multi_evidence_signal")
-            or item.get("category_overview_item")
             or item.get("semantic_rescue_direct_span")
         ):
             return True
@@ -17872,6 +17878,7 @@ class GatewayService:
             and dynamic_plan.get("category_terms")
             and not item.get("category_overview_item")
         )
+        item["legacy_category_overview_would_block"] = category_overview_missing
         query_plan = self._recall_query_plan(query)
         rejection = self._anchor_plan_direct_rejection(bucket, self._query_anchor_plan(query))
         if rejection:
@@ -17944,16 +17951,18 @@ class GatewayService:
                     "auto": True,
                 },
             }
-        if decision.admit_direct and category_overview_missing:
-            item["admission_reason"] = "category_overview_item_missing"
-            item["blocked_reason"] = "category_overview_item_missing"
+        if item.get("category_overview_item") or category_overview_missing:
             item["recall_policy_debug"] = {
                 **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
-                "category_terms": list(dynamic_plan.get("category_terms") or []),
-                "matched_terms": list(item.get("category_overview_terms") or []),
-                "auto": True,
+                "category_overview_shadow": {
+                    "would_promote": bool(item.get("category_overview_item")),
+                    "would_block": category_overview_missing,
+                    "category_terms": list(dynamic_plan.get("category_terms") or []),
+                    "matched_terms": list(item.get("category_overview_terms") or []),
+                    "stage": "bucket_admission",
+                    "auto": True,
+                },
             }
-            return False
         if decision.admit_direct and not hard_evidence_labels:
             reason = self._weak_bucket_evidence_block_reason(evidence_labels)
             item["admission_reason"] = reason
@@ -17974,7 +17983,6 @@ class GatewayService:
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
             or item.get("keyword_multi_evidence_signal")
-            or item.get("category_overview_item")
             or item.get("semantic_rescue_direct_span")
         ):
             return True
@@ -18073,6 +18081,7 @@ class GatewayService:
             and dynamic_plan.get("category_terms")
             and not moment.get("category_overview_item")
         )
+        moment["legacy_category_overview_would_block"] = category_overview_missing
         rejection = self._anchor_plan_direct_rejection(moment, self._query_anchor_plan(query))
         if rejection:
             reason, debug = rejection
@@ -18150,15 +18159,18 @@ class GatewayService:
                 "has_topic_evidence": self._moment_has_query_topic_evidence(query, moment),
             }
             return False
-        if decision.admit_direct and category_overview_missing:
-            moment["admission_reason"] = "category_overview_item_missing"
+        if moment.get("category_overview_item") or category_overview_missing:
             moment["recall_policy_debug"] = {
                 **(moment.get("recall_policy_debug") if isinstance(moment.get("recall_policy_debug"), dict) else {}),
-                "category_terms": list(dynamic_plan.get("category_terms") or []),
-                "matched_terms": list(moment.get("category_overview_terms") or []),
-                "auto": True,
+                "category_overview_shadow": {
+                    "would_promote": bool(moment.get("category_overview_item")),
+                    "would_block": category_overview_missing,
+                    "category_terms": list(dynamic_plan.get("category_terms") or []),
+                    "matched_terms": list(moment.get("category_overview_terms") or []),
+                    "stage": "moment_admission",
+                    "auto": True,
+                },
             }
-            return False
         if decision.admit_direct:
             axis_rejection = self._axis_lite_moment_rejection(query, moment, query_plan)
             self._record_axis_lite_shadow(moment, axis_rejection)
@@ -18183,7 +18195,6 @@ class GatewayService:
         if (
             moment.get("exact_anchor_match")
             or self._planner_lexical_direct_signal(moment)
-            or moment.get("category_overview_item")
         ):
             return True
         if not self._moment_has_query_topic_evidence(query, moment):
@@ -18536,17 +18547,6 @@ class GatewayService:
         if self.inject_max_cards < 2 or not remaining_candidates:
             return chosen
 
-        if first.get("category_overview_item"):
-            for candidate in remaining_candidates:
-                if not candidate.get("category_overview_item"):
-                    continue
-                if self._dynamic_bucket_item_has_reliable_recall_signal(query, candidate):
-                    chosen.append(candidate)
-                    if len(chosen) >= self.inject_max_cards:
-                        return chosen
-            if len(chosen) > 1:
-                return chosen
-
         covered_terms = set(first.get("matched_query_terms") or [])
         if covered_terms:
             for candidate in remaining_candidates:
@@ -18629,7 +18629,6 @@ class GatewayService:
             or item.get("exact_anchor_match")
             or self._word_map_direct_signal(item)
             or item.get("keyword_multi_evidence_signal")
-            or item.get("category_overview_item")
         ):
             return True
         if self._is_high_confidence_match(
@@ -19405,6 +19404,9 @@ class GatewayService:
             "legacy_distinctive_anchor_would_block": bool(
                 item.get("legacy_distinctive_anchor_would_block")
             ),
+            "legacy_category_overview_would_block": bool(
+                item.get("legacy_category_overview_would_block")
+            ),
             "title_anchor_terms": list(item.get("title_anchor_terms") or []),
             "distinctive_anchor_match": bool(item.get("distinctive_anchor_match")),
             "distinctive_anchor_terms": list(item.get("distinctive_anchor_terms") or []),
@@ -19514,6 +19516,9 @@ class GatewayService:
             ),
             "legacy_distinctive_anchor_would_block": bool(
                 moment.get("legacy_distinctive_anchor_would_block")
+            ),
+            "legacy_category_overview_would_block": bool(
+                moment.get("legacy_category_overview_would_block")
             ),
             "title_anchor_terms": list(moment.get("title_anchor_terms") or []),
             "distinctive_anchor_match": bool(moment.get("distinctive_anchor_match")),

@@ -197,6 +197,11 @@ def verify_frequency_anchors_are_shadow_only() -> None:
             _ = kwargs
             return False
 
+        @staticmethod
+        def is_detail_read_query(query):
+            _ = query
+            return False
+
     service.recall_policy = RecallPolicy()
     service._planner_lexical_direct_signal = lambda item: False
     service._word_map_direct_signal = lambda item: False
@@ -206,6 +211,7 @@ def verify_frequency_anchors_are_shadow_only() -> None:
     service._query_requests_direct_detail = lambda query: False
     service._moment_has_query_topic_evidence = lambda query, moment: False
     service._is_high_confidence_match = lambda semantic, keyword: False
+    service._is_source_record_bucket = lambda bucket: False
 
     distinctive_only = {
         "bucket_id": "scene",
@@ -224,6 +230,45 @@ def verify_frequency_anchors_are_shadow_only() -> None:
         "普通短句",
         distinctive_only,
     ) is False
+
+    category_only = {
+        "bucket": {"id": "scene"},
+        "bucket_id": "scene",
+        "moment_id": "moment",
+        "category_overview_item": True,
+    }
+    assert service._session_debug_row_has_strong_evidence(category_only) is False
+    assert service._session_hard_exclude_bucket_bypass(
+        "普通短句",
+        category_only,
+    ) is False
+    assert service._session_hard_exclude_moment_bypass(
+        "普通短句",
+        category_only,
+    ) is False
+    assert service._session_semantic_dedupe_bypass(
+        "普通短句",
+        category_only,
+    ) is False
+    assert service._moment_has_reliable_diffusion_seed_signal(
+        "普通短句",
+        category_only,
+    ) is False
+    assert service._unselected_moment_has_reliable_recall_signal(
+        "普通短句",
+        category_only,
+    ) is False
+    assert service._dynamic_bucket_item_has_reliable_recall_signal(
+        "普通短句",
+        {"category_overview_item": True},
+    ) is False
+    assert service._axis_lite_bypass_for_item(
+        "普通短句",
+        category_only,
+    ) is False
+    assert service._hard_bucket_evidence_labels(
+        ["category_overview_item", "semantic_hit"]
+    ) == []
 
     service.diffusion_inject_min_confidence = 0.55
     service._axis_lite_has_technical_axis = lambda query_plan: False
@@ -254,6 +299,28 @@ def verify_frequency_anchors_are_shadow_only() -> None:
     ) == (True, "")
     assert row["legacy_distinctive_anchor_would_block"] is True
     assert row["distinctive_anchor_shadow"]["required_terms"] == ["肯定"]
+
+    category_row = {
+        "moment": {"bucket_id": "scene", "moment_id": "moment"},
+        "runtime_allowed": True,
+        "confidence": 0.9,
+        "why": "same_topic",
+        "path_len": 1,
+        "dynamic_anchor_category_overview": True,
+        "dynamic_anchor_category_terms": ["视频"],
+        "category_overview_item": False,
+        "has_topic_evidence": True,
+    }
+    assert service._diffusion_candidate_injection_decision(
+        category_row,
+        SimpleNamespace(
+            activated_axis_groups=(),
+            activated_axis_multi=False,
+            query="我们看过什么视频",
+        ),
+    ) == (True, "")
+    assert category_row["legacy_category_overview_would_block"] is True
+    assert category_row["category_overview_shadow"]["category_terms"] == ["视频"]
 
 
 def main() -> int:
