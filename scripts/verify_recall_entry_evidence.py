@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -187,11 +188,80 @@ def verify_latin_subject_does_not_cut_other_names() -> None:
     ) == ["Haven与小雨关于命名日的对话", "命名日"]
 
 
+def verify_frequency_anchors_are_shadow_only() -> None:
+    service = build_service()
+
+    class RecallPolicy:
+        @staticmethod
+        def has_strong_score(**kwargs):
+            _ = kwargs
+            return False
+
+    service.recall_policy = RecallPolicy()
+    service._planner_lexical_direct_signal = lambda item: False
+    service._word_map_direct_signal = lambda item: False
+    service._is_source_record_fragment_seed = lambda item: False
+    service._extract_explicit_bucket_ids_from_text = lambda query: set()
+    service._extract_explicit_moment_ids_from_text = lambda query: set()
+    service._query_requests_direct_detail = lambda query: False
+    service._moment_has_query_topic_evidence = lambda query, moment: False
+    service._is_high_confidence_match = lambda semantic, keyword: False
+
+    distinctive_only = {
+        "bucket_id": "scene",
+        "moment_id": "moment",
+        "distinctive_anchor_match": True,
+    }
+    assert service._session_hard_exclude_moment_bypass(
+        "普通短句",
+        distinctive_only,
+    ) is False
+    assert service._moment_has_reliable_diffusion_seed_signal(
+        "普通短句",
+        distinctive_only,
+    ) is False
+    assert service._unselected_moment_has_reliable_recall_signal(
+        "普通短句",
+        distinctive_only,
+    ) is False
+
+    service.diffusion_inject_min_confidence = 0.55
+    service._axis_lite_has_technical_axis = lambda query_plan: False
+    service._diffusion_path_source_record_evidence_extends_axis = (
+        lambda path, query_plan: False
+    )
+    service._diffusion_explicit_edge_can_bridge_axis = lambda query_plan: False
+    service._axis_lite_candidate_matches = lambda query_plan, moment: True
+    service._axis_lite_domain_mismatch = lambda query_plan, moment: False
+    service._semantic_neighbor_has_strong_confidence = lambda row: False
+    row = {
+        "moment": {"bucket_id": "scene", "moment_id": "moment"},
+        "runtime_allowed": True,
+        "confidence": 0.9,
+        "why": "same_topic",
+        "path_len": 1,
+        "dynamic_anchor_required_terms": ["肯定"],
+        "distinctive_anchor_match": False,
+        "has_topic_evidence": True,
+    }
+    assert service._diffusion_candidate_injection_decision(
+        row,
+        SimpleNamespace(
+            activated_axis_groups=(),
+            activated_axis_multi=False,
+            query="普通短句",
+        ),
+    ) == (True, "")
+    assert row["legacy_distinctive_anchor_would_block"] is True
+    assert row["distinctive_anchor_shadow"]["required_terms"] == ["肯定"]
+
+
 def main() -> int:
     verify_search_query_keeps_sentence_residue()
     verify_keyword_evidence_coverage()
     verify_identity_title_and_keyword_rescue()
     verify_latin_subject_does_not_cut_other_names()
+    verify_frequency_anchors_are_shadow_only()
     print("recall entry evidence verification passed")
     return 0
 

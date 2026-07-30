@@ -9628,7 +9628,6 @@ class GatewayService:
         if (
             self._planner_lexical_direct_signal(moment)
             or moment.get("exact_anchor_match")
-            or moment.get("distinctive_anchor_match")
             or moment.get("category_overview_item")
         ):
             return True
@@ -11844,7 +11843,6 @@ class GatewayService:
             self._planner_lexical_direct_signal(moment)
             or moment.get("exact_anchor_match")
             or self._word_map_direct_signal(moment)
-            or moment.get("distinctive_anchor_match")
             or moment.get("category_overview_item")
         ):
             return True
@@ -11909,12 +11907,21 @@ class GatewayService:
             high_confidence_explicit_edge
             and not self._axis_lite_has_technical_axis(query_plan)
         )
-        if (
+        legacy_dynamic_anchor_missing = bool(
             row.get("dynamic_anchor_required_terms")
             and not row.get("distinctive_anchor_match")
             and not high_confidence_explicit_edge
-        ):
-            return False, "discriminative_anchor_missing"
+        )
+        row["legacy_distinctive_anchor_would_block"] = legacy_dynamic_anchor_missing
+        if legacy_dynamic_anchor_missing:
+            row["distinctive_anchor_shadow"] = {
+                "would_block": True,
+                "required_terms": list(row.get("dynamic_anchor_required_terms") or []),
+                "matched_terms": list(row.get("distinctive_anchor_terms") or []),
+                "missing_terms": list(row.get("distinctive_anchor_missing_terms") or []),
+                "stage": "diffusion_candidate",
+                "auto": True,
+            }
         if (
             row.get("dynamic_anchor_category_overview")
             and row.get("dynamic_anchor_category_terms")
@@ -12082,6 +12089,14 @@ class GatewayService:
                 "has_topic_evidence": bool(row.get("has_topic_evidence")),
                 "topic_evidence_terms": list(row.get("topic_evidence_terms") or []),
                 "strong_topic_evidence": bool(row.get("strong_topic_evidence")),
+                "legacy_distinctive_anchor_would_block": bool(
+                    row.get("legacy_distinctive_anchor_would_block")
+                ),
+                "distinctive_anchor_shadow": (
+                    row.get("distinctive_anchor_shadow")
+                    if isinstance(row.get("distinctive_anchor_shadow"), dict)
+                    else {}
+                ),
                 "distinctive_anchor_match": bool(row.get("distinctive_anchor_match")),
                 "distinctive_anchor_terms": list(row.get("distinctive_anchor_terms") or []),
                 "distinctive_anchor_missing_terms": list(row.get("distinctive_anchor_missing_terms") or []),
@@ -18052,6 +18067,7 @@ class GatewayService:
             dynamic_plan.get("required_terms")
             and not moment.get("distinctive_anchor_match")
         )
+        moment["legacy_distinctive_anchor_would_block"] = dynamic_anchor_missing
         category_overview_missing = bool(
             dynamic_plan.get("category_overview")
             and dynamic_plan.get("category_terms")
@@ -18093,6 +18109,22 @@ class GatewayService:
             }
         else:
             moment["recall_policy_debug"] = decision.debug
+        if dynamic_anchor_missing:
+            moment["recall_policy_debug"] = {
+                **(
+                    moment.get("recall_policy_debug")
+                    if isinstance(moment.get("recall_policy_debug"), dict)
+                    else {}
+                ),
+                "distinctive_anchor_shadow": {
+                    "would_block": True,
+                    "required_terms": list(dynamic_plan.get("required_terms") or []),
+                    "matched_terms": list(moment.get("distinctive_anchor_terms") or []),
+                    "missing_terms": list(moment.get("distinctive_anchor_missing_terms") or []),
+                    "stage": "moment_admission",
+                    "auto": True,
+                },
+            }
         if decision.admit_direct and self._moment_is_tech_domain(moment):
             tech_rejection = self._tech_domain_recall_rejection(query, moment)
             if tech_rejection:
@@ -18116,16 +18148,6 @@ class GatewayService:
                 ),
                 "unselected_moment_min_score": self._unselected_moment_min_score(),
                 "has_topic_evidence": self._moment_has_query_topic_evidence(query, moment),
-            }
-            return False
-        if decision.admit_direct and dynamic_anchor_missing:
-            moment["admission_reason"] = "discriminative_anchor_missing"
-            moment["recall_policy_debug"] = {
-                **(moment.get("recall_policy_debug") if isinstance(moment.get("recall_policy_debug"), dict) else {}),
-                "required_terms": list(dynamic_plan.get("required_terms") or []),
-                "matched_terms": list(moment.get("distinctive_anchor_terms") or []),
-                "missing_terms": list(moment.get("distinctive_anchor_missing_terms") or []),
-                "auto": True,
             }
             return False
         if decision.admit_direct and category_overview_missing:
@@ -18161,7 +18183,6 @@ class GatewayService:
         if (
             moment.get("exact_anchor_match")
             or self._planner_lexical_direct_signal(moment)
-            or moment.get("distinctive_anchor_match")
             or moment.get("category_overview_item")
         ):
             return True
