@@ -19756,6 +19756,11 @@ class GatewayService:
         if not isinstance(bucket, dict):
             bucket = {}
         metadata = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        policy_debug = (
+            item.get("recall_policy_debug")
+            if isinstance(item.get("recall_policy_debug"), dict)
+            else {}
+        )
         return {
             "bucket_id": str(bucket.get("id") or ""),
             "bucket_name": str(metadata.get("name") or bucket.get("id") or ""),
@@ -19766,6 +19771,16 @@ class GatewayService:
             "score": self._safe_float(item.get("score"), 0.0),
             "semantic_score": self._safe_float(item.get("semantic_score"), 0.0),
             "keyword_score": self._safe_float(item.get("keyword_score"), 0.0),
+            "category_overview_item": bool(item.get("category_overview_item")),
+            "category_overview_terms": list(item.get("category_overview_terms") or []),
+            "legacy_category_overview_would_block": bool(
+                item.get("legacy_category_overview_would_block")
+            ),
+            "category_overview_shadow": (
+                policy_debug.get("category_overview_shadow")
+                if isinstance(policy_debug.get("category_overview_shadow"), dict)
+                else {}
+            ),
             "rerank_score": (
                 self._safe_float(item.get("rerank_score"), 0.0)
                 if item.get("rerank_score") is not None
@@ -19774,6 +19789,11 @@ class GatewayService:
         }
 
     def _compact_suppressed_moment_debug(self, moment: dict) -> dict[str, Any]:
+        policy_debug = (
+            moment.get("recall_policy_debug")
+            if isinstance(moment.get("recall_policy_debug"), dict)
+            else {}
+        )
         return {
             "bucket_id": str(moment.get("bucket_id") or ""),
             "bucket_name": self._moment_bucket_title(moment),
@@ -19783,6 +19803,16 @@ class GatewayService:
                 moment.get("admission_reason") or moment.get("_admission_reason") or "suppressed"
             ),
             "score": self._safe_float(moment.get("score"), 0.0),
+            "category_overview_item": bool(moment.get("category_overview_item")),
+            "category_overview_terms": list(moment.get("category_overview_terms") or []),
+            "legacy_category_overview_would_block": bool(
+                moment.get("legacy_category_overview_would_block")
+            ),
+            "category_overview_shadow": (
+                policy_debug.get("category_overview_shadow")
+                if isinstance(policy_debug.get("category_overview_shadow"), dict)
+                else {}
+            ),
             "semantic_score": (
                 self._safe_float(moment.get("semantic_score"), 0.0)
                 if moment.get("semantic_score") is not None

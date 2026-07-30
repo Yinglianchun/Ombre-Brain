@@ -269,6 +269,21 @@ def verify_frequency_anchors_are_shadow_only() -> None:
     assert service._hard_bucket_evidence_labels(
         ["category_overview_item", "semantic_hit"]
     ) == []
+    compact_category_debug = service._compact_suppressed_bucket_debug(
+        {
+            **category_only,
+            "category_overview_terms": ["视频"],
+            "recall_policy_debug": {
+                "category_overview_shadow": {
+                    "would_promote": True,
+                    "would_block": False,
+                }
+            },
+        }
+    )
+    assert compact_category_debug["category_overview_item"] is True
+    assert compact_category_debug["category_overview_terms"] == ["视频"]
+    assert compact_category_debug["category_overview_shadow"]["would_promote"] is True
 
     service.diffusion_inject_min_confidence = 0.55
     service._axis_lite_has_technical_axis = lambda query_plan: False
