@@ -2821,11 +2821,17 @@ class RecallPolicy:
         high_confidence_edge: bool = False,
         context_only: bool = False,
         auto: bool = False,
+        semantic_entry_routed: bool = False,
     ) -> RecallPolicyDecision:
         query_plan = query_plan or self.plan_query(query)
         if has_topic_evidence is None:
             has_topic_evidence = self.node_has_topic_evidence(query, node)
-        auto_too_vague = query_plan.auto_too_vague if auto else False
+        legacy_auto_vague_would_suppress = bool(
+            auto and query_plan.auto_too_vague and not high_confidence_edge
+        )
+        auto_too_vague = bool(
+            legacy_auto_vague_would_suppress and not semantic_entry_routed
+        )
         debug = {
             "requires_topic_evidence": query_plan.requires_topic_evidence,
             "has_topic_evidence": bool(has_topic_evidence),
@@ -2837,9 +2843,11 @@ class RecallPolicy:
             "context_only": bool(context_only),
             "auto": bool(auto),
             "auto_too_vague": bool(auto_too_vague),
+            "semantic_entry_routed": bool(semantic_entry_routed),
+            "legacy_auto_vague_would_suppress": legacy_auto_vague_would_suppress,
         }
 
-        if auto_too_vague and not high_confidence_edge:
+        if auto_too_vague:
             return RecallPolicyDecision(
                 admit_direct=False,
                 admit_diffused=False,

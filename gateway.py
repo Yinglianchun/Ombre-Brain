@@ -17917,6 +17917,7 @@ class GatewayService:
                 or "title_anchor" in hard_evidence_labels
             ),
             auto=True,
+            semantic_entry_routed=self.semantic_recall_router.active,
         )
         item["admission_reason"] = decision.reason
         if item.get("recall_policy_debug"):
@@ -18109,6 +18110,7 @@ class GatewayService:
             rerank_score=moment.get("rerank_score"),
             context_only=moment.get("section") in MOMENT_TEMPERATURE_SECTIONS,
             auto=True,
+            semantic_entry_routed=self.semantic_recall_router.active,
         )
         moment["admission_reason"] = decision.reason
         if moment.get("recall_policy_debug"):

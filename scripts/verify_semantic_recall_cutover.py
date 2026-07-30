@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
 
 from gateway import GatewayService
 from memory_recall.semantic_router import SemanticRecallRouter
+from recall_policy import RecallPolicy
 
 
 class EmbeddingStub:
@@ -80,5 +81,34 @@ assert GatewayService._legacy_auto_vague_skip_applies(
     True,
     semantic_entry_routed=False,
 ) is True
+
+policy = RecallPolicy()
+vague_query = "你怎么看"
+vague_plan = policy.plan_query(vague_query)
+assert vague_plan.auto_too_vague is True
+
+semantic_candidate = policy.assess(
+    vague_query,
+    {},
+    query_plan=vague_plan,
+    semantic_score=0.80,
+    auto=True,
+    semantic_entry_routed=True,
+)
+assert semantic_candidate.admit_direct is True
+assert semantic_candidate.reason == "non_explicit_query"
+assert semantic_candidate.debug["auto_too_vague"] is False
+assert semantic_candidate.debug["legacy_auto_vague_would_suppress"] is True
+
+legacy_candidate = policy.assess(
+    vague_query,
+    {},
+    query_plan=vague_plan,
+    semantic_score=0.80,
+    auto=True,
+    semantic_entry_routed=False,
+)
+assert legacy_candidate.admit_direct is False
+assert legacy_candidate.reason == "auto_vague_query_without_topic"
 
 print("semantic recall cutover verification passed")
