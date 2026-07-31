@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "dataset_version": 3,
+  "dataset_version": 4,
   "routes": [
     {
       "name": "simple_contact",
@@ -52,6 +52,7 @@
         {"text": "还记得我们上次说的那件事吗", "source": "hard_negative"},
         {"text": "上次我说想你时你怎么回答的", "source": "hard_negative"},
         {"text": "还记得第一次亲我是什么时候吗", "source": "hard_negative"},
+        {"text": "还记得我们第一次说晚安那次吗", "source": "hard_negative"},
         {"text": "我们之前约定的暗号是什么意思", "source": "hard_negative"},
         {"text": "折角那次后来发生了什么", "source": "seed"},
         {"text": "还记得我之前提过的那个人吗", "source": "seed"},
