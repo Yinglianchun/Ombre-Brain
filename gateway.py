@@ -2667,6 +2667,7 @@ class GatewayService:
                             current_user_query
                         ),
                         query_embedding=semantic_recall_query_vector,
+                        semantic_recall_debug=semantic_recall_debug,
                         include_query_planner_debug=True,
                     )
                     mark_step("dynamic_recall_graph_select", stage_started_at)
@@ -9605,6 +9606,7 @@ class GatewayService:
         all_moments: list[dict] | None = None,
         search_query: str = "",
         query_embedding: list[float] | None = None,
+        semantic_recall_debug: dict[str, Any] | None = None,
         include_query_planner_debug: bool = False,
     ) -> tuple[list[dict], list[dict], list[dict], list[dict]] | tuple[
         list[dict], list[dict], list[dict], list[dict], dict[str, Any]
@@ -9653,6 +9655,7 @@ class GatewayService:
             all_buckets,
             search_query=search_query,
             query_embedding=query_embedding,
+            semantic_recall_debug=semantic_recall_debug,
             include_query_planner_debug=True,
         )
         timing_debug = query_planner_debug.setdefault("timing_ms", {})
