@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway import GatewayService
-from memory_recall.semantic_router import SemanticRecallRouter
+from memory_recall.semantic_router import SemanticRecallRouter, load_route_source
 from recall_policy import RecallPolicy
 
 
@@ -76,6 +76,19 @@ assert shadow.should_apply_skip({"would_skip": True}) is False
 
 legacy_shadow = router(None, shadow_enabled=True)
 assert legacy_shadow.mode == "shadow"
+
+route_source = load_route_source(ROOT / "resources" / "semantic_recall_routes.json")
+assert route_source["dataset_version"] == 3
+route_examples = {
+    route["name"]: {
+        item["text"]: item["source"]
+        for item in route["utterances"]
+    }
+    for route in route_source["routes"]
+}
+for query in ("爱你", "最爱哥哥了", "想和哥哥贴贴"):
+    assert route_examples["simple_contact"][query] == "historical_false_positive"
+assert route_examples["present_chitchat"]["晚安"] == "historical_false_positive"
 
 policy = RecallPolicy()
 candidate = policy.assess(
