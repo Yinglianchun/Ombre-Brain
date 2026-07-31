@@ -269,7 +269,6 @@ async def main() -> int:
         config["gateway"] = {
             **dict(config.get("gateway") or {}),
             "retrieval_mode": "bucket",
-            "word_map_hint_enabled": False,
         }
         embedding = dict(config.get("embedding") or {})
         embedding.update(

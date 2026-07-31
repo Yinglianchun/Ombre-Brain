@@ -407,23 +407,17 @@ gateway:
   current_inner_state_interval_rounds: 15 # compare the latest 15 rounds; inject nothing without a clear net change
   relationship_weather_interval_rounds: 0
   favorite_memory_interval_rounds: 0
-  word_map_hint_enabled: false       # true lets derived Word Map add weak recall candidates; still gated by RecallPolicy
-  word_map_hint_weight: 0.08         # weak bucket-score contribution, not a reliable evidence signal
-  word_map_hint_moment_boost: 0.25   # weak moment-search boost for hinted buckets in graph retrieval mode
-  word_map_hint_neighbor_limit: 6
-  word_map_hint_bucket_limit: 12
   semantic_candidate_top_k: 50       # internal embedding candidate pool; visible injection stays gated
   moment_search_limit: 50            # internal moment candidate pool for graph retrieval
   recall_fusion_mode: dynamic        # dynamic | legacy; legacy uses the weights below as the main score
   semantic_weight: 0.45
-  keyword_weight: 0.35
+  keyword_weight: 0.35               # explicit lexical evidence only (authored cue / exact anchor), not body keywords
   importance_weight: 0.03            # legacy main score only; dynamic caps it as a tiny adjustment
   freshness_weight: 0.03             # legacy main score only; dynamic caps it as a tiny adjustment
   first_card_min_score: 0.55
   second_card_min_score: 0.50
   second_card_relative_score: 0.85
   high_confidence_semantic_score: 0.72
-  high_confidence_keyword_score: 0.65
   high_confidence_cooldown_floor: 0.8
   recall_admission_semantic_score: 0.72  # explicit entity queries need reliable evidence before injection
   recall_admission_rerank_score: 0.65

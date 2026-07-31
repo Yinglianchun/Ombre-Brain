@@ -5953,123 +5953,6 @@ def _query_resurface_enabled() -> bool:
     return _bool_value(recall_cfg.get("query_resurface_enabled"), False)
 
 
-def _word_map_hint_available() -> bool:
-    gateway_cfg = config.get("gateway", {}) if isinstance(config.get("gateway", {}), dict) else {}
-    return (
-        _bool_value(gateway_cfg.get("word_map_hint_enabled"), False)
-        and word_map_store is not None
-        and bool(getattr(word_map_store, "enabled", False))
-    )
-
-
-def _word_map_hint_settings() -> dict[str, float | int]:
-    gateway_cfg = config.get("gateway", {}) if isinstance(config.get("gateway", {}), dict) else {}
-    return {
-        "moment_boost": _float_between(gateway_cfg.get("word_map_hint_moment_boost"), 0.25, 0.0, 1.0),
-        "neighbor_limit": _int_between(gateway_cfg.get("word_map_hint_neighbor_limit"), 6, 0, 40),
-        "bucket_limit": _int_between(gateway_cfg.get("word_map_hint_bucket_limit"), 12, 1, 100),
-    }
-
-
-def _get_breath_word_map_hints(
-    query: str,
-    buckets: list[dict],
-) -> tuple[dict[str, float], dict[str, dict]]:
-    if not _word_map_hint_available():
-        return {}, {}
-    terms = _specific_query_terms(query)
-    if not terms:
-        return {}, {}
-    eligible_ids = {
-        str(bucket.get("id") or "")
-        for bucket in buckets
-        if _is_breath_recall_seed_bucket(bucket) and bucket.get("id")
-    }
-    if not eligible_ids:
-        return {}, {}
-    settings = _word_map_hint_settings()
-    try:
-        payload = word_map_store.hint_buckets_for_terms(
-            terms,
-            neighbor_limit=int(settings["neighbor_limit"]),
-            bucket_limit=int(settings["bucket_limit"]),
-        )
-    except Exception as exc:
-        logger.warning("Breath word map hint lookup failed / breath 词图提示查询失败: %s", exc)
-        return {}, {}
-
-    raw_scores = payload.get("bucket_scores", {}) if isinstance(payload, dict) else {}
-    raw_evidence = payload.get("evidence", {}) if isinstance(payload, dict) else {}
-    scores: dict[str, float] = {}
-    debug: dict[str, dict] = {}
-    for bucket_id, score in raw_scores.items():
-        bucket_id = str(bucket_id or "")
-        if bucket_id not in eligible_ids:
-            continue
-        scores[bucket_id] = max(0.0, min(1.0, float(score or 0.0)))
-        evidence = raw_evidence.get(bucket_id, {}) if isinstance(raw_evidence, dict) else {}
-        debug[bucket_id] = evidence if isinstance(evidence, dict) else {}
-    return scores, debug
-
-
-def _append_breath_word_map_matches(
-    *,
-    query: str,
-    matches: list[dict],
-    all_buckets: list[dict],
-    seed_diagnostics: dict[str, dict],
-) -> tuple[dict[str, float], dict[str, dict]]:
-    word_map_scores, word_map_debug = _get_breath_word_map_hints(query, all_buckets)
-    if not word_map_scores:
-        return {}, {}
-
-    bucket_map = {
-        str(bucket.get("id") or ""): bucket
-        for bucket in all_buckets
-        if isinstance(bucket, dict) and bucket.get("id")
-    }
-    matched_ids = {str(bucket.get("id") or "") for bucket in matches if bucket.get("id")}
-    for bucket_id, hint_score in word_map_scores.items():
-        bucket = bucket_map.get(bucket_id)
-        if not _is_breath_recall_seed_bucket(bucket):
-            continue
-        hint_debug = word_map_debug.get(bucket_id) or {}
-        bucket["word_map_hint"] = True
-        bucket["word_map_score"] = round(float(hint_score), 4)
-        bucket["word_map_terms"] = list(hint_debug.get("direct_terms") or [])
-        bucket["word_map_neighbor_terms"] = list(hint_debug.get("neighbor_terms") or [])
-        seed = seed_diagnostics.setdefault(
-            bucket_id,
-            {
-                "bucket_id": bucket_id,
-                "bucket_name": (bucket.get("metadata") or {}).get("name") or bucket_id,
-                "sources": [],
-            },
-        )
-        if "word_map" not in seed["sources"]:
-            seed["sources"].append("word_map")
-        seed["word_map_score"] = round(float(hint_score), 4)
-        seed["word_map_terms"] = bucket["word_map_terms"]
-        seed["word_map_neighbor_terms"] = bucket["word_map_neighbor_terms"]
-        if bucket_id not in matched_ids:
-            bucket["score"] = max(0.15, min(1.0, float(hint_score)))
-            matches.append(bucket)
-            matched_ids.add(bucket_id)
-    matches.sort(key=lambda bucket: float(bucket.get("score", 0.0) or 0.0), reverse=True)
-    return word_map_scores, word_map_debug
-
-
-def _breath_word_map_only_without_topic(query: str, moment: dict, seed_diagnostics: dict[str, dict]) -> bool:
-    bucket_id = str(moment.get("bucket_id") or "")
-    seed = seed_diagnostics.get(bucket_id, {})
-    sources = set(seed.get("sources") or [])
-    if "word_map" not in sources or len(sources - {"word_map"}) > 0:
-        return False
-    if _moment_has_query_topic_evidence(query, moment):
-        return False
-    return not _recall_policy().has_strong_score(rerank_score=moment.get("rerank_score"))
-
-
 def _bucket_relevance_node(bucket: dict, score: float = 0.0) -> dict:
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
     return {
@@ -6880,9 +6763,6 @@ def _write_breath_recall_diagnostics(
             "bucket_search_score": seed.get("bucket_search_score"),
             "keyword_score": seed.get("keyword_score"),
             "embedding_score": seed.get("embedding_score"),
-            "word_map_score": seed.get("word_map_score"),
-            "word_map_terms": seed.get("word_map_terms", []),
-            "word_map_neighbor_terms": seed.get("word_map_neighbor_terms", []),
             "score_before_gate": _safe_float(moment.get("score")),
             "score_after_gate": _safe_float(gated.get("score")) if gated else None,
             "rerank_score": _safe_float(final.get("rerank_score")) if final else None,
@@ -6920,9 +6800,6 @@ def _write_breath_recall_diagnostics(
                     "admission_reason": str(moment.get("_admission_reason") or "suppressed"),
                     "score": _safe_float(moment.get("score")),
                     "rerank_score": _safe_float(moment.get("rerank_score")),
-                    "word_map_score": _safe_float(moment.get("word_map_score")),
-                    "word_map_terms": list(moment.get("word_map_terms") or []),
-                    "word_map_neighbor_terms": list(moment.get("word_map_neighbor_terms") or []),
                     "text_preview": _diagnostic_text_preview(moment),
                 }
                 for moment in suppressed_candidates[:max_candidates]
@@ -6950,8 +6827,6 @@ def _format_suppressed_recall_candidate(moment: dict, seed_diagnostics: dict[str
     ]
     if seed.get("embedding_score") is not None:
         parts.append(f"semantic={seed.get('embedding_score')}")
-    if seed.get("word_map_score") is not None:
-        parts.append(f"word_map={seed.get('word_map_score')}")
     if moment.get("rerank_score") is not None:
         parts.append(f"rerank={moment.get('rerank_score')}")
     preview = _diagnostic_text_preview(moment)
@@ -8676,14 +8551,6 @@ async def _recall_memory(
         q_valence=q_valence,
         q_arousal=q_arousal,
     )
-    word_map_scores, _word_map_debug = _append_breath_word_map_matches(
-        query=query,
-        matches=matches,
-        all_buckets=all_buckets,
-        seed_diagnostics=seed_diagnostics,
-    )
-    word_map_hint_bucket_ids = set(word_map_scores)
-
     if retrieval_mode == "bucket":
         direct_results = []
         token_used = 0
@@ -8698,7 +8565,6 @@ async def _recall_memory(
             if not bucket_id or bucket_id in seen_bucket_ids:
                 continue
             seed = seed_diagnostics.get(bucket_id, {})
-            word_map_only = "word_map" in (seed.get("sources") or []) and len(set(seed.get("sources") or []) - {"word_map"}) == 0
             decision = _recall_policy().assess(
                 query,
                 _bucket_relevance_node(bucket, bucket.get("score", 0.0)),
@@ -8707,18 +8573,9 @@ async def _recall_memory(
                 high_confidence_edge="lexical" in (seed.get("sources") or []),
                 auto=auto_surface,
             )
-            if word_map_only and not _bucket_has_query_topic_evidence(query, bucket):
-                reason = "word_map_topic_evidence_missing"
-                debug_payload = {
-                    "word_map_hint": True,
-                    "word_map_score": seed.get("word_map_score"),
-                    "has_topic_evidence": False,
-                    "auto": bool(auto_surface),
-                }
-            else:
-                reason = decision.reason
-                debug_payload = decision.debug
-            if (word_map_only and not _bucket_has_query_topic_evidence(query, bucket)) or not decision.admit_direct:
+            reason = decision.reason
+            debug_payload = decision.debug
+            if not decision.admit_direct:
                 suppressed_buckets.append(
                     {
                         "bucket_id": bucket_id,
@@ -8779,8 +8636,6 @@ async def _recall_memory(
                 **recall_thresholds,
                 "retrieval_mode": "bucket",
                 "lexical_terms": lexical_terms,
-                "word_map_hint_enabled": _word_map_hint_available(),
-                "word_map_hint_bucket_ids": sorted(word_map_hint_bucket_ids),
             },
             seed_diagnostics=seed_diagnostics,
             pre_gate_candidates=returned_moments,
@@ -8821,14 +8676,6 @@ async def _recall_memory(
     }
     active_moments, grouped_moments, _ = await _refresh_moment_graph(all_buckets)
     bucket_boosts = seed_scores_for_buckets(matches)
-    if word_map_hint_bucket_ids:
-        moment_boost = float(_word_map_hint_settings()["moment_boost"])
-        for bucket_id, hint_score in word_map_scores.items():
-            seed = seed_diagnostics.get(bucket_id, {})
-            sources = set(seed.get("sources") or [])
-            if sources and len(sources - {"word_map"}) > 0:
-                continue
-            bucket_boosts[bucket_id] = max(0.0, min(1.0, float(hint_score) * moment_boost))
     moment_candidates = memory_moment_store.search_moment_items(
         search_query,
         active_moments,
@@ -8879,12 +8726,6 @@ async def _recall_memory(
             }
             admitted_moments.append(item)
             continue
-        if str(moment.get("bucket_id") or "") in word_map_hint_bucket_ids:
-            seed = seed_diagnostics.get(str(moment.get("bucket_id") or ""), {})
-            moment["word_map_hint"] = True
-            moment["word_map_score"] = seed.get("word_map_score")
-            moment["word_map_terms"] = list(seed.get("word_map_terms") or [])
-            moment["word_map_neighbor_terms"] = list(seed.get("word_map_neighbor_terms") or [])
         admission = _breath_moment_admission_decision(
             query,
             moment,
@@ -8892,17 +8733,6 @@ async def _recall_memory(
             auto=auto_surface,
         )
         item = dict(moment)
-        if _breath_word_map_only_without_topic(query, item, seed_diagnostics):
-            item["_admission_reason"] = "word_map_topic_evidence_missing"
-            item["_admission_debug"] = {
-                "word_map_hint": True,
-                "word_map_score": item.get("word_map_score"),
-                "has_topic_evidence": False,
-                "rerank_score": item.get("rerank_score"),
-                "auto": bool(auto_surface),
-            }
-            suppressed_moments.append(item)
-            continue
         item["_admission_reason"] = admission.reason
         if admission.admit:
             admitted_moments.append(item)
@@ -9093,8 +8923,6 @@ async def _recall_memory(
         recall_thresholds={
             **recall_thresholds,
             "lexical_terms": lexical_terms,
-            "word_map_hint_enabled": _word_map_hint_available(),
-            "word_map_hint_bucket_ids": sorted(word_map_hint_bucket_ids),
         },
         seed_diagnostics=seed_diagnostics,
         pre_gate_candidates=pre_gate_moment_candidates,
@@ -15218,7 +15046,6 @@ async def api_config_get(request):
                 False,
             ),
             "recall_fusion_mode": _normalize_recall_fusion_mode(gateway_cfg.get("recall_fusion_mode", "dynamic")),
-            "word_map_hint_enabled": _bool_value(gateway_cfg.get("word_map_hint_enabled"), False),
             "portrait_memory_enabled": _bool_value(gateway_cfg.get("portrait_memory_enabled"), False),
             "portrait_memory_budget": gateway_cfg.get("portrait_memory_budget", 360),
             "portrait_memory_max_sources": gateway_cfg.get("portrait_memory_max_sources", 8),
@@ -15738,10 +15565,6 @@ async def api_config_update(request):
             gateway_cfg["recall_fusion_mode"] = _normalize_recall_fusion_mode(g["recall_fusion_mode"])
             gateway_hot_update_body["recall_fusion_mode"] = gateway_cfg["recall_fusion_mode"]
             updated.append("gateway.recall_fusion_mode")
-        if "word_map_hint_enabled" in g:
-            gateway_cfg["word_map_hint_enabled"] = _bool_value(g["word_map_hint_enabled"], False)
-            gateway_hot_update_body["word_map_hint_enabled"] = gateway_cfg["word_map_hint_enabled"]
-            updated.append("gateway.word_map_hint_enabled")
         if "portrait_memory_enabled" in g:
             gateway_cfg["portrait_memory_enabled"] = _bool_value(g["portrait_memory_enabled"], False)
             gateway_hot_update_body["portrait_memory_enabled"] = gateway_cfg["portrait_memory_enabled"]
@@ -16234,11 +16057,6 @@ async def api_config_update(request):
                         360,
                         128,
                         2000,
-                    )
-                if "word_map_hint_enabled" in body["gateway"]:
-                    sc_gateway["word_map_hint_enabled"] = _bool_value(
-                        body["gateway"]["word_map_hint_enabled"],
-                        False,
                     )
                 if "memory_detail_recall_enabled" in body["gateway"]:
                     sc_gateway["memory_detail_recall_enabled"] = _bool_value(

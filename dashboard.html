@@ -3426,14 +3426,6 @@
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">仅处理 Operit 文本轮；工具轮和图片/文件轮会跳过，避免破坏工具协议</div>
       <div class="config-row">
-        <label>词图辅助</label>
-        <select id="cfg-word-map-hint-enabled">
-          <option value="false">关闭</option>
-          <option value="true">开启</option>
-        </select>
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认关闭；开启后词图只作为弱候选提示，仍需通过召回门控</div>
-      <div class="config-row">
         <label>LLM拆句</label>
         <select id="cfg-query-planner-enabled">
           <option value="false">关闭</option>
@@ -8380,7 +8372,6 @@ function renderGatewayInjectionItem(item) {
   var diffusedMoments = payload.diffused_moment_ids || [];
   var directRender = gatewayDirectRenderSummaries(payload);
   var chainDebug = gatewayChainDebugSummaries(payload);
-  var structuralActivation = gatewayStructuralActivationSummary(payload);
   var memoryEdgeActivation = gatewayMemoryEdgeActivationSummary(payload);
   var momentChunkShadow = gatewayMomentChunkShadowSummary(payload);
   var dynamicAnchor = gatewayDynamicAnchorSummary(payload);
@@ -8416,7 +8407,6 @@ function renderGatewayInjectionItem(item) {
       '<div class="gateway-injection-line"><span class="label">moments:</span> ' + esc(recalledMoments.concat(diffusedMoments).slice(0, 8).join(', ') || '—') + '</div>' +
       (directRender ? '<div class="gateway-injection-line"><span class="label">direct render:</span> ' + esc(directRender) + '</div>' : '') +
       (chainDebug ? '<div class="gateway-injection-line"><span class="label">diffused chain:</span> ' + esc(chainDebug) + '</div>' : '') +
-      (structuralActivation ? '<div class="gateway-injection-line"><span class="label">activation shadow:</span> ' + esc(structuralActivation) + '</div>' : '') +
       (memoryEdgeActivation ? '<div class="gateway-injection-line"><span class="label">memory edge shadow:</span> ' + esc(memoryEdgeActivation) + '</div>' : '') +
       (momentChunkShadow ? '<div class="gateway-injection-line"><span class="label">moment chunk shadow:</span> ' + esc(momentChunkShadow) + '</div>' : '') +
       (dynamicAnchor ? '<div class="gateway-injection-line"><span class="label">anchor gate:</span> ' + esc(dynamicAnchor) + '</div>' : '') +
@@ -8450,27 +8440,6 @@ function gatewayChainDebugSummaries(payload) {
     if (temps) bits.push('temp ' + temps);
     return bits.length ? label + ' -> ' + bits.join(' · ') : '';
   }).filter(Boolean).slice(0, 5).join(' / ');
-}
-
-function gatewayStructuralActivationSummary(payload) {
-  var planner = payload.query_planner_debug || {};
-  var trace = payload.structural_activation_debug || planner.structural_activation_debug || {};
-  var paths = Array.isArray(trace.paths) ? trace.paths : [];
-  if ((!trace.enabled || trace.status === 'skipped') && !paths.length) return '';
-  var summary = paths.map(function(path) {
-    var seed = path.seed_term || 'term';
-    if (path.seed_kind === 'category_seed') seed += ' [category]';
-    var matched = path.matched_term && path.matched_term !== path.seed_term
-      ? ' → ' + path.matched_term
-      : '';
-    var bucket = path.bucket_name || path.bucket_id || 'bucket';
-    var decision = path.status || 'candidate';
-    if (path.blocked_reason) decision += ': ' + path.blocked_reason;
-    return seed + matched + ' → ' + bucket + ' [' + decision + ']';
-  }).filter(Boolean).slice(0, 5).join(' / ');
-  var finalReason = trace.final && trace.final.reason ? trace.final.reason : '';
-  if (!summary) summary = 'no structural path';
-  return 'shadow · ' + summary + (finalReason ? ' · ' + finalReason : '');
 }
 
 function gatewayMemoryEdgeActivationSummary(payload) {
@@ -8961,8 +8930,6 @@ async function loadConfig() {
     document.getElementById('cfg-retrieval-mode').value = (cfg.gateway && cfg.gateway.retrieval_mode) || 'graph';
     document.getElementById('cfg-operit-context-rewrite-enabled').value =
       (cfg.gateway && cfg.gateway.operit_context_rewrite_enabled) ? 'true' : 'false';
-    document.getElementById('cfg-word-map-hint-enabled').value =
-      (cfg.gateway && cfg.gateway.word_map_hint_enabled) ? 'true' : 'false';
     document.getElementById('cfg-query-planner-enabled').value =
       (cfg.gateway && cfg.gateway.query_planner_enabled) ? 'true' : 'false';
     document.getElementById('cfg-domain-sentinel-enabled').value =
@@ -9221,7 +9188,6 @@ async function saveConfig(persist, persistEnv) {
       direct_render_mode: document.getElementById('cfg-direct-render-mode').value,
       retrieval_mode: document.getElementById('cfg-retrieval-mode').value,
       operit_context_rewrite_enabled: document.getElementById('cfg-operit-context-rewrite-enabled').value === 'true',
-      word_map_hint_enabled: document.getElementById('cfg-word-map-hint-enabled').value === 'true',
       query_planner_enabled: document.getElementById('cfg-query-planner-enabled').value === 'true',
     };
     candidate.recall = {

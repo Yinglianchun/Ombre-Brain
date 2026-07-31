@@ -301,8 +301,8 @@ def source_score_maps(items: list[dict[str, Any]]) -> dict[str, dict[str, float]
         "semantic": {},
         "keyword": {},
         "exact_anchor": {},
+        "authored_cue": {},
         "planner_lexical": {},
-        "word_map": {},
         "entity_edge": {},
     }
     for item in items:
@@ -313,7 +313,6 @@ def source_score_maps(items: list[dict[str, Any]]) -> dict[str, dict[str, float]
             ("semantic", "semantic_score"),
             ("keyword", "keyword_score"),
             ("exact_anchor", "exact_anchor_score"),
-            ("word_map", "word_map_score"),
             ("entity_edge", "entity_edge_score"),
         ):
             value = float(item.get(key) or 0.0)
@@ -321,6 +320,8 @@ def source_score_maps(items: list[dict[str, Any]]) -> dict[str, dict[str, float]
                 maps[source][bucket_id] = max(maps[source].get(bucket_id, 0.0), value)
         if item.get("planner_lexical_match"):
             maps["planner_lexical"][bucket_id] = 1.0
+        if item.get("authored_cue_match"):
+            maps["authored_cue"][bucket_id] = 1.0
     return {source: scores for source, scores in maps.items() if scores}
 
 
@@ -377,11 +378,11 @@ def row_for_item(
         "semantic_score": round(float(item.get("semantic_score") or 0.0), 4),
         "keyword_score": round(float(item.get("keyword_score") or 0.0), 4),
         "exact_anchor_score": round(float(item.get("exact_anchor_score") or 0.0), 4),
-        "word_map_score": round(float(item.get("word_map_score") or 0.0), 4),
         "entity_edge_score": round(float(item.get("entity_edge_score") or 0.0), 4),
         "exact_anchor_match": bool(item.get("exact_anchor_match")),
+        "authored_cue_match": bool(item.get("authored_cue_match")),
+        "authored_cue_terms": list(item.get("authored_cue_terms") or []),
         "planner_lexical_match": bool(item.get("planner_lexical_match")),
-        "rare_name_match": bool(item.get("rare_name_match")),
         "entity_edge_match": bool(item.get("entity_edge_match")),
         "admission_reason": str(item.get("admission_reason") or ""),
         "rrf_score": float(rrf_row.get("rrf_score") or 0.0),

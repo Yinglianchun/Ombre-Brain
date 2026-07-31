@@ -119,8 +119,8 @@ from utils import (
     strip_temperature_meaning_lines,
     strip_wikilinks,
     suppress_migrated_legacy_sources,
+    normalize_scene_cues,
 )
-from word_map import WordMapStore
 
 logger = logging.getLogger("ombre_brain.gateway")
 GENERIC_LEXICAL_STOPWORD_KEYS = frozenset(
@@ -166,16 +166,12 @@ TECH_RECALL_GENERIC_ANCHOR_TERMS = frozenset(
         "测试",
     }
 )
-WORD_MAP_CATEGORY_SEED_TERMS = frozenset(
+GENERIC_KEYWORD_MATCH_TERMS = frozenset(
     {
         "game",
         "games",
         "玩法",
         "游戏",
-    }
-)
-GENERIC_KEYWORD_MATCH_TERMS = WORD_MAP_CATEGORY_SEED_TERMS | frozenset(
-    {
         "今天",
         "以前",
         "之前",
@@ -340,7 +336,6 @@ class GatewayService:
         persona_engine: PersonaStateEngine | None = None,
         dream_engine: DreamEngine | None = None,
         memory_node_store: MemoryNodeStore | None = None,
-        word_map_store: WordMapStore | None = None,
         http_client: httpx.AsyncClient | None = None,
     ):
         self.config = config
@@ -516,25 +511,6 @@ class GatewayService:
             min(8, int(self.gateway_cfg.get("diffusion_explore_multiplier", 3))),
         )
         self.core_memory_interval_rounds = max(0, int(self.gateway_cfg.get("core_memory_interval_rounds", 0)))
-        self.word_map_hint_enabled = self._bool_config_value(
-            self.gateway_cfg.get("word_map_hint_enabled"),
-            False,
-        )
-        self.word_map_hint_weight = self._clamp(float(self.gateway_cfg.get("word_map_hint_weight", 0.08)))
-        self.word_map_hint_moment_boost = self._clamp(
-            float(self.gateway_cfg.get("word_map_hint_moment_boost", 0.25))
-        )
-        self.word_map_hint_neighbor_limit = max(
-            0,
-            min(40, int(self.gateway_cfg.get("word_map_hint_neighbor_limit", 6))),
-        )
-        self.word_map_hint_bucket_limit = max(
-            1,
-            min(100, int(self.gateway_cfg.get("word_map_hint_bucket_limit", 12))),
-        )
-        self.word_map_store = word_map_store if word_map_store is not None else (
-            WordMapStore(config) if self.word_map_hint_enabled else None
-        )
         self.portrait_memory_configured_enabled = self._bool_config_value(
             self.gateway_cfg.get("portrait_memory_enabled"),
             False,
@@ -591,9 +567,6 @@ class GatewayService:
         )
         self.high_confidence_semantic_score = float(
             self.gateway_cfg.get("high_confidence_semantic_score", 0.72)
-        )
-        self.high_confidence_keyword_score = float(
-            self.gateway_cfg.get("high_confidence_keyword_score", 0.65)
         )
         self.high_confidence_cooldown_floor = self._clamp(
             float(self.gateway_cfg.get("high_confidence_cooldown_floor", 0.8))
@@ -814,7 +787,6 @@ class GatewayService:
             "retrieval_mode": self.retrieval_mode,
             "bucket_list_cache_ttl_seconds": self.bucket_list_cache_ttl_seconds,
             "recall_fusion_mode": self.recall_fusion_mode,
-            "word_map_hint_enabled": self.word_map_hint_enabled,
             "portrait_memory_enabled": self.portrait_memory_enabled,
             "portrait_memory_configured_enabled": self.portrait_memory_configured_enabled,
             "portrait_memory_retired": True,
@@ -1244,14 +1216,6 @@ class GatewayService:
             self.recall_fusion_mode = self._normalize_recall_fusion_mode(payload["recall_fusion_mode"])
             self.gateway_cfg["recall_fusion_mode"] = self.recall_fusion_mode
             updated.append("gateway.recall_fusion_mode")
-        if "word_map_hint_enabled" in payload:
-            self.word_map_hint_enabled = self._bool_config_value(payload["word_map_hint_enabled"], False)
-            self.gateway_cfg["word_map_hint_enabled"] = self.word_map_hint_enabled
-            if self.word_map_hint_enabled and self.word_map_store is None:
-                self.word_map_store = WordMapStore(self.config)
-            if not self.word_map_hint_enabled:
-                self.word_map_store = None
-            updated.append("gateway.word_map_hint_enabled")
         if "portrait_memory_enabled" in payload:
             self.portrait_memory_configured_enabled = self._bool_config_value(
                 payload["portrait_memory_enabled"],
@@ -9053,21 +9017,8 @@ class GatewayService:
             "exact_anchor_match",
             "exact_anchor_terms",
             "exact_anchor_fields",
-            "word_map_score",
-            "word_map_hint",
-            "word_map_terms",
-            "word_map_variant_terms",
-            "word_map_neighbor_terms",
-            "word_map_category_seed_terms",
-            "low_frequency_match",
-            "low_frequency_direct_match",
-            "low_frequency_terms",
-            "low_frequency_direct_terms",
-            "low_frequency_category_terms",
-            "low_frequency_sources",
-            "rare_name_match",
-            "rare_name_terms",
-            "rare_name_sources",
+            "authored_cue_match",
+            "authored_cue_terms",
             "fusion_mode",
             "fusion_score",
             "vector_norm",
@@ -9078,8 +9029,6 @@ class GatewayService:
             "cooldown_penalty",
             "matched_query_terms",
             "specific_matched_query_terms",
-            "keyword_direct_terms",
-            "keyword_multi_evidence_signal",
             "title_anchor_terms",
             "retrieval_alias_match",
             "retrieval_alias_score",
@@ -9152,7 +9101,8 @@ class GatewayService:
         if (
             self._planner_lexical_direct_signal(row)
             or row.get("exact_anchor_match")
-            or row.get("keyword_multi_evidence_signal")
+            or row.get("authored_cue_match")
+            or row.get("title_anchor_terms")
         ):
             return True
         if str(row.get("admission_reason") or "") in {
@@ -9177,6 +9127,7 @@ class GatewayService:
             if strong_sources & {
                 "exact_anchor",
                 "planner_lexical",
+                "authored_cue",
             }:
                 return True
         scores = why.get("score") if isinstance(why.get("score"), dict) else {}
@@ -9195,7 +9146,8 @@ class GatewayService:
         if (
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
-            or item.get("keyword_multi_evidence_signal")
+            or item.get("authored_cue_match")
+            or item.get("title_anchor_terms")
         ):
             return True
         if self.recall_policy.has_strong_score(
@@ -9203,9 +9155,8 @@ class GatewayService:
             rerank_score=item.get("rerank_score"),
         ):
             return True
-        return self._is_high_confidence_match(
-            self._safe_float(item.get("semantic_score"), 0.0),
-            self._safe_float(item.get("keyword_score"), 0.0),
+        return self._is_high_confidence_semantic_match(
+            self._safe_float(item.get("semantic_score"), 0.0)
         )
 
     def _session_hard_exclude_moment_bypass(self, query: str, moment: dict) -> bool:
@@ -9342,7 +9293,8 @@ class GatewayService:
         if (
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
-            or item.get("keyword_multi_evidence_signal")
+            or item.get("authored_cue_match")
+            or item.get("title_anchor_terms")
         ):
             return True
         return self._is_source_record_bucket(bucket)
@@ -9688,15 +9640,7 @@ class GatewayService:
             boost = self._suppressed_bucket_moment_search_boost(query, item)
             if boost > 0:
                 bucket_boosts[bucket_id] = boost
-        word_map_boost_scores, word_map_boost_debug = {}, {}
-        word_map_hint_bucket_ids = set(word_map_boost_scores)
-        for bucket_id, score in word_map_boost_scores.items():
-            bucket_boosts[bucket_id] = max(
-                bucket_boosts.get(bucket_id, 0.0),
-                self._clamp(score) * self.word_map_hint_moment_boost,
-            )
         candidates = []
-        self._add_timing_ms(timing_debug, "moment.word_map_boost", stage_started_at)
         stage_started_at = time.perf_counter()
         if search_query:
             moment_search_queries = [search_query]
@@ -9800,29 +9744,6 @@ class GatewayService:
                 item,
                 candidate_bucket_signals.get(bucket_id),
             )
-            if bucket_id in word_map_hint_bucket_ids:
-                hint_debug = word_map_boost_debug.get(bucket_id) or {}
-                item["word_map_hint"] = True
-                item["word_map_score"] = self._clamp(word_map_boost_scores.get(bucket_id, 0.0))
-                item["word_map_terms"] = list(hint_debug.get("direct_terms") or [])
-                item["word_map_variant_terms"] = list(hint_debug.get("variant_terms") or [])
-                item["word_map_neighbor_terms"] = list(hint_debug.get("neighbor_terms") or [])
-                low_frequency_terms = list(hint_debug.get("low_frequency_terms") or [])
-                item["low_frequency_match"] = bool(low_frequency_terms)
-                item["low_frequency_direct_terms"] = self._word_map_specific_low_frequency_terms(low_frequency_terms)
-                item["low_frequency_category_terms"] = self._word_map_category_seed_terms(low_frequency_terms)
-                item["low_frequency_direct_match"] = bool(item["low_frequency_direct_terms"])
-                item["low_frequency_terms"] = low_frequency_terms
-                item["low_frequency_sources"] = list(hint_debug.get("low_frequency_sources") or [])
-                item["word_map_category_seed_terms"] = self._word_map_category_seed_terms(
-                    item["word_map_terms"]
-                    + item["word_map_variant_terms"]
-                    + item["word_map_neighbor_terms"]
-                    + low_frequency_terms
-                )
-                item["rare_name_match"] = bool(hint_debug.get("rare_name_terms"))
-                item["rare_name_terms"] = list(hint_debug.get("rare_name_terms") or [])
-                item["rare_name_sources"] = list(hint_debug.get("rare_name_sources") or [])
             if (
                 bucket_id in session_hard_excluded_ids
                 and not self._session_hard_exclude_moment_bypass(query, item)
@@ -9830,22 +9751,6 @@ class GatewayService:
                 suppressed_candidates.append(
                     self._mark_session_hard_excluded_item(item, kind="moment")
                 )
-                continue
-            hint_only = bucket_id in word_map_hint_bucket_ids and bucket_id not in admitted_bucket_ids
-            if (
-                hint_only
-                and not self._moment_has_query_topic_evidence(query, item)
-                and not self.recall_policy.has_strong_score(rerank_score=item.get("rerank_score"))
-            ):
-                item["admission_reason"] = "word_map_topic_evidence_missing"
-                item["recall_policy_debug"] = {
-                    "word_map_hint": True,
-                    "word_map_score": item.get("word_map_score"),
-                    "has_topic_evidence": False,
-                    "rerank_score": item.get("rerank_score"),
-                    "auto": True,
-                }
-                suppressed_candidates.append(item)
                 continue
             if self._admit_moment_for_recall(query, item, admitted_bucket_ids=admitted_bucket_ids):
                 admitted_candidates.append(item)
@@ -11403,7 +11308,8 @@ class GatewayService:
         if (
             self._planner_lexical_direct_signal(moment)
             or moment.get("exact_anchor_match")
-            or self._word_map_direct_signal(moment)
+            or moment.get("authored_cue_match")
+            or moment.get("title_anchor_terms")
         ):
             return True
         if str(moment.get("admission_reason") or moment.get("_admission_reason") or "") in {
@@ -12026,7 +11932,7 @@ class GatewayService:
 
     def _dynamic_recall_search_query(self, query: str) -> str:
         identity_name_terms = self._identity_name_search_terms(query)
-        base_terms = list(self._word_map_query_terms(query))
+        base_terms = list(self._recall_search_query_terms(query))
         if not base_terms:
             fallback = self._entity_priority_recall_search_query(query)
             base_terms = [fallback] if fallback else []
@@ -12568,17 +12474,6 @@ class GatewayService:
             "supplemental": [],
             "suppressed_by_must_terms": [],
             "final_bucket_ids": [],
-            "word_map_hints": {
-                "enabled": self._word_map_hint_available(),
-                "bucket_ids": [],
-                "terms": [],
-                "variant_terms": [],
-                "neighbor_terms": [],
-                "low_frequency_bucket_ids": [],
-                "low_frequency_terms": [],
-                "rare_name_bucket_ids": [],
-                "rare_name_terms": [],
-            },
             "structural_activation_debug": self._structural_activation_debug_base(query),
             "exact_anchor_hints": {
                 "bucket_ids": [],
@@ -12606,24 +12501,13 @@ class GatewayService:
         }
 
     def _structural_activation_debug_base(self, query: str) -> dict[str, Any]:
-        enabled = self._word_map_hint_available()
-        normalized_query = self._normalized_recall_query(query) if enabled else ""
-        query_terms = self._word_map_query_terms(normalized_query or query) if enabled else []
         return {
             "version": 1,
-            "enabled": enabled,
-            "mode": "shadow",
-            "engine": "word_map_v1",
+            "enabled": False,
+            "mode": "diagnostic",
+            "engine": "explicit_memory_edges",
             "affects_recall": False,
-            "status": "disabled" if not enabled else ("no_match" if query_terms else "skipped"),
-            "query_terms": [
-                {
-                    "term": term,
-                    "kind": "category_seed" if self._word_map_category_seed_term(term) else "specific",
-                    "matched_bucket_ids": [],
-                }
-                for term in query_terms
-            ],
+            "status": "no_structural_seed",
             "paths": [],
             "activated_bucket_ids": [],
             "admitted_bucket_ids": [],
@@ -12651,121 +12535,6 @@ class GatewayService:
                 "reason": "no_structural_match",
             },
         }
-
-    def _structural_activation_shadow_debug(
-        self,
-        query: str,
-        items: list[dict],
-        final_bucket_ids: list[str],
-    ) -> dict[str, Any]:
-        payload = self._structural_activation_debug_base(query)
-        final_ids = {str(bucket_id or "") for bucket_id in final_bucket_ids if str(bucket_id or "")}
-        seeds = {
-            self._compact_lookup_key(seed.get("term")): seed
-            for seed in payload["query_terms"]
-            if self._compact_lookup_key(seed.get("term"))
-        }
-        seen_paths: set[tuple[str, str, str, str]] = set()
-        paths: list[dict[str, Any]] = []
-
-        def ensure_seed(term: str) -> dict[str, Any] | None:
-            cleaned = str(term or "").strip()
-            key = self._compact_lookup_key(cleaned)
-            if not key:
-                return None
-            seed = seeds.get(key)
-            if seed is None:
-                seed = {
-                    "term": cleaned,
-                    "kind": "category_seed" if self._word_map_category_seed_term(cleaned) else "specific",
-                    "matched_bucket_ids": [],
-                }
-                seeds[key] = seed
-                payload["query_terms"].append(seed)
-            return seed
-
-        for item in items or []:
-            if not isinstance(item, dict):
-                continue
-            bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
-            bucket_id = str(bucket.get("id") or "")
-            if not bucket_id:
-                continue
-            metadata = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
-            bucket_name = str(metadata.get("name") or bucket_id)
-            blocked_reason = str(item.get("blocked_reason") or "")
-            status = "admitted" if bucket_id in final_ids else ("blocked" if blocked_reason else "candidate")
-            evidence_labels = self._debug_str_list(item.get("evidence_labels"))
-            hard_evidence_labels = self._debug_str_list(item.get("hard_evidence_labels"))
-            activation_rows = item.get("word_map_activation_terms") or []
-            for row in activation_rows:
-                if not isinstance(row, dict):
-                    continue
-                matched_term = str(row.get("term") or "").strip()
-                activation = str(row.get("kind") or "direct").strip() or "direct"
-                source_terms = self._debug_str_list(row.get("source_terms"))
-                if not source_terms and activation == "direct" and matched_term:
-                    source_terms = [matched_term]
-                for source_term in source_terms:
-                    seed = ensure_seed(source_term)
-                    if seed is None:
-                        continue
-                    path_key = (
-                        self._compact_lookup_key(source_term),
-                        self._compact_lookup_key(matched_term),
-                        bucket_id,
-                        activation,
-                    )
-                    if path_key in seen_paths:
-                        continue
-                    seen_paths.add(path_key)
-                    if bucket_id not in seed["matched_bucket_ids"]:
-                        seed["matched_bucket_ids"].append(bucket_id)
-                    paths.append(
-                        {
-                            "seed_term": source_term,
-                            "seed_kind": seed["kind"],
-                            "activation": activation,
-                            "matched_term": matched_term,
-                            "bucket_id": bucket_id,
-                            "bucket_name": bucket_name,
-                            "card_source": str(row.get("card_source") or ""),
-                            "score": self._safe_float(row.get("score"), 0.0),
-                            "weak_hint": bool(row.get("weak_hint")),
-                            "status": status,
-                            "evidence_labels": evidence_labels,
-                            "hard_evidence_labels": hard_evidence_labels,
-                            "blocked_reason": blocked_reason,
-                        }
-                    )
-                    if len(paths) >= 30:
-                        break
-                if len(paths) >= 30:
-                    break
-            if len(paths) >= 30:
-                break
-
-        payload["paths"] = paths
-        payload["activated_bucket_ids"] = list(dict.fromkeys(path["bucket_id"] for path in paths))
-        payload["admitted_bucket_ids"] = list(
-            dict.fromkeys(path["bucket_id"] for path in paths if path["status"] == "admitted")
-        )
-        payload["blocked_bucket_ids"] = list(
-            dict.fromkeys(path["bucket_id"] for path in paths if path["status"] == "blocked")
-        )
-        payload["status"] = "matched" if paths else payload["status"]
-        payload["final"] = {
-            "structural_candidate_bucket_ids": payload["activated_bucket_ids"],
-            "selected_bucket_ids": payload["admitted_bucket_ids"],
-            "structural_injected_bucket_ids": [],
-            "existing_injected_bucket_ids": [],
-            "reason": (
-                "structural_candidate_selected"
-                if payload["admitted_bucket_ids"]
-                else ("no_admitted_structural_candidate" if paths else "no_structural_match")
-            ),
-        }
-        return payload
 
     @staticmethod
     def _finalize_structural_activation_debug(
@@ -13496,7 +13265,7 @@ class GatewayService:
         text = first.get("text") if isinstance(first, dict) else ""
         return str(text or "").strip()
 
-    def _word_map_term_allowed_by_identity(self, compact_term: str) -> bool:
+    def _recall_search_term_allowed_by_identity(self, compact_term: str) -> bool:
         key = str(compact_term or "").strip().lower()
         if not key:
             return False
@@ -13548,6 +13317,7 @@ class GatewayService:
         fields = " ".join(
             [
                 str(meta.get("name") or bucket.get("id") or ""),
+                " ".join(normalize_scene_cues(meta.get("scene_cues"))),
                 " ".join(str(tag) for tag in meta.get("tags", []) or []),
                 " ".join(str(item) for item in meta.get("domain", []) or []),
                 bucket_content_for_recall(bucket),
@@ -13916,15 +13686,13 @@ class GatewayService:
             exact_scores, exact_debug = self._get_exact_anchor_candidates(raw_query, normalized_query, eligible)
         mark("exact_anchor_candidates", stage_started_at)
         stage_started_at = time.perf_counter()
-        if normalized_query:
-            word_map_scores, word_map_debug = self._get_word_map_hint_scores(
-                normalized_query,
-                eligible,
-                required_terms=required_terms,
-            )
-        else:
-            word_map_scores, word_map_debug = {}, {}
-        mark("word_map_hint", stage_started_at)
+        authored_cue_debug = {
+            str(bucket.get("id") or ""): cue_terms
+            for bucket in eligible
+            if bucket.get("id")
+            and (cue_terms := self._bucket_authored_cue_terms(raw_query, bucket))
+        }
+        mark("authored_cues", stage_started_at)
         stage_started_at = time.perf_counter()
         raw_query_plan = self._recall_query_plan(raw_query)
         lexical_terms = self._planner_lexical_match_terms(required_terms)
@@ -13950,30 +13718,20 @@ class GatewayService:
             set(keyword_scores)
             | set(semantic_scores)
             | set(exact_scores)
+            | set(authored_cue_debug)
             | lexical_ids
-            | set(word_map_scores)
             | set(retrieval_alias_scores)
         )
         if not candidate_ids:
             return [], []
         stage_started_at = time.perf_counter()
         semantic_norms = self._normalized_score_map(semantic_scores)
-        keyword_basis = {
-            str(bucket_id): self._clamp(self._safe_float(score, 0.0))
-            for bucket_id, score in (keyword_scores or {}).items()
-        }
-        for bucket_id, score in (exact_scores or {}).items():
-            key = str(bucket_id)
-            keyword_basis[key] = max(keyword_basis.get(key, 0.0), self._clamp(self._safe_float(score, 0.0)))
-        for bucket_id in lexical_ids:
-            key = str(bucket_id)
-            keyword_basis[key] = max(keyword_basis.get(key, 0.0), 1.0)
-        for bucket_id, score in retrieval_alias_scores.items():
-            key = str(bucket_id)
-            keyword_basis[key] = max(
-                keyword_basis.get(key, 0.0),
-                self._clamp(self._safe_float(score, 0.0)),
-            )
+        # Ordinary full-body keyword matches only expand the candidate pool.
+        # Only explicit lexical evidence contributes to the fusion score.
+        keyword_basis = self._explicit_lexical_score_basis(
+            exact_scores,
+            authored_cue_debug,
+        )
         keyword_norms = self._normalized_score_map(keyword_basis)
         alpha_debug = self._dynamic_alpha_debug(semantic_scores)
         alpha = self._safe_float(alpha_debug.get("alpha"), 0.35)
@@ -13990,21 +13748,8 @@ class GatewayService:
             semantic_score = self._clamp(semantic_scores.get(bucket_id, 0.0))
             keyword_score = self._clamp(keyword_scores.get(bucket_id, 0.0))
             exact_score = self._clamp(exact_scores.get(bucket_id, 0.0))
-            word_map_score = self._clamp(word_map_scores.get(bucket_id, 0.0))
-            word_map_item_debug = word_map_debug.get(bucket_id) or {}
-            rare_name_terms = list(word_map_item_debug.get("rare_name_terms") or [])
-            rare_name_match = bool(rare_name_terms)
-            low_frequency_terms = list(word_map_item_debug.get("low_frequency_terms") or [])
-            low_frequency_match = bool(low_frequency_terms)
-            low_frequency_direct_terms = self._word_map_specific_low_frequency_terms(low_frequency_terms)
-            low_frequency_category_terms = self._word_map_category_seed_terms(low_frequency_terms)
-            low_frequency_direct_match = bool(low_frequency_direct_terms)
-            word_map_category_seed_terms = self._word_map_category_seed_terms(
-                list(word_map_item_debug.get("direct_terms") or [])
-                + list(word_map_item_debug.get("variant_terms") or [])
-                + list(word_map_item_debug.get("neighbor_terms") or [])
-                + low_frequency_terms
-            )
+            authored_cue_terms = list(authored_cue_debug.get(bucket_id) or [])
+            authored_cue_match = bool(authored_cue_terms)
             lexical_match = bucket_id in lexical_ids
             exact_match = bucket_id in exact_scores
             alias_hits = retrieval_alias_by_bucket.get(bucket_id, [])
@@ -14041,18 +13786,6 @@ class GatewayService:
                     + alias_terms
                 )
             )
-            keyword_signal_item = {
-                "keyword_score": keyword_score,
-                "semantic_score": semantic_score,
-                "matched_query_terms": matched_query_terms,
-                "specific_matched_query_terms": specific_matched_query_terms,
-            }
-            keyword_multi_evidence_signal = self._keyword_multi_evidence_signal(
-                policy_query,
-                keyword_signal_item,
-                bucket,
-            )
-            keyword_direct_terms = list(keyword_signal_item.get("keyword_direct_terms") or [])
             planner_lexical_direct_match = lexical_match and self._matched_query_terms_have_specific_evidence(
                 {"matched_query_terms": matched_query_terms}
             )
@@ -14063,8 +13796,8 @@ class GatewayService:
                 cooldown_floor=self.cooldown_floor,
                 now=now,
             )
-            if bucket_id not in recent_ids and self._is_high_confidence_match(
-                semantic_score, keyword_score
+            if bucket_id not in recent_ids and self._is_high_confidence_semantic_match(
+                semantic_score
             ):
                 cooldown_multiplier = max(
                     cooldown_multiplier,
@@ -14073,13 +13806,6 @@ class GatewayService:
             vector_norm = self._clamp(semantic_norms.get(bucket_id, 0.0))
             keyword_norm = self._clamp(keyword_norms.get(bucket_id, 0.0))
             metadata_adjustment = 0.0
-            word_map_adjustment = round(
-                min(
-                    self.word_map_hint_weight,
-                    word_map_score * self.word_map_hint_weight,
-                ),
-                4,
-            )
             cooldown_penalty = 0.0
             if self.recall_fusion_mode == "dynamic":
                 fusion_score = self._clamp((alpha * vector_norm + (1.0 - alpha) * keyword_norm) * relevance_score)
@@ -14088,7 +13814,6 @@ class GatewayService:
                 final_score = round(
                     self._clamp(
                         fusion_score
-                        + word_map_adjustment
                         + metadata_adjustment
                         - cooldown_penalty
                     ),
@@ -14097,8 +13822,7 @@ class GatewayService:
             else:
                 fusion_score = (
                     semantic_score * self.semantic_weight
-                    + keyword_score * self.keyword_weight
-                    + word_map_adjustment
+                    + self._clamp(keyword_basis.get(bucket_id, 0.0)) * self.keyword_weight
                     + importance_score * self.importance_weight
                     + freshness_score * self.freshness_weight
                 ) * relevance_score
@@ -14106,7 +13830,7 @@ class GatewayService:
             if (
                 planner_lexical_direct_match
                 or exact_match
-                or keyword_multi_evidence_signal
+                or authored_cue_match
             ):
                 final_score = max(final_score, self.first_card_min_score)
             scored_candidates.append(
@@ -14119,28 +13843,8 @@ class GatewayService:
                     "exact_anchor_match": exact_match,
                     "exact_anchor_terms": list((exact_debug.get(bucket_id) or {}).get("terms") or []),
                     "exact_anchor_fields": list((exact_debug.get(bucket_id) or {}).get("fields") or []),
-                    "word_map_score": word_map_score,
-                    "word_map_hint": bucket_id in word_map_scores,
-                    "word_map_terms": list(word_map_item_debug.get("direct_terms") or []),
-                    "word_map_variant_terms": list(word_map_item_debug.get("variant_terms") or []),
-                    "word_map_neighbor_terms": list(
-                        word_map_item_debug.get("neighbor_terms") or []
-                    ),
-                    "word_map_activation_terms": [
-                        dict(row)
-                        for row in (word_map_item_debug.get("terms") or [])
-                        if isinstance(row, dict)
-                    ],
-                    "low_frequency_match": low_frequency_match,
-                    "low_frequency_direct_match": low_frequency_direct_match,
-                    "low_frequency_terms": low_frequency_terms,
-                    "low_frequency_direct_terms": low_frequency_direct_terms,
-                    "low_frequency_category_terms": low_frequency_category_terms,
-                    "low_frequency_sources": list(word_map_item_debug.get("low_frequency_sources") or []),
-                    "word_map_category_seed_terms": word_map_category_seed_terms,
-                    "rare_name_match": rare_name_match,
-                    "rare_name_terms": rare_name_terms,
-                    "rare_name_sources": list(word_map_item_debug.get("rare_name_sources") or []),
+                    "authored_cue_match": authored_cue_match,
+                    "authored_cue_terms": authored_cue_terms,
                     "importance_score": importance_score,
                     "freshness_score": freshness_score,
                     "cooldown_multiplier": cooldown_multiplier,
@@ -14153,7 +13857,6 @@ class GatewayService:
                         alpha_debug.get("confidence") if self.recall_fusion_mode == "dynamic" else None
                     ),
                     "metadata_adjustment": metadata_adjustment,
-                    "word_map_adjustment": word_map_adjustment,
                     "cooldown_penalty": cooldown_penalty,
                     "dynamic_alpha_debug": alpha_debug if self.recall_fusion_mode == "dynamic" else {},
                     "planner_lexical_match": lexical_match,
@@ -14161,8 +13864,6 @@ class GatewayService:
                     "planner_queries": [planner_query] if planner_query else [],
                     "matched_query_terms": matched_query_terms,
                     "specific_matched_query_terms": specific_matched_query_terms,
-                    "keyword_direct_terms": keyword_direct_terms,
-                    "keyword_multi_evidence_signal": keyword_multi_evidence_signal,
                     "retrieval_alias_match": bool(alias_hits),
                     "retrieval_alias_score": max(
                         (self._safe_float(row.get("score"), 0.0) for row in alias_hits),
@@ -14218,10 +13919,9 @@ class GatewayService:
             if item["bucket"]["id"] not in recent_ids
             or self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
-            or item.get("keyword_multi_evidence_signal")
-            or self._is_high_confidence_match(
-                self._safe_float(item.get("semantic_score"), 0.0),
-                self._safe_float(item.get("keyword_score"), 0.0),
+            or item.get("authored_cue_match")
+            or self._is_high_confidence_semantic_match(
+                self._safe_float(item.get("semantic_score"), 0.0)
             )
         ]
         active_pool = filtered or scored_candidates
@@ -14316,10 +14016,8 @@ class GatewayService:
             timing_debug=timing_debug,
             timing_prefix="direct",
         )
-        structural_activation_items = list(active_pool) + list(suppressed_candidates)
         self._add_timing_ms(timing_debug, "direct.candidate_items_total", stage_started_at)
         stage_started_at = time.perf_counter()
-        self._merge_word_map_hint_debug(planner_debug, active_pool + suppressed_candidates)
         self._merge_exact_anchor_debug(planner_debug, active_pool + suppressed_candidates)
         direct_selected = self._pick_dynamic_cards(active_pool, query=query)
         selected_items = list(direct_selected)
@@ -14387,11 +14085,6 @@ class GatewayService:
             for bucket in selected_buckets
             if bucket.get("id")
         ]
-        planner_debug["structural_activation_debug"] = self._structural_activation_shadow_debug(
-            query,
-            structural_activation_items,
-            planner_debug["final_bucket_ids"],
-        )
         result = (selected_buckets, suppressed_candidates)
         if include_query_planner_debug:
             return (*result, planner_debug)
@@ -14529,21 +14222,8 @@ class GatewayService:
                 "exact_anchor_match",
                 "exact_anchor_terms",
                 "exact_anchor_fields",
-                "word_map_score",
-                "word_map_hint",
-                "word_map_terms",
-                "word_map_variant_terms",
-                "word_map_neighbor_terms",
-                "word_map_category_seed_terms",
-                "low_frequency_match",
-                "low_frequency_direct_match",
-                "low_frequency_terms",
-                "low_frequency_direct_terms",
-                "low_frequency_category_terms",
-                "low_frequency_sources",
-                "rare_name_match",
-                "rare_name_terms",
-                "rare_name_sources",
+                "authored_cue_match",
+                "authored_cue_terms",
                 "fusion_mode",
                 "fusion_score",
                 "vector_norm",
@@ -14555,8 +14235,6 @@ class GatewayService:
                 "admission_reason",
                 "matched_query_terms",
                 "specific_matched_query_terms",
-                "keyword_direct_terms",
-                "keyword_multi_evidence_signal",
                 "title_anchor_terms",
                 "recall_policy_debug",
                 "retrieval_alias_match",
@@ -14582,91 +14260,11 @@ class GatewayService:
             return bool(item.get("planner_lexical_direct_match"))
         return self._matched_query_terms_have_specific_evidence(item)
 
-    def _word_map_direct_signal(self, item: dict) -> bool:
-        return False
-
-    def _word_map_low_frequency_direct_signal(self, item: dict) -> bool:
-        if not isinstance(item, dict) or not item.get("low_frequency_match"):
-            return False
-        if "low_frequency_direct_match" in item:
-            return bool(item.get("low_frequency_direct_match"))
-        terms = self._debug_str_list(item.get("low_frequency_terms"))
-        if not terms:
-            return True
-        return bool(self._word_map_specific_low_frequency_terms(terms))
-
-    def _word_map_specific_low_frequency_terms(self, terms: Any) -> list[str]:
-        return []
-
-    def _word_map_category_seed_terms(self, terms: Any) -> list[str]:
-        output: list[str] = []
-        for term in self._debug_str_list(terms):
-            if self._word_map_category_seed_term(term) and term not in output:
-                output.append(term)
-        return output
-
-    def _word_map_category_seed_term(self, term: Any) -> bool:
-        key = self._compact_lookup_key(term)
-        if not key:
-            return False
-        return key in {self._compact_lookup_key(value) for value in WORD_MAP_CATEGORY_SEED_TERMS}
-
     def _matched_query_terms_have_specific_evidence(self, item: dict) -> bool:
         terms = self._debug_str_list(item.get("matched_query_terms"))
         if not terms:
             return False
         return any(self._matched_query_term_is_specific(term) for term in terms)
-
-    def _independent_keyword_evidence_terms(self, item: dict) -> list[str]:
-        terms = self._debug_str_list(
-            item.get("specific_matched_query_terms")
-            or item.get("matched_query_terms")
-        )
-        identity_keys = {
-            self._compact_lookup_key(term)
-            for term in self._identity_match_terms(compact=True)
-            if self._compact_lookup_key(term)
-        }
-        candidates: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        for term in terms:
-            key = self._compact_lookup_key(term)
-            if (
-                not key
-                or key in seen
-                or key in identity_keys
-                or not self._matched_query_term_is_specific(term)
-            ):
-                continue
-            seen.add(key)
-            candidates.append((term, key))
-        candidates.sort(key=lambda row: len(row[1]), reverse=True)
-        independent: list[tuple[str, str]] = []
-        for term, key in candidates:
-            if any(key in kept_key for _kept_term, kept_key in independent):
-                continue
-            independent.append((term, key))
-        return [term for term, _key in independent]
-
-    def _keyword_multi_evidence_signal(self, query: str, item: dict, bucket: dict) -> bool:
-        terms = self._independent_keyword_evidence_terms(item)
-        item["keyword_direct_terms"] = terms
-        signal = bool(
-            isinstance(bucket, dict)
-            and self._safe_float(item.get("keyword_score"), 0.0)
-            >= self.high_confidence_keyword_score
-            and self._bucket_has_query_topic_evidence(query, bucket)
-            and (
-                len(terms) >= 2
-                or (
-                    len(terms) == 1
-                    and self._safe_float(item.get("semantic_score"), 0.0)
-                    >= self.high_confidence_semantic_score
-                )
-            )
-        )
-        item["keyword_multi_evidence_signal"] = signal
-        return signal
 
     def _matched_query_term_is_specific(self, term: Any) -> bool:
         key = self._compact_lookup_key(term)
@@ -14688,6 +14286,35 @@ class GatewayService:
             if self._compact_lookup_key(value)
         )
         return key not in generic_keys
+
+    def _bucket_authored_cue_terms(self, query: str, bucket: dict) -> list[str]:
+        if not query or not isinstance(bucket, dict):
+            return []
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        if str(meta.get("memory_value_source") or "") != "authored_scene":
+            return []
+        cues = normalize_scene_cues(meta.get("scene_cues"))
+        if not cues:
+            return []
+
+        query_key = self._compact_lookup_key(query)
+        specific_keys = {
+            self._compact_lookup_key(term)
+            for term in self._specific_query_terms(query)
+            if self._matched_query_term_is_specific(term)
+            and self._compact_lookup_key(term)
+        }
+        matched: list[str] = []
+        for cue in cues:
+            cue_key = self._compact_lookup_key(cue)
+            if not cue_key:
+                continue
+            if (
+                cue_key in query_key
+                or any(term_key in cue_key for term_key in specific_keys)
+            ):
+                matched.append(cue)
+        return matched
 
     def _bucket_title_anchor_terms(self, query: str, bucket: dict) -> list[str]:
         if not query or not isinstance(bucket, dict):
@@ -14838,12 +14465,8 @@ class GatewayService:
             labels.append("retrieval_alias")
         if item.get("semantic_rescue_direct_span"):
             labels.append("semantic_rescue_direct_span")
-        if item.get("word_map_category_seed_terms") or self._word_map_category_seed_terms(
-            list(item.get("word_map_terms") or []) + list(item.get("low_frequency_terms") or [])
-        ):
-            labels.append("category_seed")
-        if self._keyword_multi_evidence_signal(query, item, bucket):
-            labels.append("keyword_match")
+        if item.get("authored_cue_match"):
+            labels.append("authored_cue")
         if self._safe_float(item.get("semantic_score"), 0.0) > 0:
             labels.append("semantic_hit")
         if not self._is_source_record_bucket(bucket):
@@ -14851,11 +14474,6 @@ class GatewayService:
                 labels.append("strong_semantic")
             if self._safe_float(item.get("rerank_score"), 0.0) >= self.recall_policy.rerank_threshold:
                 labels.append("strong_rerank")
-        if (
-            item.get("word_map_hint")
-            or self._safe_float(item.get("word_map_score"), 0.0) > 0
-        ):
-            labels.append("graph_related")
         return self._dedupe_evidence_labels(labels)
 
     @staticmethod
@@ -14866,7 +14484,7 @@ class GatewayService:
             "same_day_metadata",
             "exact_anchor",
             "entity_match",
-            "keyword_match",
+            "authored_cue",
             "identity_name_match",
             "source_record_exact",
             "taste_evidence",
@@ -14887,8 +14505,6 @@ class GatewayService:
         ):
             return 1.0
         if str(item.get("admission_reason") or "") == "session_hard_exclude":
-            return 0.0
-        if str(item.get("admission_reason") or "") == "word_map_topic_evidence_missing":
             return 0.0
         if not self._query_has_specific_seed_residue(query):
             return 0.0
@@ -14940,8 +14556,8 @@ class GatewayService:
         if self.recall_fusion_mode == "dynamic":
             return (
                 not bool(item.get("exact_anchor_match")),
+                not bool(item.get("authored_cue_match")),
                 not bool(self._planner_lexical_direct_signal(item)),
-                not bool(item.get("keyword_multi_evidence_signal")),
                 -self._safe_float(item.get("score"), 0.0),
                 self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
                 -self._safe_float(item.get("semantic_score"), 0.0),
@@ -14953,8 +14569,8 @@ class GatewayService:
         if self.recall_fusion_mode == "dynamic":
             return (
                 not bool(item.get("exact_anchor_match")),
+                not bool(item.get("authored_cue_match")),
                 not bool(self._planner_lexical_direct_signal(item)),
-                not bool(item.get("keyword_multi_evidence_signal")),
                 item.get("rerank_score") is None,
                 -self._safe_float(item.get("combined_score", item.get("score")), 0.0),
                 -self._safe_float(item.get("score"), 0.0),
@@ -14970,11 +14586,10 @@ class GatewayService:
     def _bucket_rerank_candidate_priority(self, query: str, item: dict) -> tuple:
         return (
             not bool(item.get("exact_anchor_match")),
+            not bool(item.get("authored_cue_match")),
             not bool(self._planner_lexical_direct_signal(item)),
-            not bool(item.get("keyword_multi_evidence_signal")),
             -self._safe_float(item.get("semantic_score"), 0.0),
             -self._safe_float(item.get("keyword_score"), 0.0),
-            -self._safe_float(item.get("word_map_score"), 0.0),
             self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
             -self._safe_float(item.get("score"), 0.0),
         )
@@ -14988,24 +14603,19 @@ class GatewayService:
     ) -> tuple:
         if (
             item.get("exact_anchor_match")
+            or item.get("authored_cue_match")
             or self._planner_lexical_direct_signal(item)
         ):
             evidence_tier = 0
         elif item.get("title_anchor_terms"):
             evidence_tier = 1
-        elif item.get("keyword_multi_evidence_signal"):
-            evidence_tier = 2
         elif self.recall_policy.has_strong_score(
             semantic_score=item.get("semantic_score"),
             rerank_score=item.get("rerank_score"),
         ):
-            evidence_tier = 3
-        elif self._safe_float(item.get("word_map_score"), 0.0) > 0:
-            evidence_tier = 4
-        elif self._safe_float(item.get("keyword_score"), 0.0) >= self.high_confidence_keyword_score:
-            evidence_tier = 5
+            evidence_tier = 2
         else:
-            evidence_tier = 6
+            evidence_tier = 3
         bucket_id = str((item.get("bucket") or {}).get("id") or "")
         recent_penalty = bool(recent_ids and bucket_id in recent_ids and evidence_tier != 0)
         if self.recall_fusion_mode == "dynamic":
@@ -15041,11 +14651,8 @@ class GatewayService:
         ]
         return "\n".join(fields)[:4000]
 
-    def _is_high_confidence_match(self, semantic_score: float, keyword_score: float) -> bool:
-        return (
-            semantic_score >= self.high_confidence_semantic_score
-            or keyword_score >= self.high_confidence_keyword_score
-        )
+    def _is_high_confidence_semantic_match(self, semantic_score: float) -> bool:
+        return semantic_score >= self.high_confidence_semantic_score
 
     def _bucket_is_tech_domain(self, bucket: dict | None) -> bool:
         if not isinstance(bucket, dict):
@@ -15087,7 +14694,8 @@ class GatewayService:
         return bool(
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
-            or item.get("keyword_multi_evidence_signal")
+            or item.get("authored_cue_match")
+            or item.get("title_anchor_terms")
         )
 
     def _item_has_high_confidence_direct_semantic_evidence(self, item: dict) -> bool:
@@ -15176,9 +14784,8 @@ class GatewayService:
             high_confidence_edge=bool(
                 self._planner_lexical_direct_signal(item)
                 or item.get("exact_anchor_match")
-                or self._word_map_direct_signal(item)
+                or item.get("authored_cue_match")
                 or item.get("semantic_rescue_direct_span")
-                or "keyword_match" in hard_evidence_labels
                 or "title_anchor" in hard_evidence_labels
             ),
             auto=True,
@@ -15387,6 +14994,22 @@ class GatewayService:
         scored.sort(key=lambda item: item[1], reverse=True)
         return {bucket_id: score for bucket_id, score in scored[: self.dynamic_top_k]}
 
+    def _explicit_lexical_score_basis(
+        self,
+        exact_scores: dict[str, float],
+        authored_cue_debug: dict[str, list[str]],
+    ) -> dict[str, float]:
+        scores = {
+            str(bucket_id): self._clamp(self._safe_float(score, 0.0))
+            for bucket_id, score in (exact_scores or {}).items()
+            if str(bucket_id or "")
+        }
+        for bucket_id in authored_cue_debug or {}:
+            key = str(bucket_id or "")
+            if key:
+                scores[key] = max(scores.get(key, 0.0), 1.0)
+        return scores
+
     async def _get_semantic_candidates(
         self,
         query: str,
@@ -15429,56 +15052,7 @@ class GatewayService:
             semantic_scores[bucket_id] = self._clamp(similarity)
         return semantic_scores
 
-    def _word_map_hint_available(self) -> bool:
-        return (
-            bool(self.word_map_hint_enabled)
-            and self.word_map_store is not None
-            and bool(getattr(self.word_map_store, "enabled", False))
-        )
-
-    def _get_word_map_hint_scores(
-        self,
-        query: str,
-        buckets: list[dict],
-        *,
-        required_terms: list[str] | None = None,
-    ) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
-        if not self._word_map_hint_available():
-            return {}, {}
-        terms = self._word_map_query_terms(query, required_terms=required_terms)
-        if not terms:
-            return {}, {}
-        eligible_ids = {
-            str(bucket.get("id") or "")
-            for bucket in buckets
-            if isinstance(bucket, dict) and bucket.get("id")
-        }
-        if not eligible_ids:
-            return {}, {}
-        try:
-            payload = self.word_map_store.hint_buckets_for_terms(
-                terms,
-                neighbor_limit=self.word_map_hint_neighbor_limit,
-                bucket_limit=self.word_map_hint_bucket_limit,
-            )
-        except Exception as exc:
-            logger.warning("Gateway word map hint lookup failed: %s", exc)
-            return {}, {}
-
-        raw_scores = payload.get("bucket_scores", {}) if isinstance(payload, dict) else {}
-        raw_evidence = payload.get("evidence", {}) if isinstance(payload, dict) else {}
-        scores: dict[str, float] = {}
-        debug: dict[str, dict[str, Any]] = {}
-        for bucket_id, score in raw_scores.items():
-            bucket_id = str(bucket_id or "")
-            if bucket_id not in eligible_ids:
-                continue
-            scores[bucket_id] = self._clamp(score)
-            evidence = raw_evidence.get(bucket_id, {}) if isinstance(raw_evidence, dict) else {}
-            debug[bucket_id] = evidence if isinstance(evidence, dict) else {}
-        return scores, debug
-
-    def _word_map_query_terms(self, query: str, *, required_terms: list[str] | None = None) -> list[str]:
+    def _recall_search_query_terms(self, query: str, *, required_terms: list[str] | None = None) -> list[str]:
         text = str(query or "").strip()
         if not text:
             return []
@@ -15490,7 +15064,7 @@ class GatewayService:
             key = self._compact_lookup_key(cleaned)
             if not key or key in seen:
                 return
-            if not self._word_map_query_term_allowed(key):
+            if not self._recall_search_query_term_allowed(key):
                 return
             seen.add(key)
             output.append(cleaned)
@@ -15507,7 +15081,7 @@ class GatewayService:
 
         return output[:10]
 
-    def _word_map_query_term_allowed(self, compact_term: str) -> bool:
+    def _recall_search_query_term_allowed(self, compact_term: str) -> bool:
         key = str(compact_term or "").strip().lower()
         if not key:
             return False
@@ -15524,115 +15098,13 @@ class GatewayService:
         }
         if any(address_key and address_key in key for address_key in address_keys):
             return False
-        if not self._word_map_term_allowed_by_identity(key):
+        if not self._recall_search_term_allowed_by_identity(key):
             return False
         if re.fullmatch(r"[a-z0-9_.:/-]+", key):
             return len(key) >= 3 or bool(re.search(r"\d", key))
         if re.fullmatch(r"[\u4e00-\u9fff]+", key):
             return 2 <= len(key) <= 16
         return bool(re.search(r"[\u4e00-\u9fffA-Za-z0-9]", key))
-
-    def _word_map_hint_debug_from_items(self, items: list[dict]) -> dict[str, Any]:
-        payload = {
-            "enabled": self._word_map_hint_available(),
-            "bucket_ids": [],
-            "terms": [],
-            "variant_terms": [],
-            "neighbor_terms": [],
-            "category_seed_terms": [],
-            "category_seed_bucket_ids": [],
-            "low_frequency_bucket_ids": [],
-            "low_frequency_terms": [],
-            "low_frequency_direct_bucket_ids": [],
-            "low_frequency_direct_terms": [],
-            "low_frequency_category_terms": [],
-            "rare_name_bucket_ids": [],
-            "rare_name_terms": [],
-        }
-        for item in items or []:
-            if not isinstance(item, dict) or not item.get("word_map_hint"):
-                continue
-            bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
-            bucket_id = str(bucket.get("id") or "")
-            if bucket_id and bucket_id not in payload["bucket_ids"]:
-                payload["bucket_ids"].append(bucket_id)
-            for term in item.get("word_map_terms") or []:
-                if term not in payload["terms"]:
-                    payload["terms"].append(term)
-            for term in item.get("word_map_variant_terms") or []:
-                if term not in payload["variant_terms"]:
-                    payload["variant_terms"].append(term)
-            for term in item.get("word_map_neighbor_terms") or []:
-                if term not in payload["neighbor_terms"]:
-                    payload["neighbor_terms"].append(term)
-            if item.get("word_map_category_seed_terms") and bucket_id and bucket_id not in payload["category_seed_bucket_ids"]:
-                payload["category_seed_bucket_ids"].append(bucket_id)
-            for term in item.get("word_map_category_seed_terms") or []:
-                if term not in payload["category_seed_terms"]:
-                    payload["category_seed_terms"].append(term)
-            if item.get("low_frequency_match") and bucket_id and bucket_id not in payload["low_frequency_bucket_ids"]:
-                payload["low_frequency_bucket_ids"].append(bucket_id)
-            for term in item.get("low_frequency_terms") or []:
-                if term not in payload["low_frequency_terms"]:
-                    payload["low_frequency_terms"].append(term)
-            if item.get("low_frequency_direct_match") and bucket_id and bucket_id not in payload["low_frequency_direct_bucket_ids"]:
-                payload["low_frequency_direct_bucket_ids"].append(bucket_id)
-            for term in item.get("low_frequency_direct_terms") or []:
-                if term not in payload["low_frequency_direct_terms"]:
-                    payload["low_frequency_direct_terms"].append(term)
-            for term in item.get("low_frequency_category_terms") or []:
-                if term not in payload["low_frequency_category_terms"]:
-                    payload["low_frequency_category_terms"].append(term)
-            if item.get("rare_name_match") and bucket_id and bucket_id not in payload["rare_name_bucket_ids"]:
-                payload["rare_name_bucket_ids"].append(bucket_id)
-            for term in item.get("rare_name_terms") or []:
-                if term not in payload["rare_name_terms"]:
-                    payload["rare_name_terms"].append(term)
-        return payload
-
-    def _merge_word_map_hint_debug(self, target: dict[str, Any], items: list[dict]) -> None:
-        if not isinstance(target, dict):
-            return
-        current = target.setdefault(
-            "word_map_hints",
-            {
-                "enabled": self._word_map_hint_available(),
-                "bucket_ids": [],
-                "terms": [],
-                "variant_terms": [],
-                "neighbor_terms": [],
-                "category_seed_terms": [],
-                "category_seed_bucket_ids": [],
-                "low_frequency_bucket_ids": [],
-                "low_frequency_terms": [],
-                "low_frequency_direct_bucket_ids": [],
-                "low_frequency_direct_terms": [],
-                "low_frequency_category_terms": [],
-                "rare_name_bucket_ids": [],
-                "rare_name_terms": [],
-            },
-        )
-        incoming = self._word_map_hint_debug_from_items(items)
-        current["enabled"] = bool(current.get("enabled") or incoming.get("enabled"))
-        for key in (
-            "bucket_ids",
-            "terms",
-            "variant_terms",
-            "neighbor_terms",
-            "category_seed_terms",
-            "category_seed_bucket_ids",
-            "low_frequency_bucket_ids",
-            "low_frequency_terms",
-            "low_frequency_direct_bucket_ids",
-            "low_frequency_direct_terms",
-            "low_frequency_category_terms",
-            "rare_name_bucket_ids",
-            "rare_name_terms",
-        ):
-            values = current.setdefault(key, [])
-            for value in incoming.get(key) or []:
-                if value not in values:
-                    values.append(value)
 
     @staticmethod
     def _exact_anchor_debug_from_items(items: list[dict]) -> dict[str, Any]:
@@ -15736,13 +15208,12 @@ class GatewayService:
         if (
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
-            or self._word_map_direct_signal(item)
-            or item.get("keyword_multi_evidence_signal")
+            or item.get("authored_cue_match")
+            or item.get("title_anchor_terms")
         ):
             return True
-        if self._is_high_confidence_match(
-            self._safe_float(item.get("semantic_score"), 0.0),
-            self._safe_float(item.get("keyword_score"), 0.0),
+        if self._is_high_confidence_semantic_match(
+            self._safe_float(item.get("semantic_score"), 0.0)
         ):
             return True
         bucket = item.get("bucket") if isinstance(item, dict) else None
@@ -16270,7 +15741,6 @@ class GatewayService:
         keyword_score = item.get("keyword_score")
         rerank_score = item.get("rerank_score")
         exact_anchor_score = item.get("exact_anchor_score")
-        word_map_score = item.get("word_map_score")
         admission_reason = str(
             item.get("admission_reason")
             or item.get("_admission_reason")
@@ -16291,20 +15761,10 @@ class GatewayService:
                 matched_terms=self._debug_str_list(item.get("matched_query_terms")),
                 direct_match=bool(self._planner_lexical_direct_signal(item)),
             )
-        if item.get("rare_name_match"):
+        if item.get("authored_cue_match"):
             add_source(
-                "rare_name",
-                terms=self._debug_str_list(item.get("rare_name_terms")),
-                sources=self._debug_str_list(item.get("rare_name_sources")),
-            )
-        if item.get("low_frequency_match"):
-            add_source(
-                "low_frequency",
-                terms=self._debug_str_list(item.get("low_frequency_terms")),
-                direct_match=bool(self._word_map_low_frequency_direct_signal(item)),
-                direct_terms=self._debug_str_list(item.get("low_frequency_direct_terms")),
-                category_terms=self._debug_str_list(item.get("low_frequency_category_terms")),
-                sources=self._debug_str_list(item.get("low_frequency_sources")),
+                "authored_cue",
+                terms=self._debug_str_list(item.get("authored_cue_terms")),
             )
         if item.get("semantic_rescue_direct_span"):
             add_source(
@@ -16315,15 +15775,6 @@ class GatewayService:
                     500,
                 ),
             )
-        if item.get("word_map_hint") or self._safe_float(word_map_score, 0.0) > 0:
-            add_source(
-                "word_map",
-                score=self._safe_float(word_map_score, 0.0),
-                terms=self._debug_str_list(item.get("word_map_terms")),
-                variant_terms=self._debug_str_list(item.get("word_map_variant_terms")),
-                neighbor_terms=self._debug_str_list(item.get("word_map_neighbor_terms")),
-                category_seed_terms=self._debug_str_list(item.get("word_map_category_seed_terms")),
-            )
         if semantic_score is not None and self._safe_float(semantic_score, 0.0) > 0:
             add_source("semantic", score=self._safe_float(semantic_score, 0.0))
         if keyword_score is not None and (
@@ -16333,6 +15784,7 @@ class GatewayService:
                 "keyword",
                 score=self._safe_float(keyword_score, 0.0),
                 matched_terms=self._debug_str_list(item.get("matched_query_terms")),
+                candidate_only=True,
             )
         if rerank_score is not None:
             add_source("rerank", score=self._safe_float(rerank_score, 0.0))
@@ -16374,7 +15826,6 @@ class GatewayService:
                     else None
                 ),
                 "exact_anchor": self._safe_float(exact_anchor_score, 0.0),
-                "word_map": self._safe_float(word_map_score, 0.0),
                 "fusion_mode": str(item.get("fusion_mode") or ""),
                 "fusion_score": self._safe_float(item.get("fusion_score"), 0.0),
                 "vector_norm": self._safe_float(item.get("vector_norm"), 0.0),
@@ -16469,24 +15920,9 @@ class GatewayService:
             "exact_anchor_match": bool(item.get("exact_anchor_match")),
             "exact_anchor_terms": list(item.get("exact_anchor_terms") or []),
             "exact_anchor_fields": list(item.get("exact_anchor_fields") or []),
-            "word_map_score": self._safe_float(item.get("word_map_score"), 0.0),
-            "word_map_hint": bool(item.get("word_map_hint")),
-            "word_map_terms": list(item.get("word_map_terms") or []),
-            "word_map_variant_terms": list(item.get("word_map_variant_terms") or []),
-            "word_map_neighbor_terms": list(item.get("word_map_neighbor_terms") or []),
-            "word_map_category_seed_terms": list(item.get("word_map_category_seed_terms") or []),
-            "low_frequency_match": bool(item.get("low_frequency_match")),
-            "low_frequency_direct_match": bool(self._word_map_low_frequency_direct_signal(item)),
-            "low_frequency_terms": list(item.get("low_frequency_terms") or []),
-            "low_frequency_direct_terms": list(item.get("low_frequency_direct_terms") or []),
-            "low_frequency_category_terms": list(item.get("low_frequency_category_terms") or []),
-            "low_frequency_sources": list(item.get("low_frequency_sources") or []),
-            "rare_name_match": bool(item.get("rare_name_match")),
-            "rare_name_terms": list(item.get("rare_name_terms") or []),
-            "rare_name_sources": list(item.get("rare_name_sources") or []),
+            "authored_cue_match": bool(item.get("authored_cue_match")),
+            "authored_cue_terms": list(item.get("authored_cue_terms") or []),
             "specific_matched_query_terms": list(item.get("specific_matched_query_terms") or []),
-            "keyword_direct_terms": list(item.get("keyword_direct_terms") or []),
-            "keyword_multi_evidence_signal": bool(item.get("keyword_multi_evidence_signal")),
             "title_anchor_terms": list(item.get("title_anchor_terms") or []),
             "retrieval_alias_match": bool(item.get("retrieval_alias_match")),
             "retrieval_alias_score": self._safe_float(item.get("retrieval_alias_score"), 0.0),
@@ -16567,24 +16003,9 @@ class GatewayService:
             "exact_anchor_match": bool(moment.get("exact_anchor_match")),
             "exact_anchor_terms": list(moment.get("exact_anchor_terms") or []),
             "exact_anchor_fields": list(moment.get("exact_anchor_fields") or []),
-            "word_map_score": self._safe_float(moment.get("word_map_score"), 0.0),
-            "word_map_hint": bool(moment.get("word_map_hint")),
-            "word_map_terms": list(moment.get("word_map_terms") or []),
-            "word_map_variant_terms": list(moment.get("word_map_variant_terms") or []),
-            "word_map_neighbor_terms": list(moment.get("word_map_neighbor_terms") or []),
-            "word_map_category_seed_terms": list(moment.get("word_map_category_seed_terms") or []),
-            "low_frequency_match": bool(moment.get("low_frequency_match")),
-            "low_frequency_direct_match": bool(self._word_map_low_frequency_direct_signal(moment)),
-            "low_frequency_terms": list(moment.get("low_frequency_terms") or []),
-            "low_frequency_direct_terms": list(moment.get("low_frequency_direct_terms") or []),
-            "low_frequency_category_terms": list(moment.get("low_frequency_category_terms") or []),
-            "low_frequency_sources": list(moment.get("low_frequency_sources") or []),
-            "rare_name_match": bool(moment.get("rare_name_match")),
-            "rare_name_terms": list(moment.get("rare_name_terms") or []),
-            "rare_name_sources": list(moment.get("rare_name_sources") or []),
+            "authored_cue_match": bool(moment.get("authored_cue_match")),
+            "authored_cue_terms": list(moment.get("authored_cue_terms") or []),
             "specific_matched_query_terms": list(moment.get("specific_matched_query_terms") or []),
-            "keyword_direct_terms": list(moment.get("keyword_direct_terms") or []),
-            "keyword_multi_evidence_signal": bool(moment.get("keyword_multi_evidence_signal")),
             "title_anchor_terms": list(moment.get("title_anchor_terms") or []),
             "retrieval_alias_match": bool(moment.get("retrieval_alias_match")),
             "retrieval_alias_score": self._safe_float(moment.get("retrieval_alias_score"), 0.0),
@@ -16864,7 +16285,7 @@ class GatewayService:
             "version": int(trace.get("version") or 1),
             "enabled": bool(trace.get("enabled")),
             "mode": str(trace.get("mode") or "shadow"),
-            "engine": str(trace.get("engine") or "word_map_v1"),
+            "engine": str(trace.get("engine") or "explicit_memory_edges"),
             "status": str(trace.get("status") or "compact"),
             "activated_bucket_ids": activated_ids,
             "admitted_bucket_ids": admitted_ids,
@@ -17272,9 +16693,9 @@ class GatewayService:
         reliable = bool(
             self._planner_lexical_direct_signal(signal)
             or signal.get("exact_anchor_match")
-            or self._is_high_confidence_match(
-                self._safe_float(signal.get("semantic_score"), 0.0),
-                self._safe_float(signal.get("keyword_score"), 0.0),
+            or signal.get("authored_cue_match")
+            or self._is_high_confidence_semantic_match(
+                self._safe_float(signal.get("semantic_score"), 0.0)
             )
         )
         view = normalize_memory_metadata(bucket)

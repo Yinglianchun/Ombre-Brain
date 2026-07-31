@@ -22,14 +22,15 @@ def build_service() -> GatewayService:
         "relationship_terms": [],
         "user_aliases": [],
     }
-    service.word_map_store = None
+    service.recall_policy = RecallPolicy()
+    service.high_confidence_semantic_score = 0.72
     return service
 
 
 def verify_original_query_retrieval_path() -> None:
     service = build_service()
     service._identity_name_search_terms = lambda query: ["Haven", "名字"]
-    service._word_map_query_terms = lambda query: ["梅丽", "黄色小花", "名字"]
+    service._recall_search_query_terms = lambda query: ["梅丽", "黄色小花", "名字"]
     service._entity_priority_recall_search_query = lambda query: query
 
     query = "梅丽为什么把黄色小花和 Haven 的名字连在一起？"
@@ -58,6 +59,53 @@ def verify_semantic_entry_owns_the_skip_decision() -> None:
     ):
         plan = policy.plan_query(query)
         assert plan.skip_long_term_recall is False, (query, plan.skip_reason)
+
+
+def verify_authored_cues_are_explicit_evidence() -> None:
+    service = build_service()
+    authored_scene = {
+        "id": "scene-cue",
+        "metadata": {
+            "memory_value_source": "authored_scene",
+            "scene_cues": ["提到黄色小花和名字的联系", "说起修记忆库的夜晚"],
+        },
+        "content": "原句里没有黄色小花。",
+    }
+    assert service._bucket_authored_cue_terms("黄色小花为什么和名字连在一起", authored_scene) == [
+        "提到黄色小花和名字的联系"
+    ]
+    legacy_bucket = {
+        **authored_scene,
+        "metadata": {
+            **authored_scene["metadata"],
+            "memory_value_source": "legacy_summary",
+        },
+    }
+    assert service._bucket_authored_cue_terms("黄色小花为什么和名字连在一起", legacy_bucket) == []
+    assert service._explicit_lexical_score_basis(
+        {"quoted-phrase": 0.88},
+        {"scene-cue": ["提到黄色小花和名字的联系"]},
+    ) == {
+        "quoted-phrase": 0.88,
+        "scene-cue": 1.0,
+    }
+    assert service._is_high_confidence_semantic_match(0.80) is True
+    assert service._is_high_confidence_semantic_match(0.0) is False
+
+
+def verify_body_keyword_cannot_become_recall_evidence() -> None:
+    service = build_service()
+    body_only_bucket = {
+        "id": "body-only-great",
+        "metadata": {
+            "memory_value_source": "authored_scene",
+            "scene_cues": [],
+        },
+        "content": "那是一件伟大的事。",
+    }
+    assert service._bucket_exact_anchor_score(body_only_bucket, "但是爱很伟大") == (0.0, "")
+    assert service._bucket_authored_cue_terms("但是爱很伟大", body_only_bucket) == []
+    assert service._explicit_lexical_score_basis({}, {}) == {}
 
 
 def verify_date_topic_can_live_in_either_role() -> None:
@@ -113,6 +161,12 @@ def verify_retired_scaffolding_is_gone() -> None:
         "_query_is_category_overview",
         "_bucket_has_reliable_recall_signal",
         "_weak_bucket_evidence_block_reason",
+        "_word_map_hint_available",
+        "_get_word_map_hint_scores",
+        "_word_map_query_terms",
+        "_word_map_direct_signal",
+        "_word_map_low_frequency_direct_signal",
+        "_keyword_multi_evidence_signal",
     ):
         assert not hasattr(GatewayService, name), name
 
@@ -121,6 +175,8 @@ def main() -> int:
     verify_original_query_retrieval_path()
     verify_ambiguous_query_is_not_suppressed_twice()
     verify_semantic_entry_owns_the_skip_decision()
+    verify_authored_cues_are_explicit_evidence()
+    verify_body_keyword_cannot_become_recall_evidence()
     verify_date_topic_can_live_in_either_role()
     verify_retired_scaffolding_is_gone()
     print("recall entry evidence verification passed")
