@@ -195,6 +195,7 @@ recall_diagnostics:
 # 根据 query 类型调整候选入口；不直接注入，只决定哪些语义候选可进入重排序。
 recall_thresholds:
   vector_min_score: 0.50
+  skip_route_vector_min_score: 0.60 # low-confidence chitchat/contact route; raw Scene embedding alone needs stronger evidence
   facet_vector_min_score: 0.45       # relationship/email/body/intimacy context / 有明确语境
   vague_vector_min_score: 0.40       # broad queries like "recent interesting things" / 模糊查询
   explicit_vector_min_score: 0.55    # IDs/protocols/model names / 明确实体

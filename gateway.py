@@ -2035,6 +2035,7 @@ class GatewayService:
                 include_diffused=include_diffused,
                 allow_semantic=allow_semantic,
                 query_embedding=semantic_query_vector,
+                semantic_recall_debug=semantic_recall_debug,
                 allow_semantic_session_dedupe=allow_semantic_session_dedupe,
                 allow_rerank=allow_rerank,
             )
@@ -2607,6 +2608,7 @@ class GatewayService:
                             current_user_query
                         ),
                         query_embedding=semantic_recall_query_vector,
+                        semantic_recall_debug=semantic_recall_debug,
                         include_query_planner_debug=True,
                     )
                     mark_step("dynamic_recall_bucket_select", stage_started_at)
@@ -13645,6 +13647,7 @@ class GatewayService:
         *,
         search_query: str = "",
         query_embedding: list[float] | None = None,
+        semantic_recall_debug: dict[str, Any] | None = None,
         required_terms: list[str] | None = None,
         planner_query: dict[str, Any] | None = None,
         allow_semantic: bool = True,
@@ -13853,6 +13856,14 @@ class GatewayService:
             metadata_adjustment = 0.0
             cooldown_penalty = 0.0
             canonical_scene = self._is_canonical_scene_bucket(bucket)
+            scene_route_guard = (
+                self._canonical_scene_semantic_route_guard(
+                    bucket,
+                    semantic_recall_debug,
+                )
+                if canonical_scene
+                else {}
+            )
             if canonical_scene:
                 fusion_score = semantic_score
                 final_score = self._canonical_scene_recall_score(
@@ -13894,6 +13905,12 @@ class GatewayService:
                     "exact_anchor_fields": list((exact_debug.get(bucket_id) or {}).get("fields") or []),
                     "authored_cue_match": authored_cue_match,
                     "authored_cue_terms": authored_cue_terms,
+                    "canonical_scene_semantic_threshold": (
+                        scene_route_guard.get("semantic_threshold")
+                        if scene_route_guard
+                        else self._canonical_scene_semantic_threshold(bucket)
+                    ),
+                    "semantic_route_guard": scene_route_guard,
                     "importance_score": importance_score,
                     "freshness_score": freshness_score,
                     "cooldown_multiplier": cooldown_multiplier,
@@ -14037,6 +14054,7 @@ class GatewayService:
         *,
         search_query: str = "",
         query_embedding: list[float] | None = None,
+        semantic_recall_debug: dict[str, Any] | None = None,
         include_query_planner_debug: bool = False,
         allow_semantic: bool = True,
         allow_semantic_session_dedupe: bool = True,
@@ -14067,6 +14085,7 @@ class GatewayService:
             all_buckets,
             search_query=search_query,
             query_embedding=query_embedding,
+            semantic_recall_debug=semantic_recall_debug,
             allow_semantic=allow_semantic,
             allow_semantic_session_dedupe=allow_semantic_session_dedupe,
             allow_rerank=allow_rerank,
@@ -14806,6 +14825,45 @@ class GatewayService:
         default = 0.55 if key == "explicit_vector_min_score" else 0.50
         return self._clamp(self._safe_float(thresholds.get(key), default))
 
+    def _canonical_scene_semantic_route_guard(
+        self,
+        bucket: dict | None,
+        semantic_recall_debug: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        debug = semantic_recall_debug if isinstance(semantic_recall_debug, dict) else {}
+        if not (
+            debug.get("enabled")
+            and debug.get("active")
+            and debug.get("called")
+            and not debug.get("shadow_only")
+            and str(debug.get("route_action") or "") == "skip"
+            and not debug.get("skip_applied")
+            and str(debug.get("reason") or "") == "below_threshold"
+        ):
+            return {}
+        thresholds = self.config.get("recall_thresholds", {})
+        if not isinstance(thresholds, dict):
+            thresholds = {}
+        base_threshold = self._canonical_scene_semantic_threshold(bucket)
+        guarded_threshold = max(
+            base_threshold,
+            self._clamp(
+                self._safe_float(
+                    thresholds.get("skip_route_vector_min_score"),
+                    0.60,
+                )
+            ),
+        )
+        return {
+            "active": True,
+            "reason": "low_confidence_skip_route",
+            "route": str(debug.get("route") or ""),
+            "confidence": round(self._safe_float(debug.get("confidence"), 0.0), 6),
+            "margin": round(self._safe_float(debug.get("margin"), 0.0), 6),
+            "base_semantic_threshold": round(base_threshold, 4),
+            "semantic_threshold": round(guarded_threshold, 4),
+        }
+
     def _item_has_high_confidence_semantic_evidence(
         self,
         item: dict,
@@ -14816,7 +14874,11 @@ class GatewayService:
             return False
         semantic_score = self._safe_float(item.get("semantic_score"), 0.0)
         if self._is_canonical_scene_bucket(bucket):
-            return semantic_score >= self._canonical_scene_semantic_threshold(bucket)
+            semantic_threshold = self._safe_float(
+                item.get("canonical_scene_semantic_threshold"),
+                self._canonical_scene_semantic_threshold(bucket),
+            )
+            return semantic_score >= semantic_threshold
         return semantic_score >= max(
             self.high_confidence_semantic_score,
             self.recall_admission_semantic_score,
@@ -14869,17 +14931,30 @@ class GatewayService:
                 if label in hard_evidence_labels
             ]
             semantic_score = self._safe_float(item.get("semantic_score"), 0.0)
-            semantic_threshold = self._canonical_scene_semantic_threshold(bucket)
+            semantic_threshold = self._safe_float(
+                item.get("canonical_scene_semantic_threshold"),
+                self._canonical_scene_semantic_threshold(bucket),
+            )
+            semantic_route_guard = (
+                item.get("semantic_route_guard")
+                if isinstance(item.get("semantic_route_guard"), dict)
+                else {}
+            )
             semantic_admitted = semantic_score >= semantic_threshold
             item["recall_policy_debug"] = {
                 "canonical_scene": True,
                 "direct_evidence": direct_labels,
                 "semantic_score": round(semantic_score, 4),
                 "semantic_threshold": round(semantic_threshold, 4),
+                "semantic_route_guard": semantic_route_guard,
                 "auto": True,
             }
             if not direct_labels and not semantic_admitted:
-                item["admission_reason"] = "scene_without_authored_or_semantic_evidence"
+                item["admission_reason"] = (
+                    "scene_below_semantic_route_threshold"
+                    if semantic_route_guard
+                    else "scene_without_authored_or_semantic_evidence"
+                )
                 return False
             item["admission_reason"] = (
                 "scene_authored_evidence"
@@ -15362,8 +15437,9 @@ class GatewayService:
             return True
         bucket = item.get("bucket") if isinstance(item, dict) else None
         if self._is_canonical_scene_bucket(bucket):
-            return self._safe_float(item.get("semantic_score"), 0.0) >= (
-                self._canonical_scene_semantic_threshold(bucket)
+            return self._safe_float(item.get("semantic_score"), 0.0) >= self._safe_float(
+                item.get("canonical_scene_semantic_threshold"),
+                self._canonical_scene_semantic_threshold(bucket),
             )
         if self._is_high_confidence_semantic_match(
             self._safe_float(item.get("semantic_score"), 0.0)
@@ -16745,6 +16821,7 @@ class GatewayService:
         include_diffused: bool,
         allow_semantic: bool,
         query_embedding: list[float] | None,
+        semantic_recall_debug: dict[str, Any] | None = None,
         allow_semantic_session_dedupe: bool,
         allow_rerank: bool,
     ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
@@ -16766,6 +16843,7 @@ class GatewayService:
             all_buckets,
             search_query=search_query,
             query_embedding=query_embedding,
+            semantic_recall_debug=semantic_recall_debug,
             include_query_planner_debug=True,
             allow_semantic=allow_semantic,
             allow_semantic_session_dedupe=allow_semantic_session_dedupe,
