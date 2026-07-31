@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import sys
 from pathlib import Path
@@ -27,6 +28,15 @@ def build_service() -> GatewayService:
     }
     service.recall_policy = RecallPolicy()
     service.high_confidence_semantic_score = 0.72
+    service.recall_admission_semantic_score = 0.72
+    service.first_card_min_score = 0.55
+    service.gateway_tz = timezone.utc
+    service.config = {
+        "recall_thresholds": {
+            "vague_vector_min_score": 0.40,
+            "explicit_vector_min_score": 0.55,
+        }
+    }
     service.relevance_options = memory_relevance_options_from_config({})
     service.self_anchor_entry_bucket_id = ""
     return service
@@ -195,6 +205,180 @@ def verify_scene_and_legacy_moment_paths_are_isolated() -> None:
         assert store.list_for_bucket("legacy-bucket")
 
 
+def verify_scene_recall_ignores_legacy_facets() -> None:
+    service = build_service()
+    service._query_has_relevance_facet = lambda _query: True
+    service._bucket_relevance_node = lambda bucket: {
+        "content": bucket.get("content") or "",
+        "metadata": bucket.get("metadata") or {},
+    }
+    scene = {
+        "id": "scene-facet-isolated",
+        "metadata": {
+            "memory_value_source": "authored_scene",
+            "tags": ["intimacy", "legacy", "hardware"],
+            "domain": ["tech"],
+        },
+        "content": "Scene 正文里的分类词不能改变召回资格或分数。",
+    }
+    legacy = {
+        "id": "legacy-facet-compatible",
+        "metadata": {
+            "tags": ["intimacy", "legacy", "hardware"],
+            "domain": ["tech"],
+        },
+        "content": "旧桶继续保留 facet 兼容行为。",
+    }
+
+    assert service._is_relevance_suppressed("身体", scene) is False
+    assert service._is_relevance_candidate_bucket("身体", scene) is False
+    assert service._bucket_relevance_multiplier("身体", scene) == 1.0
+    assert service._bucket_recall_rank("身体", scene, 0.42) == (0, -0.42)
+    assert service._dynamic_bucket_item_has_reliable_recall_signal(
+        "身体",
+        {"bucket": scene, "semantic_score": 0.30},
+    ) is False
+
+    assert service._bucket_relevance_multiplier("身体", legacy) != 1.0
+
+
+def verify_scene_tech_guard_uses_declared_domain_and_absolute_semantics() -> None:
+    service = build_service()
+    service.recall_admission_semantic_score = 0.72
+    scene = {
+        "id": "scene-tech-guard",
+        "metadata": {
+            "memory_value_source": "authored_scene",
+            "domain": ["tech"],
+            "tags": [],
+        },
+        "content": "一次普通技术维护。",
+    }
+    inferred_only = {
+        "id": "scene-tech-tag-only",
+        "metadata": {
+            "memory_value_source": "authored_scene",
+            "domain": ["未分类"],
+            "tags": ["tech", "hardware"],
+        },
+        "content": "标签不能替新 Scene 声明技术主域。",
+    }
+    legacy = {
+        "id": "legacy-tech-guard",
+        "metadata": {"domain": ["tech"]},
+        "content": "旧桶保留技术查询锚点兼容。",
+    }
+
+    assert service._bucket_is_tech_domain(scene) is True
+    assert service._bucket_is_tech_domain(inferred_only) is False
+    assert service._tech_domain_recall_rejection(
+        "修网关",
+        {"bucket": scene, "semantic_score": 0.54, "score": 0.90},
+        node=scene,
+    ) is not None
+    assert service._tech_domain_recall_rejection(
+        "随便聊聊",
+        {"bucket": scene, "semantic_score": 0.55, "score": 0.20},
+        node=scene,
+    ) is None
+    assert service._tech_domain_recall_rejection(
+        "修网关",
+        {"bucket": legacy, "semantic_score": 0.20, "score": 0.20},
+        node=legacy,
+    ) is None
+
+
+def verify_scene_admission_uses_only_authored_or_absolute_semantic_evidence() -> None:
+    service = build_service()
+    scene = {
+        "id": "scene-admission",
+        "metadata": {
+            "memory_value_source": "authored_scene",
+            "name": "修网关的夜晚",
+            "scene_cues": ["修网关"],
+            "tags": ["伟大"],
+            "domain": ["未分类"],
+        },
+        "content": "那晚我们一起修好了记忆网关。",
+    }
+
+    weak_item = {"bucket": scene, "semantic_score": 0.39}
+    assert service._admit_bucket_for_recall("但是爱很伟大", weak_item) is False
+    assert weak_item["admission_reason"] == "scene_without_authored_or_semantic_evidence"
+
+    semantic_item = {"bucket": scene, "semantic_score": 0.40}
+    assert service._admit_bucket_for_recall("随便聊聊", semantic_item) is True
+    assert semantic_item["admission_reason"] == "scene_strong_semantic"
+
+    cue_item = {
+        "bucket": scene,
+        "semantic_score": 0.10,
+        "authored_cue_match": True,
+        "authored_cue_terms": ["修网关"],
+    }
+    assert service._admit_bucket_for_recall("为什么修网关时会担心", cue_item) is True
+    assert cue_item["admission_reason"] == "scene_authored_evidence"
+
+    assert service._canonical_scene_recall_score(0.40) == 0.40
+    assert service._dynamic_bucket_item_has_reliable_recall_signal(
+        "普通查询",
+        {"bucket": scene, "semantic_score": 0.40},
+    ) is True
+    assert service._canonical_scene_recall_score(
+        0.10,
+        authored_cue_match=True,
+    ) == service.first_card_min_score
+
+
+def verify_scene_bypasses_semantic_session_dedupe() -> None:
+    service = build_service()
+    service.semantic_session_dedupe_enabled = True
+    service.skip_recent_rounds = 5
+    service._session_semantic_dedupe_source_bucket_ids = lambda _session_id: ["legacy-source"]
+
+    async def embeddings(_buckets):
+        return {}
+
+    async def always_match(_candidate, _sources, *, embedding_by_id=None):
+        return {
+            "source_bucket_id": "legacy-source",
+            "similarity": 0.99,
+            "method": "test",
+            "threshold": 0.90,
+        }
+
+    service._semantic_session_dedupe_embeddings = embeddings
+    service._semantic_session_dedupe_match = always_match
+    scene = {
+        "id": "scene-nearby-event",
+        "metadata": {"memory_value_source": "authored_scene"},
+        "content": "主题相近但事件不同的 Scene。",
+    }
+    legacy_source = {
+        "id": "legacy-source",
+        "metadata": {},
+        "content": "旧桶来源。",
+    }
+    legacy_candidate = {
+        "id": "legacy-candidate",
+        "metadata": {},
+        "content": "旧桶候选。",
+    }
+    kept, suppressed = asyncio.run(
+        service._filter_semantic_session_deduped_bucket_items(
+            "普通查询",
+            "session",
+            [
+                {"bucket": scene},
+                {"bucket": legacy_candidate},
+            ],
+            [scene, legacy_source, legacy_candidate],
+        )
+    )
+    assert [item["bucket"]["id"] for item in kept] == ["scene-nearby-event"]
+    assert [item["bucket"]["id"] for item in suppressed] == ["legacy-candidate"]
+
+
 def verify_date_topic_can_live_in_either_role() -> None:
     class RawEvents:
         @staticmethod
@@ -266,6 +450,10 @@ def main() -> int:
     verify_authored_cues_are_explicit_evidence()
     verify_body_keyword_cannot_become_recall_evidence()
     verify_scene_and_legacy_moment_paths_are_isolated()
+    verify_scene_recall_ignores_legacy_facets()
+    verify_scene_tech_guard_uses_declared_domain_and_absolute_semantics()
+    verify_scene_admission_uses_only_authored_or_absolute_semantic_evidence()
+    verify_scene_bypasses_semantic_session_dedupe()
     verify_date_topic_can_live_in_either_role()
     verify_retired_scaffolding_is_gone()
     print("recall entry evidence verification passed")

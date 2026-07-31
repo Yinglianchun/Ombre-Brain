@@ -9354,7 +9354,11 @@ class GatewayService:
         source_buckets = [
             bucket_map[bucket_id]
             for bucket_id in source_ids
-            if bucket_id in bucket_map and not self._is_self_anchor_recall_excluded_bucket(bucket_map[bucket_id])
+            if (
+                bucket_id in bucket_map
+                and not self._is_self_anchor_recall_excluded_bucket(bucket_map[bucket_id])
+                and not self._is_canonical_scene_bucket(bucket_map[bucket_id])
+            )
         ]
         if not source_buckets:
             return items, []
@@ -9362,7 +9366,11 @@ class GatewayService:
         candidate_buckets = [
             item.get("bucket")
             for item in items
-            if isinstance(item, dict) and isinstance(item.get("bucket"), dict)
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("bucket"), dict)
+                and not self._is_canonical_scene_bucket(item.get("bucket"))
+            )
         ]
         embedding_by_id = await self._semantic_session_dedupe_embeddings(
             source_buckets + candidate_buckets
@@ -9373,7 +9381,12 @@ class GatewayService:
         for item in items:
             bucket = item.get("bucket") if isinstance(item, dict) else None
             bucket_id = str((bucket or {}).get("id") or "")
-            if not bucket_id or not isinstance(bucket, dict) or self._session_semantic_dedupe_bypass(query, item):
+            if (
+                not bucket_id
+                or not isinstance(bucket, dict)
+                or self._is_canonical_scene_bucket(bucket)
+                or self._session_semantic_dedupe_bypass(query, item)
+            ):
                 kept.append(item)
                 continue
             match = await self._semantic_session_dedupe_match(
@@ -13800,7 +13813,7 @@ class GatewayService:
                 keyword_score = max(keyword_score, 1.0)
             if exact_match:
                 keyword_score = max(keyword_score, exact_score)
-            relevance_score = relevance_multiplier(policy_query, self._bucket_relevance_node(bucket), self.relevance_options)
+            relevance_score = self._bucket_relevance_multiplier(policy_query, bucket)
             if relevance_score <= 0:
                 continue
             matched_query_terms = self._bucket_matched_query_terms(bucket, diversity_terms)
@@ -13839,7 +13852,15 @@ class GatewayService:
             keyword_norm = self._clamp(keyword_norms.get(bucket_id, 0.0))
             metadata_adjustment = 0.0
             cooldown_penalty = 0.0
-            if self.recall_fusion_mode == "dynamic":
+            canonical_scene = self._is_canonical_scene_bucket(bucket)
+            if canonical_scene:
+                fusion_score = semantic_score
+                final_score = self._canonical_scene_recall_score(
+                    semantic_score,
+                    exact_match=exact_match,
+                    authored_cue_match=authored_cue_match,
+                )
+            elif self.recall_fusion_mode == "dynamic":
                 fusion_score = self._clamp((alpha * vector_norm + (1.0 - alpha) * keyword_norm) * relevance_score)
                 metadata_adjustment = round(0.02 * importance_score + 0.02 * freshness_score, 4)
                 cooldown_penalty = round((1.0 - self._clamp(cooldown_multiplier)) * 0.03, 4)
@@ -13859,7 +13880,7 @@ class GatewayService:
                     + freshness_score * self.freshness_weight
                 ) * relevance_score
                 final_score = round(fusion_score * cooldown_multiplier, 4)
-            if exact_match or authored_cue_match:
+            if not canonical_scene and (exact_match or authored_cue_match):
                 final_score = max(final_score, self.first_card_min_score)
             scored_candidates.append(
                 {
@@ -13876,17 +13897,27 @@ class GatewayService:
                     "importance_score": importance_score,
                     "freshness_score": freshness_score,
                     "cooldown_multiplier": cooldown_multiplier,
-                    "fusion_mode": self.recall_fusion_mode,
+                    "fusion_mode": "scene_absolute" if canonical_scene else self.recall_fusion_mode,
                     "fusion_score": round(fusion_score, 4),
-                    "vector_norm": round(vector_norm, 4),
+                    "vector_norm": round(semantic_score if canonical_scene else vector_norm, 4),
                     "keyword_norm": round(keyword_norm, 4),
-                    "dynamic_alpha": alpha if self.recall_fusion_mode == "dynamic" else None,
+                    "dynamic_alpha": (
+                        alpha
+                        if not canonical_scene and self.recall_fusion_mode == "dynamic"
+                        else None
+                    ),
                     "dynamic_alpha_confidence": (
-                        alpha_debug.get("confidence") if self.recall_fusion_mode == "dynamic" else None
+                        alpha_debug.get("confidence")
+                        if not canonical_scene and self.recall_fusion_mode == "dynamic"
+                        else None
                     ),
                     "metadata_adjustment": metadata_adjustment,
                     "cooldown_penalty": cooldown_penalty,
-                    "dynamic_alpha_debug": alpha_debug if self.recall_fusion_mode == "dynamic" else {},
+                    "dynamic_alpha_debug": (
+                        alpha_debug
+                        if not canonical_scene and self.recall_fusion_mode == "dynamic"
+                        else {}
+                    ),
                     "planner_lexical_match": lexical_match,
                     "planner_queries": [planner_query] if planner_query else [],
                     "matched_query_terms": matched_query_terms,
@@ -14645,9 +14676,16 @@ class GatewayService:
         )
 
     def _bucket_recall_rank(self, query: str, bucket: dict, score: float = 0.0) -> tuple[int, float]:
+        if self._is_canonical_scene_bucket(bucket):
+            return 0, -self._safe_float(score, 0.0)
         node = self._bucket_relevance_node(bucket)
         node["score"] = score
         return recall_rank(query, node, self.relevance_options)
+
+    def _bucket_relevance_multiplier(self, query: str, bucket: dict) -> float:
+        if self._is_canonical_scene_bucket(bucket):
+            return 1.0
+        return relevance_multiplier(query, self._bucket_relevance_node(bucket), self.relevance_options)
 
     def _bucket_rerank_document(self, bucket: dict) -> str:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
@@ -14665,6 +14703,22 @@ class GatewayService:
     def _bucket_is_tech_domain(self, bucket: dict | None) -> bool:
         if not isinstance(bucket, dict):
             return False
+        if self._is_canonical_scene_bucket(bucket):
+            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+            explicit_view = normalize_memory_metadata(
+                {
+                    "metadata": {
+                        "canonical_domain": meta.get("canonical_domain"),
+                        "domain": meta.get("domain"),
+                        "object_kind": "scene",
+                    }
+                }
+            )
+            return str(
+                explicit_view.get("domain_parent")
+                or explicit_view.get("canonical_domain")
+                or ""
+            ) == "tech"
         view = normalize_memory_metadata(bucket)
         return str(view.get("domain_parent") or view.get("canonical_domain") or "") == "tech"
 
@@ -14730,6 +14784,30 @@ class GatewayService:
         }
         return True
 
+    def _canonical_scene_semantic_threshold(self, bucket: dict | None) -> float:
+        thresholds = self.config.get("recall_thresholds", {})
+        if not isinstance(thresholds, dict):
+            thresholds = {}
+        key = "explicit_vector_min_score" if self._bucket_is_tech_domain(bucket) else "vague_vector_min_score"
+        default = 0.55 if key == "explicit_vector_min_score" else 0.40
+        return self._clamp(self._safe_float(thresholds.get(key), default))
+
+    def _item_has_high_confidence_semantic_evidence(
+        self,
+        item: dict,
+        *,
+        bucket: dict | None = None,
+    ) -> bool:
+        if not isinstance(item, dict):
+            return False
+        semantic_score = self._safe_float(item.get("semantic_score"), 0.0)
+        if self._is_canonical_scene_bucket(bucket):
+            return semantic_score >= self._canonical_scene_semantic_threshold(bucket)
+        return semantic_score >= max(
+            self.high_confidence_semantic_score,
+            self.recall_admission_semantic_score,
+        )
+
     def _tech_domain_recall_rejection(
         self,
         query: str,
@@ -14739,17 +14817,25 @@ class GatewayService:
     ) -> dict[str, Any] | None:
         if self._item_has_direct_tech_evidence(item):
             return None
-        if self._item_has_high_confidence_direct_semantic_evidence(item):
-            return None
-        if self._query_has_tech_recall_anchor(query):
-            return None
+        canonical_scene = self._is_canonical_scene_bucket(node)
+        if canonical_scene:
+            if self._item_has_high_confidence_semantic_evidence(item, bucket=node):
+                return None
+        else:
+            if self._item_has_high_confidence_direct_semantic_evidence(item):
+                return None
+            if self._query_has_tech_recall_anchor(query):
+                return None
         return {
             "tech_domain_guard": True,
             "reason": "tech_domain_without_query_anchor",
             "locatable_terms": self._locatable_query_terms(query),
-            "canonical_domain": "tech" if node is None else str(
-                normalize_memory_metadata(node).get("canonical_domain") or ""
+            "canonical_domain": (
+                "tech"
+                if node is None
+                else str(normalize_memory_metadata(node).get("canonical_domain") or "")
             ),
+            "canonical_scene": canonical_scene,
         }
 
     def _admit_bucket_for_recall(self, query: str, item: dict) -> bool:
@@ -14762,6 +14848,40 @@ class GatewayService:
         hard_evidence_labels = self._hard_bucket_evidence_labels(evidence_labels)
         item["evidence_labels"] = evidence_labels
         item["hard_evidence_labels"] = hard_evidence_labels
+        if self._is_canonical_scene_bucket(bucket):
+            direct_labels = [
+                label
+                for label in ("authored_cue", "exact_anchor", "title_anchor")
+                if label in hard_evidence_labels
+            ]
+            semantic_score = self._safe_float(item.get("semantic_score"), 0.0)
+            semantic_threshold = self._canonical_scene_semantic_threshold(bucket)
+            semantic_admitted = semantic_score >= semantic_threshold
+            item["recall_policy_debug"] = {
+                "canonical_scene": True,
+                "direct_evidence": direct_labels,
+                "semantic_score": round(semantic_score, 4),
+                "semantic_threshold": round(semantic_threshold, 4),
+                "auto": True,
+            }
+            if not direct_labels and not semantic_admitted:
+                item["admission_reason"] = "scene_without_authored_or_semantic_evidence"
+                return False
+            item["admission_reason"] = (
+                "scene_authored_evidence"
+                if direct_labels
+                else "scene_strong_semantic"
+            )
+            if self._bucket_is_tech_domain(bucket):
+                tech_rejection = self._tech_domain_recall_rejection(query, item, node=bucket)
+                if tech_rejection:
+                    item["admission_reason"] = "tech_domain_without_query_anchor"
+                    item["recall_policy_debug"] = {
+                        **item["recall_policy_debug"],
+                        **tech_rejection,
+                    }
+                    return False
+            return True
         query_plan = self._recall_query_plan(query)
         rejection = self._anchor_plan_direct_rejection(bucket, self._query_anchor_plan(query))
         if rejection:
@@ -15013,6 +15133,18 @@ class GatewayService:
                 scores[key] = max(scores.get(key, 0.0), 1.0)
         return scores
 
+    def _canonical_scene_recall_score(
+        self,
+        semantic_score: Any,
+        *,
+        exact_match: bool = False,
+        authored_cue_match: bool = False,
+    ) -> float:
+        score = self._clamp(self._safe_float(semantic_score, 0.0))
+        if exact_match or authored_cue_match:
+            score = max(score, self.first_card_min_score)
+        return round(score, 4)
+
     async def _get_semantic_candidates(
         self,
         query: str,
@@ -15214,11 +15346,15 @@ class GatewayService:
             or item.get("title_anchor_terms")
         ):
             return True
+        bucket = item.get("bucket") if isinstance(item, dict) else None
+        if self._is_canonical_scene_bucket(bucket):
+            return self._safe_float(item.get("semantic_score"), 0.0) >= (
+                self._canonical_scene_semantic_threshold(bucket)
+            )
         if self._is_high_confidence_semantic_match(
             self._safe_float(item.get("semantic_score"), 0.0)
         ):
             return True
-        bucket = item.get("bucket") if isinstance(item, dict) else None
         if not bucket or not self._recall_query_plan(query).wants_body_chain:
             return False
         node = self._bucket_relevance_node(bucket)
@@ -18221,6 +18357,8 @@ class GatewayService:
         }
 
     def _is_relevance_suppressed(self, query: str, bucket: dict) -> bool:
+        if self._is_canonical_scene_bucket(bucket):
+            return False
         if not self._query_has_relevance_facet(query):
             return False
         return should_suppress_context_candidate(
@@ -18230,6 +18368,8 @@ class GatewayService:
         )
 
     def _is_relevance_candidate_bucket(self, query: str, bucket: dict) -> bool:
+        if self._is_canonical_scene_bucket(bucket):
+            return False
         if self._is_self_anchor_recall_excluded_bucket(bucket):
             return False
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
