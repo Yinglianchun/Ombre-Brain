@@ -43,7 +43,12 @@ from memory_edges import (
     legacy_moment_edges_for_recall,
 )
 from scene_linker import SceneEdgeStore
-from memory_moments import MemoryMomentStore, parse_bucket_moments, preview_bucket_moment_chunks
+from memory_moments import (
+    MemoryMomentStore,
+    build_bucket_recall_item,
+    parse_bucket_moments,
+    preview_bucket_moment_chunks,
+)
 from memory_relevance import (
     active_facets,
     content_terms_for_query,
@@ -8474,11 +8479,6 @@ class GatewayService:
         ):
             return self._moment_graph_cache_value
         recallable_buckets = [bucket for bucket in all_buckets if not self._is_self_anchor_recall_excluded_bucket(bucket)]
-        recallable_bucket_ids = {
-            str(bucket.get("id") or "")
-            for bucket in recallable_buckets
-            if str(bucket.get("id") or "")
-        }
         bucket_edges = self._bucket_edges_for_recall(recallable_buckets)
         signature = self._moment_graph_signature(recallable_buckets, bucket_edges)
         if (
@@ -8488,12 +8488,38 @@ class GatewayService:
             and store_stamp == self._moment_graph_cache_store_stamp
         ):
             return self._moment_graph_cache_value
-        self.memory_moment_store.bulk_upsert(recallable_buckets)
-        moments = [
+        scene_buckets = [
+            bucket for bucket in recallable_buckets
+            if self._is_canonical_scene_bucket(bucket)
+        ]
+        legacy_buckets = [
+            bucket for bucket in recallable_buckets
+            if not self._is_canonical_scene_bucket(bucket)
+        ]
+        legacy_bucket_ids = {
+            str(bucket.get("id") or "")
+            for bucket in legacy_buckets
+            if str(bucket.get("id") or "")
+        }
+        self.memory_moment_store.bulk_upsert(legacy_buckets)
+        for bucket in scene_buckets:
+            # Canonical Scenes retain their own identity.  Keep only authored
+            # title/cue aliases and atomically retire any stale split Moments.
+            self.memory_moment_store.sync_alias_projection(bucket, [])
+        legacy_moments = [
             moment
             for moment in self._recallable_moments(self.memory_moment_store.list_all())
-            if str(moment.get("bucket_id") or "") in recallable_bucket_ids
+            if str(moment.get("bucket_id") or "") in legacy_bucket_ids
         ]
+        scene_nodes = [
+            item
+            for item in (
+                self._canonical_scene_recall_item(bucket)
+                for bucket in scene_buckets
+            )
+            if item is not None
+        ]
+        moments = [*legacy_moments, *scene_nodes]
         grouped = self._moments_by_bucket(moments)
         moment_ids = {
             str(moment.get("moment_id") or "")
@@ -8670,10 +8696,29 @@ class GatewayService:
     def _context_moments_for_bucket(self, bucket: dict) -> list[dict]:
         if self._is_self_anchor_recall_excluded_bucket(bucket):
             return []
+        if self._is_canonical_scene_bucket(bucket):
+            scene = self._canonical_scene_recall_item(bucket)
+            return [scene] if scene and can_moment_be_recall_context(scene) else []
         return [
             moment for moment in parse_bucket_moments(bucket, self.relevance_options)
             if can_moment_be_recall_context(moment)
         ]
+
+    def _canonical_scene_recall_item(self, bucket: dict | None) -> dict | None:
+        if not self._is_canonical_scene_bucket(bucket):
+            return None
+        bucket_id = str((bucket or {}).get("id") or "").strip()
+        if not bucket_id:
+            return None
+        return build_bucket_recall_item(
+            bucket,
+            node_id=bucket_id,
+            node_kind="scene",
+            section="scene",
+            source="scene",
+            source_id=bucket_id,
+            relevance_options=self.relevance_options,
+        )
 
     def _is_source_record_bucket(self, bucket: dict | None) -> bool:
         return isinstance(bucket, dict) and infer_bucket_layer(bucket) == LAYER_SOURCE_RECORD
@@ -9654,7 +9699,10 @@ class GatewayService:
                     query_planner_debug["moment_search_source"] = "cached_graph"
                     searched_moments = self.memory_moment_store.search_moment_items(
                         moment_query,
-                        all_moments,
+                        [
+                            moment for moment in all_moments
+                            if str(moment.get("node_kind") or "") != "scene"
+                        ],
                         limit=search_limit,
                         bucket_boosts=bucket_boosts,
                         exclude_sections=TASK_ONLY_MOMENT_SECTIONS,
@@ -9806,7 +9854,7 @@ class GatewayService:
                     query,
                     selected_reason="selected_bucket",
                 )
-            if moment:
+            if moment and not self._is_canonical_scene_bucket(source_bucket):
                 moment = self._moment_with_bucket_recall_signal(
                     moment,
                     signal,
@@ -9829,6 +9877,11 @@ class GatewayService:
                         rejected["recall_policy_debug"] = debug
                         suppressed_candidates.append(rejected)
                         moment = None
+            elif moment:
+                # The Scene already passed bucket-level semantic/authored-cue
+                # admission.  Project that signal onto the Scene node without
+                # running the legacy Moment admission protocol a second time.
+                moment = self._moment_with_bucket_recall_signal(moment, signal)
             if moment and bucket_id not in seen_buckets:
                 selected.append(moment)
                 seen_buckets.add(bucket_id)
@@ -13341,20 +13394,7 @@ class GatewayService:
                 add(match.group(0))
             for match in EXACT_ANCHOR_COMPOUND_RE.finditer(text):
                 add(match.group(0))
-        add(self._clean_exact_anchor_phrase(raw))
         return terms[:6]
-
-    def _clean_exact_anchor_phrase(self, query: str) -> str:
-        text = str(query or "").strip()
-        text = self._strip_leading_lookup_address_from_text(text, query)
-        leading_markers = "|".join(
-            re.escape(marker)
-            for marker in query_intent_terms("exact_anchor.leading_strip_markers")
-        )
-        if leading_markers:
-            text = re.sub(rf"^(?:{leading_markers})\s*", "", text)
-        text = re.sub(r"\s*(?:吗|么|嘛|呀|啊|呢|吧|？|\?)+\s*$", "", text)
-        return text.strip()
 
     def _exact_anchor_term_allowed(self, term: str) -> bool:
         text = str(term or "").strip()
@@ -13481,17 +13521,22 @@ class GatewayService:
         if not anchor:
             return 0.0, ""
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        fields = (
+        fields = [
             ("id", bucket.get("id"), 1.0),
             ("name", meta.get("name"), 0.98),
-            ("tags", " ".join(str(item) for item in meta.get("tags", []) or []), 0.96),
-            ("domain", " ".join(str(item) for item in meta.get("domain", []) or []), 0.90),
             (
                 "content",
                 strip_display_temperature_sections(bucket_content_for_recall(bucket)),
                 0.88,
             ),
-        )
+        ]
+        if not self._is_canonical_scene_bucket(bucket):
+            # Preserve public legacy-bucket lookup compatibility without
+            # allowing derived tags/domains to become Scene hard evidence.
+            fields[2:2] = [
+                ("tags", " ".join(str(item) for item in meta.get("tags", []) or []), 0.96),
+                ("domain", " ".join(str(item) for item in meta.get("domain", []) or []), 0.90),
+            ]
         best_score = 0.0
         best_field = ""
         for field, value, score in fields:
@@ -18242,6 +18287,8 @@ class GatewayService:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         if meta.get("type") == "feel" or infer_bucket_layer(bucket) == LAYER_SOURCE_RECORD:
             return False
+        if str(meta.get("object_kind") or "").strip().lower() == "scene":
+            return True
         if str(meta.get("memory_value_source") or "") == "authored_scene":
             return True
         return any(

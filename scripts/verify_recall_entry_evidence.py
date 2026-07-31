@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +11,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway import GatewayService
+from memory_moments import MemoryMomentStore
+from memory_relevance import memory_relevance_options_from_config
 from recall_policy import RecallPolicy
 
 
@@ -24,6 +27,8 @@ def build_service() -> GatewayService:
     }
     service.recall_policy = RecallPolicy()
     service.high_confidence_semantic_score = 0.72
+    service.relevance_options = memory_relevance_options_from_config({})
+    service.self_anchor_entry_bucket_id = ""
     return service
 
 
@@ -130,12 +135,64 @@ def verify_body_keyword_cannot_become_recall_evidence() -> None:
         "metadata": {
             "memory_value_source": "authored_scene",
             "scene_cues": [],
+            "tags": ["标签锚点"],
+            "domain": ["领域锚点"],
         },
         "content": "那是一件伟大的事。",
     }
     assert service._bucket_exact_anchor_score(body_only_bucket, "但是爱很伟大") == (0.0, "")
+    assert service._bucket_exact_anchor_score(body_only_bucket, "伟大") == (0.88, "content")
+    assert service._bucket_exact_anchor_score(body_only_bucket, "标签锚点") == (0.0, "")
+    assert service._bucket_exact_anchor_score(body_only_bucket, "领域锚点") == (0.0, "")
+    assert service._extract_exact_anchor_terms("但是爱很伟大") == []
+    assert service._extract_exact_anchor_terms("“但是爱很伟大”") == ["但是爱很伟大"]
     assert service._bucket_authored_cue_terms("但是爱很伟大", body_only_bucket) == []
     assert service._explicit_lexical_score_basis({}, {}) == {}
+
+
+def verify_scene_and_legacy_moment_paths_are_isolated() -> None:
+    service = build_service()
+    scene = {
+        "id": "scene-direct",
+        "metadata": {
+            "name": "修网关的夜晚",
+            "memory_value_source": "authored_scene",
+            "scene_cues": ["修网关"],
+        },
+        "content": "小雨和 Haven 一起修好了记忆网关。",
+    }
+    legacy = {
+        "id": "legacy-bucket",
+        "metadata": {"name": "尚未迁移的公开版旧桶"},
+        "content": "旧桶正文仍可经兼容适配器解析。",
+    }
+
+    scene_item = service._canonical_scene_recall_item(scene)
+    assert scene_item is not None
+    assert scene_item["moment_id"] == "scene-direct"
+    assert scene_item["node_id"] == "scene-direct"
+    assert scene_item["node_kind"] == "scene"
+    assert ":" not in scene_item["moment_id"]
+
+    legacy_items = service._context_moments_for_bucket(legacy)
+    assert legacy_items
+    assert all(item.get("node_kind") != "scene" for item in legacy_items)
+    assert all(str(item.get("moment_id") or "").startswith("legacy-bucket:") for item in legacy_items)
+
+    with TemporaryDirectory(prefix="ombre-scene-moment-isolation-") as temp_dir:
+        store = MemoryMomentStore({"state_dir": temp_dir})
+        assert store.upsert_bucket(scene)
+        retired = store.sync_alias_projection(scene, [])
+        assert retired["moments"] > 0
+        assert store.list_for_bucket("scene-direct") == []
+        aliases = store.list_for_bucket_aliases("scene-direct")
+        alias_texts = {str(row.get("alias_text") or "") for row in aliases}
+        assert "修网关的夜晚" in alias_texts
+        assert "修网关" in alias_texts
+        assert "小雨和 Haven 一起修好了记忆网关。" not in alias_texts
+
+        store.upsert_bucket(legacy)
+        assert store.list_for_bucket("legacy-bucket")
 
 
 def verify_date_topic_can_live_in_either_role() -> None:
@@ -208,6 +265,7 @@ def main() -> int:
     verify_semantic_entry_owns_the_skip_decision()
     verify_authored_cues_are_explicit_evidence()
     verify_body_keyword_cannot_become_recall_evidence()
+    verify_scene_and_legacy_moment_paths_are_isolated()
     verify_date_topic_can_live_in_either_role()
     verify_retired_scaffolding_is_gone()
     print("recall entry evidence verification passed")
