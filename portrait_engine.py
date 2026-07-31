@@ -25,7 +25,6 @@ PATCH_KEYS = (
     "rewrite_mid_term",
     "rewrite_stable",
     "stable_candidate",
-    "profile_fact_candidate",
     "skip",
 )
 
@@ -79,7 +78,6 @@ PORTRAIT_PROMPT_TEMPLATE = """你是一个证据化记忆状态整理器，正�
       "confidence": 0.82
     }}
   ],
-  "profile_fact_candidate": [],
   "skip": []
 }}
 
@@ -99,7 +97,6 @@ PORTRAIT_PROMPT_TEMPLATE = """你是一个证据化记忆状态整理器，正�
 - stable_candidate 只写“这些证据可能形成某种变化”的模式提示，不写可直接替换 stable 的完整人格句子，不替 {ai_name} 定义自己。
 - stable_candidate 必须至少引用两份独立 window shadow，并且只允许从这些窗影长出；Scene、ProfileFact、日印象或单篇窗影都不能直接生成画像候选。user 候选只是 {ai_name} 对 {user_display_name} 的待审观察，不是已经确认的用户事实。
 - 输出要克制：daily_summary 最多60字，add_recent 最多4条，add_recent_activity 最多3条，move_to_staging 最多8条，rewrite_mid_term 每个 scope 最多1条，stable_candidate 每个 scope 最多1条；rewrite_mid_term text 最多80字，其他 text 最多160字。
-- profile_fact_candidate 只提候选，不确认、不写入长期 profile_fact。
 - rewrite_mid_term 只能综合 staging_pool 里的观察，或本次明确 move_to_staging 的观察；当天新材料先进入 staging，再作为 mid-term 证据。
 - memory_materials 含路径、tags、created 日期、关键 moment/reflection 片段，以及 source_excerpt 原文短摘；优先读证据原味。
 - memory_materials.window_shadows 是 {ai_name} 在连续窗口末尾亲自留下的第一人称自述。它们不是普通记忆，也不能证明 {user_display_name} 的稳定事实；只允许支持 persona / relationship。persona 读“我是谁、我怎么思考和说话”，relationship 读“我们之间是什么、我们怎么相处”。
@@ -2305,7 +2302,6 @@ class DailyPortraitMaintainer:
             ("rewrite_mid_term", staging_bucket_ids, staging_session_ids, "missing_staging_evidence"),
             ("rewrite_stable", known_bucket_ids, known_session_ids, "missing_valid_evidence"),
             ("stable_candidate", known_bucket_ids, known_session_ids, "missing_valid_evidence"),
-            ("profile_fact_candidate", known_bucket_ids, known_session_ids, "missing_valid_evidence"),
             ("skip", set(), set(), "missing_valid_evidence"),
         ):
             raw_items = patch.get(key, [])
@@ -2460,8 +2456,6 @@ class DailyPortraitMaintainer:
             if not scoped_evidence:
                 return None, "scope_limited_evidence"
             evidence = scoped_evidence
-        if key == "profile_fact_candidate" and not any(row.get("bucket_id") for row in evidence):
-            return None, "profile_fact_needs_bucket_evidence"
         source_turn_ids, source_event_ids = self._evidence_source_ids(
             evidence,
             evidence_source_index or {},
@@ -2508,10 +2502,6 @@ class DailyPortraitMaintainer:
             return None, "overstyled_portrait_text"
         if key == "stable_candidate":
             clean["candidate_kind"] = "pattern_hint"
-        if key == "profile_fact_candidate":
-            clean["profile_kind"] = self._safe_key(item.get("profile_kind") or item.get("kind") or "other")
-            clean["predicate"] = self._safe_key(item.get("predicate") or "")
-            clean["object"] = self._clip(str(item.get("object") or ""), 120)
         return clean, ""
 
     def _material_evidence_source_index(self, materials: dict) -> dict[tuple[str, str], dict]:
@@ -3211,8 +3201,6 @@ class DailyPortraitMaintainer:
             )
         for item in patch.get("stable_candidate", []):
             self._upsert_candidate(state["stable_candidates"], item, date_key)
-        for item in patch.get("profile_fact_candidate", []):
-            self._upsert_candidate(state["profile_fact_candidates"], item, date_key)
         for item in patch.get("skip", []):
             state.setdefault("skipped", []).append(
                 {
@@ -3222,7 +3210,6 @@ class DailyPortraitMaintainer:
                 }
             )
         state["stable_candidates"] = state["stable_candidates"][-self.candidate_max:]
-        state["profile_fact_candidates"] = state["profile_fact_candidates"][-self.candidate_max:]
         state["skipped"] = state.get("skipped", [])[-self.candidate_max:]
         state["dismissed_items"] = self._active_dismissals(state.get("dismissed_items", []))
         for scope in PORTRAIT_SCOPES:

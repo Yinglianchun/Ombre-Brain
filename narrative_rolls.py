@@ -268,6 +268,33 @@ class NarrativeRollStore:
             "live_injection_enabled": self.live_injection_enabled,
         }
 
+    def revision_targets(self) -> list[dict[str, Any]]:
+        """Return reviewed routing metadata for the derived revision inbox.
+
+        This intentionally excludes Narrative bodies and entity labels.  New
+        sources may be offered for review only through title/query cues already
+        authored on the roll, never through generic people or Word Map terms.
+        """
+
+        return [
+            {
+                key: item.get(key)
+                for key in (
+                    "narrative_id",
+                    "revision",
+                    "title",
+                    "title_aliases",
+                    "query_cues",
+                    "current_status_cue",
+                    "document_sha256",
+                    "integrity_status",
+                )
+            }
+            for item in self._load()
+            if str(item.get("lifecycle") or "active") == "active"
+            and str(item.get("publication_status") or "reviewed") in {"reviewed", "published"}
+        ]
+
     def resolve_read_query(self, query: str = "", limit: int = 20) -> dict[str, Any]:
         """Read one exact roll identity, otherwise return the bounded index."""
 

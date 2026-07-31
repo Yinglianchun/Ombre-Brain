@@ -14,6 +14,8 @@ DAILY_TOOL_NAMES: tuple[str, ...] = (
     "set_scene_status",
     "annotate",
     "close_window",
+    "narrative_revision_inbox",
+    "review_narrative_revision",
     "publish_narrative",
     "read_portrait",
     "publish_portrait",

@@ -16,7 +16,9 @@ from narrative_rolls import NarrativeRollStore
 
 async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
-    assert len(tools) == 15
+    assert len(tools) == 17
+    assert "narrative_revision_inbox" in tools
+    assert "review_narrative_revision" in tools
 
     forbidden_copy = (
         "Haven",

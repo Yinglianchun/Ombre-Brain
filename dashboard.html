@@ -2906,6 +2906,48 @@
   }
   .profile-proposal-message.error { color: var(--negative); }
   .profile-proposal-message.ok { color: var(--positive); }
+  .narrative-revision-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 12px;
+  }
+  .narrative-revision-head,
+  .narrative-revision-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .narrative-revision-head h3 { color: var(--accent); font-size: 15px; }
+  .narrative-revision-meta { color: var(--text-dim); font-size: 12px; line-height: 1.8; margin: 8px 0; }
+  .narrative-revision-hash { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+  .narrative-revision-excerpt { white-space: pre-wrap; color: var(--text); line-height: 1.7; margin: 10px 0; }
+  .narrative-revision-card textarea,
+  .narrative-revision-card input,
+  .narrative-revision-filter {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-solid);
+    color: var(--text);
+    font: inherit;
+    padding: 9px 11px;
+  }
+  .narrative-revision-card textarea { min-height: 96px; resize: vertical; margin: 8px 0; }
+  .narrative-revision-card input { margin-bottom: 8px; }
+  .narrative-revision-actions button {
+    min-height: 32px;
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .narrative-revision-actions button:hover { border-color: var(--border-strong); color: var(--accent); }
   .profile-list { display: flex; flex-direction: column; gap: 10px; }
   .profile-card {
     background: var(--surface);
@@ -3166,6 +3208,7 @@
   <div class="tab" data-tab="dreams">梦境</div>
   <div class="tab" data-tab="persona">Persona</div>
   <div class="tab" data-tab="profile">画像</div>
+  <div class="tab" data-tab="narrative-revisions">叙事修订</div>
   <div class="tab" data-tab="word-map">词图</div>
   <div class="tab" data-tab="proposals">关系提案</div>
   <div class="tab" data-tab="config">配置</div>
@@ -3623,22 +3666,6 @@
         <div class="loading">加载 Portrait State…</div>
       </div>
     </section>
-    <div class="profile-toolbar">
-      <div>
-        <h2>Profile Facts</h2>
-        <p>旧画像事实卡仅保留作证据检查；不会再把原文直接拼进每轮上下文。</p>
-      </div>
-      <button type="button" onclick="loadProfileFacts()">刷新</button>
-    </div>
-    <div class="profile-proposal-panel">
-      <div class="profile-proposal-form">
-        <input type="text" id="profile-proposal-bucket-id" placeholder="证据 bucket id" />
-        <input type="text" id="profile-proposal-moment-id" placeholder="moment id（可选）" />
-        <button type="button" onclick="generateProfileFactProposals()">生成画像候选</button>
-      </div>
-      <div class="profile-proposal-message" id="profile-proposal-message"></div>
-      <div class="profile-proposal-list" id="profile-proposal-list"></div>
-    </div>
     <div class="profile-proposal-panel">
       <div class="profile-proposal-form">
         <input type="text" id="anchor-proposal-bucket-id" placeholder="候选 anchor bucket id" />
@@ -3648,10 +3675,31 @@
       <div class="profile-proposal-message" id="anchor-proposal-message"></div>
       <div class="profile-proposal-list" id="anchor-proposal-list"></div>
     </div>
-    <div class="profile-summary" id="profile-summary">加载中…</div>
-    <div class="profile-list" id="profile-facts-list">
-      <div class="loading">加载画像事实…</div>
+  </div>
+</div>
+
+<div class="content" id="narrative-revisions-view" style="display:none">
+  <div class="profile-shell">
+    <div class="profile-toolbar">
+      <div>
+        <h2>叙事卷修订箱</h2>
+        <p>按时间排列可能影响同一叙事卷的新 Scene / 窗影。这里是派生线索，不是证据，也不会自动改写或发布。</p>
+      </div>
+      <div class="profile-actions">
+        <select class="narrative-revision-filter" id="narrative-revision-status" onchange="loadNarrativeRevisionInbox()">
+          <option value="pending">待复核</option>
+          <option value="dismissed">已忽略</option>
+          <option value="absorbed">已吸收</option>
+          <option value="all">全部</option>
+        </select>
+        <button type="button" onclick="loadNarrativeRevisionInbox()">刷新</button>
+      </div>
     </div>
+    <section class="portrait-state-panel">
+      <div class="profile-proposal-message" id="narrative-revision-message"></div>
+      <div class="profile-summary" id="narrative-revision-summary">加载中…</div>
+      <div id="narrative-revision-list"><div class="loading">读取修订线索…</div></div>
+    </section>
   </div>
 </div>
 
@@ -4140,8 +4188,7 @@ let allBuckets = [];
 let renderedBuckets = [];
 let portraitState = null;
 let portraitEditorScope = '';
-let profileFacts = [];
-let profileFactProposals = [];
+let narrativeRevisionItems = [];
 let anchorProposals = [];
 let wordMapData = null;
 let identitySemanticData = null;
@@ -4283,6 +4330,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('dreams-view').style.display = target === 'dreams' ? '' : 'none';
     document.getElementById('persona-view').style.display = target === 'persona' ? '' : 'none';
     document.getElementById('profile-view').style.display = target === 'profile' ? '' : 'none';
+    document.getElementById('narrative-revisions-view').style.display = target === 'narrative-revisions' ? '' : 'none';
     document.getElementById('word-map-view').style.display = target === 'word-map' ? '' : 'none';
     document.getElementById('proposal-view').style.display = target === 'proposals' ? '' : 'none';
     document.getElementById('config-view').style.display = target === 'config' ? '' : 'none';
@@ -4297,8 +4345,8 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (target === 'persona') loadPersona();
     if (target === 'profile') {
       loadPortraitState();
-      loadProfileFacts();
     }
+    if (target === 'narrative-revisions') loadNarrativeRevisionInbox();
     if (target === 'word-map') loadWordMap();
     if (target === 'proposals') loadSceneLinkerPanel();
     if (target === 'config') loadConfig();
@@ -4339,7 +4387,6 @@ async function loadBuckets(options) {
     if (getActiveTab() === 'dreams') loadDreams();
     if (getActiveTab() === 'profile' && !options.skipProfileRefresh) {
       loadPortraitState();
-      loadProfileFacts();
     }
     if (getActiveTab() === 'word-map') loadWordMap();
   } catch (e) {
@@ -5240,7 +5287,6 @@ async function runPortraitMaintain(scope) {
 async function refreshPortraitView() {
   await loadBuckets({ skipProfileRefresh: true });
   await loadPortraitState();
-  await loadProfileFacts();
 }
 
 async function resetPortraitState() {
@@ -5302,7 +5348,6 @@ function renderPortraitState(data) {
         renderPortraitTimeline(state.recent_timeline, state.recent_activities) +
         '<div class="portrait-candidate-grid">' +
           renderPortraitCandidates('Stable Candidates', state.stable_candidates) +
-          renderPortraitCandidates('Profile Fact Candidates', state.profile_fact_candidates) +
         '</div>' +
       '</div>' +
     '</details>';
@@ -5836,6 +5881,116 @@ function renderPortraitEvidence(evidence) {
     return esc(labels.join(' · ')) + openButton;
   });
   return '<div class="portrait-evidence">evidence: ' + parts.join(' / ') + '</div>';
+}
+
+function narrativeRevisionMessage(message, kind) {
+  var el = document.getElementById('narrative-revision-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.className = 'profile-proposal-message' + (kind ? ' ' + kind : '');
+}
+
+function narrativeRevisionSourceButtons(item) {
+  var sceneIds = Array.isArray(item.source_scene_ids) ? item.source_scene_ids : [];
+  return sceneIds.map(function(sceneId) {
+    return '<button type="button" onclick="showDetail(\'' + esc(sceneId) + '\')">读 Scene ' + esc(sceneId) + '</button>';
+  }).join('');
+}
+
+function renderNarrativeRevisionCard(item) {
+  var id = String(item.proposal_id || '');
+  var matches = Array.isArray(item.matched_anchors) ? item.matched_anchors : [];
+  var matchText = matches.map(function(match) {
+    var cue = match.source_cue ? ' ← cue：' + match.source_cue : '';
+    return '<span class="profile-chip">' + esc(match.anchor_kind + '：' + match.anchor + cue) + '</span>';
+  }).join('');
+  var status = String(item.status || 'pending');
+  var actionButtons = status === 'pending'
+    ? '<button type="button" onclick="updateNarrativeRevision(\'' + esc(id) + '\', \'save_draft\')">保存手写差分</button>' +
+      '<button type="button" onclick="updateNarrativeRevision(\'' + esc(id) + '\', \'dismiss\')">本次不影响</button>'
+    : status === 'dismissed'
+    ? '<button type="button" onclick="updateNarrativeRevision(\'' + esc(id) + '\', \'reopen\')">重新复核</button>'
+    : '';
+  return '<article class="narrative-revision-card">' +
+    '<div class="narrative-revision-head">' +
+      '<h3>' + esc(item.narrative_title || item.narrative_id || 'Narrative Roll') + '</h3>' +
+      '<span class="profile-chip">' + esc(status) + '</span>' +
+    '</div>' +
+    '<div class="narrative-revision-meta">' +
+      '卷 <strong>' + esc(item.narrative_id || '') + '</strong> · 基线 revision ' + Number(item.baseline_revision || 0) + '<br>' +
+      '来源 ' + esc(item.source_type || '') + ' · ' + esc(item.source_date || '日期未知') + ' · ' + esc(item.source_id || '') + '<br>' +
+      '<span class="narrative-revision-hash">source sha256 ' + esc(item.source_sha256 || '') + '</span><br>' +
+      '<span class="narrative-revision-hash">baseline sha256 ' + esc(item.baseline_document_sha256 || '') + '</span>' +
+    '</div>' +
+    '<div class="portrait-row-meta">' + matchText + '</div>' +
+    '<div class="narrative-revision-excerpt">' + esc(item.source_excerpt || '') + '</div>' +
+    '<textarea id="narrative-delta-' + esc(id) + '" placeholder="由现在的作者写：这条来源为本卷新增、修正、深化或结束了什么；也可以留空后标记不影响。">' + esc(item.draft_delta || '') + '</textarea>' +
+    '<input id="narrative-note-' + esc(id) + '" value="' + escAttr(item.review_note || '') + '" placeholder="复核备注（可选）" />' +
+    '<div class="narrative-revision-actions">' +
+      '<div>' + narrativeRevisionSourceButtons(item) + '</div>' +
+      '<div>' + actionButtons + '</div>' +
+    '</div>' +
+  '</article>';
+}
+
+function renderNarrativeTrajectory(group) {
+  var items = Array.isArray(group.items) ? group.items : [];
+  return '<section class="profile-proposal-panel">' +
+    '<div class="narrative-revision-head">' +
+      '<h3>' + esc(group.narrative_title || group.narrative_id || 'Narrative Roll') + '</h3>' +
+      '<span class="profile-chip">' + items.length + ' 个时间节点</span>' +
+    '</div>' +
+    '<div class="narrative-revision-meta">' + esc(group.narrative_id || '') + ' · 由早到晚</div>' +
+    items.map(renderNarrativeRevisionCard).join('') +
+  '</section>';
+}
+
+async function loadNarrativeRevisionInbox() {
+  var list = document.getElementById('narrative-revision-list');
+  var summary = document.getElementById('narrative-revision-summary');
+  var filter = document.getElementById('narrative-revision-status');
+  if (!list || !summary || !filter) return;
+  list.innerHTML = '<div class="loading">读取修订线索…</div>';
+  narrativeRevisionMessage('', '');
+  try {
+    var res = await authFetch(BASE + '/api/narrative-revision-inbox?status=' + encodeURIComponent(filter.value) + '&limit=200');
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.reason || data.error || '读取失败');
+    narrativeRevisionItems = Array.isArray(data.items) ? data.items : [];
+    var trajectories = Array.isArray(data.trajectories) ? data.trajectories : [];
+    summary.textContent = narrativeRevisionItems.length + ' 条 · 派生线索不具备 evidence authority；发布前仍须核对原始来源。';
+    list.innerHTML = trajectories.length
+      ? trajectories.map(renderNarrativeTrajectory).join('')
+      : '<div class="portrait-empty">当前没有这一状态的叙事修订线索。</div>';
+  } catch (e) {
+    summary.textContent = '读取失败';
+    list.innerHTML = '<div class="loading">' + esc(e.message) + '</div>';
+  }
+}
+
+async function updateNarrativeRevision(proposalId, action) {
+  var delta = document.getElementById('narrative-delta-' + proposalId);
+  var note = document.getElementById('narrative-note-' + proposalId);
+  narrativeRevisionMessage('保存中…', '');
+  try {
+    var res = await authFetch(BASE + '/api/narrative-revision-inbox/' + encodeURIComponent(proposalId), {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        action: action,
+        draft_delta: delta ? delta.value : '',
+        note: note ? note.value : ''
+      })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.reason || data.error || '保存失败');
+    narrativeRevisionMessage(action === 'dismiss' ? '已标记本次不影响。' : '已保存；叙事卷尚未被改写。', 'ok');
+    await loadNarrativeRevisionInbox();
+  } catch (e) {
+    narrativeRevisionMessage('保存失败: ' + e.message, 'error');
+  }
 }
 
 async function loadProfileFacts() {

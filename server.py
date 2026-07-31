@@ -11,8 +11,8 @@
 #   - Initialize canonical authored-memory stores, Diary storage, legacy
 #     read compatibility, indexes, and background maintenance engines.
 #     初始化作者记忆主存储、日记存储、旧数据读取兼容、索引与后台维护引擎。
-#   - Expose the 15-tool daily façade:
-#     暴露 15 把日常工具：
+#   - Expose the 17-tool daily façade:
+#     暴露 17 把日常工具：
 #       recall / read_memory
 #         Recall Scenes or explicitly read handoff; read exact Scene,
 #         Window Shadow, or Narrative Roll objects.
@@ -21,9 +21,12 @@
 #         Author and revise Scenes, append sourced later understanding,
 #         and atomically settle one Window Shadow plus inline Scenes.
 #         亲写与修订 Scene、追加有来源的后来理解，并原子沉淀一篇窗影及内联 Scene。
-#       publish_narrative / read_portrait / publish_portrait
-#         Publish sourced narrative revisions and review/publish portraits.
-#         发布有来源的叙事修订，并审阅或发布画像。
+#       narrative_revision_inbox / review_narrative_revision / publish_narrative
+#         Review sourced revision hints, then manually publish exact narrative revisions.
+#         审核有来源的修订线索，再亲自发布逐字叙事修订。
+#       read_portrait / publish_portrait
+#         Review and publish portraits.
+#         审阅并发布画像。
 #       read_diary / write_diary / revise_diary / delete_diary / comment_diary
 #         Read and author Diary or Darkroom entries with revision, soft
 #         deletion, time-lock, and comment boundaries.
@@ -150,6 +153,7 @@ from window_shadows import (
 )
 from memory_nodes import MemoryNodeStore
 from narrative_rolls import NarrativeRollStore
+from narrative_revision_inbox import NarrativeRevisionInbox
 from persona_engine import PersonaStateEngine
 from persona_event_selection import select_persona_events
 from portrait_engine import DailyPortraitMaintainer
@@ -254,6 +258,7 @@ gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gat
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
 reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
 narrative_roll_store = NarrativeRollStore(config)          # Reviewed sourced Narrative Projection arcs / 审阅后发布的叙事卷
+narrative_revision_inbox_store = NarrativeRevisionInbox(config) # Derived source-to-roll review queue / 派生叙事修订箱
 legacy_memory_review_store = LegacyMemoryReviewStore(config) # Admin-only legacy lifecycle / bridge review cards
 legacy_memory_lifecycle_publisher = LegacyMemoryLifecyclePublisher(
     config,
@@ -9131,6 +9136,114 @@ async def api_narrative_rolls(request):
     return JSONResponse(result, status_code=status_code)
 
 
+async def _capture_narrative_revision_candidates(
+    *,
+    scene_ids: list[str] | None = None,
+    window: dict | None = None,
+) -> list[dict]:
+    """Best-effort derived indexing after canonical writes have committed."""
+
+    try:
+        targets = narrative_roll_store.revision_targets()
+        if not targets:
+            return []
+        scenes: list[dict] = []
+        for scene_id in list(dict.fromkeys(scene_ids or [])):
+            scene = await bucket_mgr.get(str(scene_id or "").strip())
+            if scene and _is_canonical_scene_bucket(scene):
+                scenes.append(scene)
+        created: list[dict] = []
+        for scene in scenes:
+            created.extend(narrative_revision_inbox_store.consider_scene(scene, targets))
+        if isinstance(window, dict) and window.get("window_id"):
+            created.extend(
+                narrative_revision_inbox_store.consider_window_shadow(
+                    window,
+                    targets,
+                    attached_scenes=scenes,
+                )
+            )
+        return created
+    except Exception as exc:
+        logger.warning(
+            "Narrative revision inbox indexing failed after canonical write / 叙事修订箱派生失败: %s",
+            exc,
+        )
+        return []
+
+
+@mcp.tool()
+async def narrative_revision_inbox(
+    status: str = "pending",
+    narrative_id: str = "",
+    limit: int = 50,
+) -> dict:
+    """读取叙事卷修订箱。status 选 pending、dismissed、absorbed 或 all；narrative_id 可只看一卷并按来源时间排列。这里的匹配理由、来源片段和 hash 只是待复核线索，不是证据；写修订前必须再读对应 Scene/窗影与当前叙事卷。"""
+
+    return narrative_revision_inbox_store.list(
+        status=status,
+        narrative_id=narrative_id,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+async def review_narrative_revision(
+    proposal_id: str,
+    action: Literal["save_draft", "dismiss", "reopen"],
+    draft_delta: str = "",
+    note: str = "",
+) -> dict:
+    """审核一条叙事修订线索。save_draft 只保存当前作者写的差分草稿；dismiss 表示本次来源不影响该卷；reopen 重新放回待审。它不会改写或发布叙事卷，最终仍须调用 publish_narrative。"""
+
+    return narrative_revision_inbox_store.review(
+        proposal_id,
+        action=action,
+        draft_delta=draft_delta,
+        note=note,
+    )
+
+
+@mcp.custom_route("/api/narrative-revision-inbox", methods=["GET"])
+async def api_narrative_revision_inbox(request):
+    """List the derived Narrative Roll revision queue for dashboard review."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    result = await narrative_revision_inbox(
+        status=str(request.query_params.get("status") or "pending"),
+        narrative_id=str(request.query_params.get("narrative_id") or ""),
+        limit=_int_between(request.query_params.get("limit"), 50, 1, 200),
+    )
+    return JSONResponse(result, status_code=400 if result.get("status") == "invalid" else 200)
+
+
+@mcp.custom_route("/api/narrative-revision-inbox/{proposal_id}", methods=["PATCH"])
+async def api_review_narrative_revision(request):
+    """Save a manual delta draft or change review state without publication."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    result = await review_narrative_revision(
+        proposal_id=str(request.path_params.get("proposal_id") or ""),
+        action=str(body.get("action") or ""),
+        draft_delta=str(body.get("draft_delta") or ""),
+        note=str(body.get("note") or ""),
+    )
+    status_code = 404 if result.get("status") == "not_found" else 400 if result.get("status") == "invalid" else 200
+    return JSONResponse(result, status_code=status_code)
+
+
 # =============================================================
 # Tool 1.57: Scene-edge proposal review
 # 工具 1.57：只读查看并明确审核 Scene 边提案
@@ -10498,6 +10611,10 @@ async def _close_window_commit(
     for bucket_id in created_scene_ids:
         _queue_embedding_refresh(bucket_id)
         _queue_scene_linking(bucket_id)
+    revision_candidates = await _capture_narrative_revision_candidates(
+        scene_ids=scene_bucket_ids,
+        window=window if window_created else None,
+    )
     rejected_draft_cleared = (
         window_shadow_rejected_draft_store.delete(request_key)
         if request_key
@@ -10527,6 +10644,7 @@ async def _close_window_commit(
         "ordinary_recall": False,
         "markdown_import": markdown_import,
         "rejected_draft_cleared": rejected_draft_cleared,
+        "narrative_revision_candidate_count": len(revision_candidates),
     }
 
 
@@ -11104,13 +11222,7 @@ async def introspection(
         except Exception as e:
             logger.warning(f"Introspection crystallization hint failed: {e}")
 
-    profile_hint = (
-        _profile_fact_candidate_hint(recent, all_buckets)
-        if legacy_memory_writes_enabled(config)
-        else ""
-    )
-
-    return header + "\n---\n".join(parts) + connection_hint + crystal_hint + profile_hint
+    return header + "\n---\n".join(parts) + connection_hint + crystal_hint
 
 
 PROFILE_FACT_CANDIDATE_PATTERN_SPECS = (
@@ -11719,6 +11831,7 @@ async def _write_scene_memory(
         normalize_content=False,
     )
     _queue_scene_linking(bucket_id)
+    await _capture_narrative_revision_candidates(scene_ids=[bucket_id])
     action = "合并→" if is_merged else "新建→"
     related_note = (
         _format_readonly_related_memory(related_bucket) if related_bucket else ""
@@ -12459,6 +12572,12 @@ async def publish_narrative(
         lifecycle=lifecycle,
     )
     result["resolved_sources"] = resolved_sources
+    if result.get("status") in {"created", "updated"}:
+        result["absorbed_revision_proposal_ids"] = narrative_revision_inbox_store.mark_absorbed(
+            str(narrative_id or "").strip(),
+            source_scene_ids=linked_ids,
+            revision=int(result.get("revision") or 0),
+        )
     return result
 
 
@@ -12554,7 +12673,6 @@ async def _portrait_state_payload() -> dict:
         "last_handoff": dict(_last_handoff_status),
         "window_shadow_stats": window_shadow_stats,
         "stable_candidates": state.get("stable_candidates", []),
-        "profile_fact_candidates": state.get("profile_fact_candidates", []),
         "generation_status": (
             {
                 scope: portrait_engine.scope_generation_status(scope)

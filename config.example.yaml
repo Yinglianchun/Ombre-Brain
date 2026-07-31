@@ -388,7 +388,7 @@ gateway:
   scene_native_recall_enabled: false # opt-in/reversible: true enables native Scene + legacy bridge dual graph
   operit_context_rewrite_enabled: false # Operit-only text turn cleanup: split stable/activity attachment context before forwarding
   bucket_list_cache_ttl_seconds: 300 # cache active bucket list inside Gateway; 0 disables
-  portrait_memory_enabled: true  # read-only stable portrait cache from profile_fact by default
+  portrait_memory_enabled: false # retired compatibility key; Gateway ignores raw profile_fact/anchor injection
   portrait_memory_budget: 360
   portrait_memory_max_sources: 8
   portrait_memory_include_anchors: false # true optionally adds ordinary anchors; never includes pinned/protected/self_anchor
@@ -682,8 +682,8 @@ scene_linker:
 
 # --- Daily Portrait Maintainer / 每日画像维护 ---
 # Writes only an inspectable state/portrait_state.json. It does not edit
-# pinned/protected/Core Memory, and profile_fact/anchor changes stay as
-# candidates until manually confirmed.
+# pinned/protected/Core Memory. Stable portrait changes remain authored review;
+# retired Profile Fact does not generate new candidates here.
 portrait:
   enabled: true
   auto_enabled: true
@@ -721,6 +721,7 @@ portrait:
 narrative_rolls:
   registry_path: ""                    # empty = state_dir/narrative_rolls/registry.json; keep private narrative data out of Git
   documents_dir: ""                   # empty = registry sibling revisions/; immutable author-supplied revision files
+  revision_inbox_path: ""             # empty = state_dir/narrative_rolls/revision_inbox.json; derived review hints, never evidence or auto-publish
   shadow_admission_enabled: true   # keep candidate/admission evidence in recall debug
   live_injection_enabled: true     # strong gate injects one authored body; weak/ambiguous matches stay out
   ambiguity_margin: 10             # tied strong rolls remain index-only and do not inject a body

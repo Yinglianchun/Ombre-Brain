@@ -525,7 +525,7 @@ gateway:
   recalled_memory_budget: 400
   direct_render_mode: "auto"
   retrieval_mode: "graph"
-  portrait_memory_enabled: true
+  portrait_memory_enabled: false
   portrait_memory_budget: 360
   portrait_memory_max_sources: 8
   portrait_memory_include_anchors: false
