@@ -98,6 +98,7 @@ from recall_eval import RECALL_EVAL_BLOCKED_SECTIONS, RECALL_EVAL_DEFAULT_CASES
 from recall_policy import QueryAnchorPlan, RecallPolicy, diffusion_seed_topic_term_has_specific_residue
 from memory_nodes import MemoryNodeStore
 from memory_recall import SemanticRecallRouter
+from narrative_rolls import NarrativeRollStore
 from persona_engine import PersonaStateEngine
 from persona_event_selection import (
     format_persona_event_trace_line,
@@ -372,6 +373,7 @@ class GatewayService:
         )
         self.raw_event_store = raw_event_store or RawEventStore(config)
         self.reminder_store = ReminderStore(config)
+        self.narrative_roll_store = NarrativeRollStore(config)
         self.persona_engine = persona_engine or PersonaStateEngine(config)
         self.dream_engine = dream_engine or DreamEngine(config)
         self.dream_cfg = config.get("dream", {}) if isinstance(config.get("dream", {}), dict) else {}
@@ -672,8 +674,78 @@ class GatewayService:
             len(edges),
         )
 
+    def _narrative_roll_shadow_debug(
+        self,
+        query: str,
+        direct_first_hop_scene_ids: list[str],
+        *,
+        route_allowed: bool,
+        route_block_reason: str = "",
+    ) -> dict[str, Any]:
+        """Observe Narrative Roll admission without loading or injecting its body."""
+
+        store = getattr(self, "narrative_roll_store", None)
+        base = {
+            "enabled": bool(store),
+            "mode": "shadow_only",
+            "gateway_live_injection_enabled": False,
+            "visible_injection": False,
+            "direct_first_hop_scene_ids": list(
+                dict.fromkeys(
+                    str(value or "").strip()
+                    for value in direct_first_hop_scene_ids or []
+                    if str(value or "").strip()
+                )
+            ),
+            "candidate_narrative_ids": [],
+            "admitted_narrative_id": "",
+            "status": "unavailable" if store is None else "not_run",
+            "reason": "narrative_roll_store_unavailable" if store is None else "not_run",
+            "available_narrative_count": 0,
+            "candidates": [],
+        }
+        if store is None:
+            return base
+        try:
+            index = store.list(limit=100)
+            debug = store.shadow_match(query, base["direct_first_hop_scene_ids"])
+        except Exception as exc:
+            logger.warning("Narrative Roll shadow recall failed: %s", exc)
+            return {
+                **base,
+                "status": "error",
+                "reason": "narrative_roll_shadow_failed",
+            }
+
+        configured_mode = str(debug.get("mode") or "")
+        debug.update(
+            {
+                "store_mode": configured_mode,
+                "mode": "shadow_only",
+                "gateway_live_injection_enabled": False,
+                "visible_injection": False,
+                "available_narrative_count": int(index.get("count") or 0),
+                "route_allowed": bool(route_allowed),
+            }
+        )
+        if not str(query or "").strip():
+            debug["status"] = "not_run"
+            debug["reason"] = str(route_block_reason or "not_current_user_turn")
+        elif not route_allowed:
+            debug["route_block_reason"] = str(
+                route_block_reason or "broad_dynamic_recall_blocked"
+            )
+            admitted_id = str(debug.get("admitted_narrative_id") or "").strip()
+            if admitted_id:
+                debug["would_admit_narrative_id"] = admitted_id
+                debug["admitted_narrative_id"] = ""
+                debug["status"] = "route_blocked"
+                debug["reason"] = debug["route_block_reason"]
+        return debug
+
     async def health_payload(self) -> dict:
         stats = await self.bucket_mgr.get_stats()
+        narrative_index = self.narrative_roll_store.list(limit=100)
         return {
             "status": "ok",
             "gateway": {
@@ -699,6 +771,11 @@ class GatewayService:
                     "mode": self.semantic_recall_router.mode,
                     "enabled": self.semantic_recall_router.enabled,
                     "active": self.semantic_recall_router.active,
+                },
+                "narrative_roll_recall": {
+                    "mode": "shadow_only",
+                    "available_count": int(narrative_index.get("count") or 0),
+                    "gateway_live_injection_enabled": False,
                 },
                 "date_persona_trace_enabled": self.date_persona_trace_enabled,
                 "date_persona_trace_budget": self.date_persona_trace_budget,
@@ -2001,6 +2078,12 @@ class GatewayService:
             "skip" if semantic_skip else "recall"
         )
         if semantic_skip:
+            narrative_recall_debug = self._narrative_roll_shadow_debug(
+                query,
+                [],
+                route_allowed=False,
+                route_block_reason="semantic_recall_skip",
+            )
             response: dict[str, Any] = {
                 "ok": True,
                 "query": query,
@@ -2013,6 +2096,7 @@ class GatewayService:
                     "query": query,
                     "candidate_count": 0,
                     "semantic_recall_debug": semantic_recall_debug,
+                    "narrative_recall_debug": narrative_recall_debug,
                     "hook_recall_debug": {
                         "mode": "fast_bucket",
                         "skip_reason": "semantic_recall_skip",
@@ -2474,6 +2558,12 @@ class GatewayService:
         semantic_recall_debug: dict[str, Any] = self.semantic_recall_router.debug_base(
             current_user_query
         )
+        narrative_recall_debug: dict[str, Any] = self._narrative_roll_shadow_debug(
+            "",
+            [],
+            route_allowed=False,
+            route_block_reason="not_current_user_turn",
+        )
         semantic_recall_query_vector: list[float] | None = None
         skip_broad_dynamic_recall = False
         date_persona_trace_requested = False
@@ -2736,6 +2826,14 @@ class GatewayService:
                 for moment in recalled_moments
                 if moment.get("bucket_id")
             ]
+            current_direct_scene_ids = list(
+                dict.fromkeys(
+                    str(moment.get("bucket_id") or "")
+                    for moment in recalled_moments
+                    if moment.get("bucket_id")
+                    and str(moment.get("node_kind") or "") == "scene"
+                )
+            )
             current_direct_moment_ids = [
                 str(moment.get("moment_id") or "")
                 for moment in recalled_moments
@@ -2757,6 +2855,16 @@ class GatewayService:
                 dict.fromkeys(current_direct_moment_ids + current_diffused_moment_ids)
             )
             mark_step("shown_id_collection", stage_started_at)
+            stage_started_at = time.perf_counter()
+            narrative_recall_debug = self._narrative_roll_shadow_debug(
+                current_user_query,
+                current_direct_scene_ids,
+                route_allowed=not skip_broad_dynamic_recall,
+                route_block_reason=str(
+                    query_planner_debug.get("skip_reason") or "broad_dynamic_recall_blocked"
+                ),
+            )
+            mark_step("narrative_roll_shadow", stage_started_at)
             stage_started_at = time.perf_counter()
             targeted_memory_detail, targeted_memory_detail_debug = self._build_targeted_memory_detail(
                 all_buckets,
@@ -3081,6 +3189,7 @@ class GatewayService:
                 suppressed_buckets=suppressed_buckets,
                 query_planner_debug=query_planner_debug,
                 semantic_recall_debug=semantic_recall_debug,
+                narrative_recall_debug=narrative_recall_debug,
                 debug_detail=debug_detail,
             )
             mark_step("build_debug_payload", stage_started_at)
@@ -16572,6 +16681,7 @@ class GatewayService:
         suppressed_buckets: list[dict] | None = None,
         query_planner_debug: dict[str, Any] | None = None,
         semantic_recall_debug: dict[str, Any] | None = None,
+        narrative_recall_debug: dict[str, Any] | None = None,
         date_persona_trace: str = "",
         date_persona_trace_debug: dict[str, Any] | None = None,
         debug_detail: str = "full",
@@ -16777,6 +16887,13 @@ class GatewayService:
             "moment_chunk_shadow_debug": moment_chunk_shadow_debug,
             "semantic_recall_debug": semantic_recall_debug
             or self.semantic_recall_router.debug_base(query),
+            "narrative_recall_debug": narrative_recall_debug
+            or self._narrative_roll_shadow_debug(
+                "",
+                [],
+                route_allowed=False,
+                route_block_reason="not_run",
+            ),
             "memory_detail_recall_debug": self._memory_detail_recall_debug_base(injected_bucket_ids),
             "targeted_memory_detail_debug": targeted_memory_detail_debug
             or self._targeted_memory_detail_debug_base(),
@@ -16857,6 +16974,16 @@ class GatewayService:
             selected_buckets,
             all_buckets,
         )
+        direct_scene_ids = [
+            str(bucket.get("id") or "")
+            for bucket in selected_buckets
+            if bucket.get("id") and self._is_canonical_scene_bucket(bucket)
+        ]
+        narrative_recall_debug = self._narrative_roll_shadow_debug(
+            query,
+            direct_scene_ids,
+            route_allowed=True,
+        )
 
         cards: list[dict[str, Any]] = []
         recalled_ids: list[str] = []
@@ -16891,6 +17018,7 @@ class GatewayService:
                 self._format_suppressed_bucket_debug(item, query=query)
                 for item in (suppressed_buckets or [])[:20]
             ],
+            "narrative_recall_debug": narrative_recall_debug,
             "hook_recall_debug": {
                 "mode": "fast_bucket",
                 "search_query": search_query,

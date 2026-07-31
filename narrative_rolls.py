@@ -593,7 +593,10 @@ class NarrativeRollStore:
                 continue
             title_aliases = [
                 str(value or "").strip()
-                for value in item.get("title_aliases", []) or []
+                for value in [
+                    item.get("title"),
+                    *(item.get("title_aliases", []) or []),
+                ]
                 if str(value or "").strip()
             ]
             primary_entities = [
