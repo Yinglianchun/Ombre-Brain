@@ -235,7 +235,7 @@ class DailyPortraitMaintainer:
         self.max_tokens = int(cfg.get("max_tokens", 3200))
         self.json_response_format = self._bool(cfg.get("json_response_format", True), True)
         self.state_path = self._state_path(cfg.get("state_path", ""))
-        self._last_patch_source = "fallback"
+        self._last_patch_source = "unavailable"
         self.client = None
         if self.enabled and self.api_key and self.base_url:
             self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=45.0)
@@ -343,8 +343,25 @@ class DailyPortraitMaintainer:
                 "initial": initial,
             }
 
-        self._last_patch_source = "fallback"
+        self._last_patch_source = "unavailable"
         raw_patch = await self._generate_patch(date_key, state, materials, initial=initial)
+        if self._last_patch_source != "model":
+            return {
+                "status": "skipped",
+                "reason": (
+                    "generator_error"
+                    if self._last_patch_source == "error"
+                    else "generator_unavailable"
+                ),
+                "date": date_key,
+                "state_path": self.state_path,
+                "initial": initial,
+                "materials": {
+                    "buckets": len(materials["buckets"]),
+                    "persona_events": len(materials["persona_events"]),
+                    "window_shadows": len(materials.get("window_shadows", [])),
+                },
+            }
         normalized_patch, rejected = self._normalize_patch(raw_patch, materials)
         self._annotate_patch_source_dates(normalized_patch, materials)
         if initial:
@@ -1607,15 +1624,17 @@ class DailyPortraitMaintainer:
         }
 
     async def _generate_patch(self, date_key: str, state: dict, materials: dict, *, initial: bool) -> dict:
-        if self.client:
-            try:
-                patch = await self._api_patch(date_key, state, materials, initial=initial)
-                self._last_patch_source = "model"
-                return patch
-            except Exception as exc:
-                logger.warning("Portrait LLM patch failed, using fallback: %s", exc)
-        self._last_patch_source = "fallback"
-        return self._fallback_patch(materials, initial=initial)
+        if not self.client:
+            self._last_patch_source = "unavailable"
+            return {}
+        try:
+            patch = await self._api_patch(date_key, state, materials, initial=initial)
+            self._last_patch_source = "model"
+            return patch
+        except Exception as exc:
+            logger.warning("Portrait LLM patch failed; skipping generation: %s", exc)
+            self._last_patch_source = "error"
+            return {}
 
     async def _maintain_stables(
         self,
@@ -2207,59 +2226,6 @@ class DailyPortraitMaintainer:
                 messages=messages,
                 **options,
             )
-
-    def _fallback_patch(self, materials: dict, *, initial: bool) -> dict:
-        add_recent = []
-        add_recent_activity = []
-        move_to_staging = []
-        recent_dates = self._recent_date_keys(str(materials.get("date") or ""))
-        for bucket in materials.get("buckets", [])[:8]:
-            scope = self._fallback_scope(bucket)
-            text = self._fallback_text(bucket, scope)
-            bucket_id = str(bucket.get("bucket_id") or "")
-            if (
-                bucket_id
-                and len(add_recent_activity) < 3
-                and (not initial or str(bucket.get("source_date") or "") in recent_dates)
-            ):
-                activity_text = self._fallback_activity_text(bucket)
-                if activity_text and self._norm(activity_text) not in {
-                    self._norm(item.get("text", "")) for item in add_recent_activity
-                }:
-                    add_recent_activity.append(
-                        {
-                            "text": activity_text,
-                            "evidence": [{"bucket_id": bucket_id}],
-                            "confidence": float(bucket.get("confidence") or 0.55),
-                        }
-                    )
-            if not scope or not text or not bucket_id:
-                continue
-            row = {
-                "scope": scope,
-                "text": text,
-                "evidence": [{"bucket_id": bucket_id}],
-                "confidence": float(bucket.get("confidence") or 0.55),
-            }
-            if initial and self._fallback_initial_staging(bucket):
-                move_to_staging.append(row)
-            else:
-                add_recent.append(row)
-        daily_summary = "；".join(
-            self._clip(item.get("name") or item.get("text"), 24)
-            for item in materials.get("buckets", [])[:3]
-            if not item.get("evergreen") and (item.get("name") or item.get("text"))
-        )
-        return {
-            "daily_summary": daily_summary,
-            "add_recent": add_recent,
-            "add_recent_activity": add_recent_activity,
-            "move_to_staging": move_to_staging,
-            "rewrite_mid_term": [],
-            "stable_candidate": [],
-            "profile_fact_candidate": [],
-            "skip": [],
-        }
 
     def _normalize_patch(self, patch: dict, materials: dict) -> tuple[dict, list[dict]]:
         if not isinstance(patch, dict):
@@ -3926,31 +3892,6 @@ class DailyPortraitMaintainer:
         )
         return "(?:" + "|".join(re.escape(term) for term in sorted(terms, key=len, reverse=True)) + ")"
 
-    def _fallback_scope(self, bucket_payload: dict) -> str:
-        tags = {str(tag).lower() for tag in bucket_payload.get("tags", []) or []}
-        domains = {str(item).lower() for item in bucket_payload.get("domain", []) or []}
-        text = self._clean_fallback_text(
-            str(bucket_payload.get("source_excerpt") or bucket_payload.get("text") or "")
-        )
-        if "profile_fact" in tags or bucket_payload.get("profile_kind"):
-            return "user"
-        if {"relationship_weather", "daily_impression", "weekly_impression"} & tags:
-            return "relationship"
-        if bucket_payload.get("type") == "feel" or bucket_payload.get("source") == "reflection":
-            return "persona"
-        if bucket_payload.get("anchor") or "恋爱" in domains or "relationship_event" in tags:
-            return "relationship"
-        if (
-            tags & {"project_event", "work_event", "task_event"}
-            or domains & {"记忆系统", "代码", "工作", "项目", "开发", "ai", "memory"}
-            or re.search(
-                rf"{self._user_reference_pattern()}.{{0,18}}(正在|最近在|继续|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做|关注|确认|在意)",
-                text,
-            )
-        ):
-            return "user"
-        return ""
-
     def _portrait_text_too_stylized(self, text: str) -> bool:
         return bool(
             re.search(
@@ -3958,66 +3899,6 @@ class DailyPortraitMaintainer:
                 str(text or ""),
             )
         )
-
-    def _fallback_initial_staging(self, bucket_payload: dict) -> bool:
-        tags = {str(tag).lower() for tag in bucket_payload.get("tags", []) or []}
-        if tags & {"relationship_weather", "daily_impression", "weekly_impression"}:
-            return False
-        name = str(bucket_payload.get("name") or "")
-        if re.search(r"\d{4}-\d{2}-\d{2}\s*(日印象|周印象)", name):
-            return False
-        return True
-
-    def _fallback_text(self, bucket_payload: dict, scope: str) -> str:
-        sections = bucket_payload.get("key_sections", []) if isinstance(bucket_payload, dict) else []
-
-        def first_section(*names: str) -> str:
-            wanted = {name.lower() for name in names}
-            for section in sections:
-                if not isinstance(section, dict):
-                    continue
-                if str(section.get("heading") or "").strip().lower() in wanted:
-                    text = str(section.get("text") or "").strip()
-                    if text:
-                        return text
-            return ""
-
-        if scope == "persona":
-            text = first_section("reflection", "assistant_reflection", "moment", "fact")
-        elif scope == "user":
-            text = first_section("fact", "moment")
-        else:
-            text = first_section("moment", "fact", "reflection", "assistant_reflection")
-        if not text:
-            text = str(bucket_payload.get("source_excerpt") or bucket_payload.get("text") or "")
-        return self._clean_fallback_text(text)
-
-    def _fallback_activity_text(self, bucket_payload: dict) -> str:
-        tags = {str(tag).lower() for tag in bucket_payload.get("tags", []) or []}
-        domains = {str(item).lower() for item in bucket_payload.get("domain", []) or []}
-        text = self._clean_fallback_text(
-            str(bucket_payload.get("source_excerpt") or bucket_payload.get("text") or "")
-        )
-        if not text:
-            return ""
-        project_like = bool(
-            tags & {"project_event", "work_event", "task_event"}
-            or domains & {"记忆系统", "代码", "工作", "项目", "开发"}
-        )
-        activity_like = bool(
-            re.search(
-                rf"{self._user_reference_pattern(include_first_person=True)}.{{0,12}}(最近在|这几天在|这两天在|正在|继续|开始|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做)",
-                text,
-            )
-            or re.search(r"(最近在|这几天在|这两天在|正在).{0,16}(推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做)", text)
-        )
-        if project_like and not activity_like:
-            activity_like = bool(re.search(r"(推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做|实现|开发|准备|加)", text))
-        if not activity_like:
-            return ""
-        if re.search(r"(关系天气|撒娇|亲密|喜欢被|确认我在)", text) and not project_like:
-            return ""
-        return self._clip(text, 120)
 
     def _clean_fallback_text(self, text: str) -> str:
         text = strip_wikilinks(str(text or ""))
