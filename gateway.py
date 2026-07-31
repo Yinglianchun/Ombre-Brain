@@ -9013,7 +9013,6 @@ class GatewayService:
             "rerank_score",
             "exact_anchor_score",
             "planner_lexical_match",
-            "planner_lexical_direct_match",
             "exact_anchor_match",
             "exact_anchor_terms",
             "exact_anchor_fields",
@@ -9099,8 +9098,7 @@ class GatewayService:
 
     def _session_debug_row_has_strong_evidence(self, row: dict[str, Any]) -> bool:
         if (
-            self._planner_lexical_direct_signal(row)
-            or row.get("exact_anchor_match")
+            row.get("exact_anchor_match")
             or row.get("authored_cue_match")
             or row.get("title_anchor_terms")
         ):
@@ -9126,7 +9124,6 @@ class GatewayService:
             }
             if strong_sources & {
                 "exact_anchor",
-                "planner_lexical",
                 "authored_cue",
             }:
                 return True
@@ -9144,8 +9141,7 @@ class GatewayService:
         if self._query_requests_direct_detail(query):
             return True
         if (
-            self._planner_lexical_direct_signal(item)
-            or item.get("exact_anchor_match")
+            item.get("exact_anchor_match")
             or item.get("authored_cue_match")
             or item.get("title_anchor_terms")
         ):
@@ -9170,10 +9166,7 @@ class GatewayService:
             return True
         if self._is_source_record_fragment_seed(moment):
             return True
-        if (
-            self._planner_lexical_direct_signal(moment)
-            or moment.get("exact_anchor_match")
-        ):
+        if moment.get("exact_anchor_match"):
             return True
         if str(moment.get("admission_reason") or moment.get("_admission_reason") or "") in {
             "strong_semantic",
@@ -9291,8 +9284,7 @@ class GatewayService:
         if self._query_requests_direct_detail(query) or self.recall_policy.is_detail_read_query(query):
             return True
         if (
-            self._planner_lexical_direct_signal(item)
-            or item.get("exact_anchor_match")
+            item.get("exact_anchor_match")
             or item.get("authored_cue_match")
             or item.get("title_anchor_terms")
         ):
@@ -10108,7 +10100,6 @@ class GatewayService:
             return False
         return bool(
             moment.get("exact_anchor_match")
-            or self._planner_lexical_direct_signal(moment)
             or moment.get("source_record_evidence")
         )
 
@@ -11306,8 +11297,7 @@ class GatewayService:
         if self._is_source_record_fragment_seed(moment):
             return True
         if (
-            self._planner_lexical_direct_signal(moment)
-            or moment.get("exact_anchor_match")
+            moment.get("exact_anchor_match")
             or moment.get("authored_cue_match")
             or moment.get("title_anchor_terms")
         ):
@@ -13786,9 +13776,6 @@ class GatewayService:
                     + alias_terms
                 )
             )
-            planner_lexical_direct_match = lexical_match and self._matched_query_terms_have_specific_evidence(
-                {"matched_query_terms": matched_query_terms}
-            )
             cooldown_multiplier = self.state_store.get_cooldown_multiplier(
                 session_id=session_id,
                 bucket_id=bucket_id,
@@ -13827,11 +13814,7 @@ class GatewayService:
                     + freshness_score * self.freshness_weight
                 ) * relevance_score
                 final_score = round(fusion_score * cooldown_multiplier, 4)
-            if (
-                planner_lexical_direct_match
-                or exact_match
-                or authored_cue_match
-            ):
+            if exact_match or authored_cue_match:
                 final_score = max(final_score, self.first_card_min_score)
             scored_candidates.append(
                 {
@@ -13860,7 +13843,6 @@ class GatewayService:
                     "cooldown_penalty": cooldown_penalty,
                     "dynamic_alpha_debug": alpha_debug if self.recall_fusion_mode == "dynamic" else {},
                     "planner_lexical_match": lexical_match,
-                    "planner_lexical_direct_match": planner_lexical_direct_match,
                     "planner_queries": [planner_query] if planner_query else [],
                     "matched_query_terms": matched_query_terms,
                     "specific_matched_query_terms": specific_matched_query_terms,
@@ -13917,7 +13899,6 @@ class GatewayService:
             item
             for item in scored_candidates
             if item["bucket"]["id"] not in recent_ids
-            or self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
             or item.get("authored_cue_match")
             or self._is_high_confidence_semantic_match(
@@ -14218,7 +14199,6 @@ class GatewayService:
                 "rerank_score",
                 "exact_anchor_score",
                 "planner_lexical_match",
-                "planner_lexical_direct_match",
                 "exact_anchor_match",
                 "exact_anchor_terms",
                 "exact_anchor_fields",
@@ -14250,21 +14230,6 @@ class GatewayService:
             )
             if isinstance(item, dict) and key in item
         }
-
-    def _planner_lexical_direct_signal(self, item: dict) -> bool:
-        if not isinstance(item, dict) or not item.get("planner_lexical_match"):
-            return False
-        if not item.get("planner_queries"):
-            return False
-        if "planner_lexical_direct_match" in item:
-            return bool(item.get("planner_lexical_direct_match"))
-        return self._matched_query_terms_have_specific_evidence(item)
-
-    def _matched_query_terms_have_specific_evidence(self, item: dict) -> bool:
-        terms = self._debug_str_list(item.get("matched_query_terms"))
-        if not terms:
-            return False
-        return any(self._matched_query_term_is_specific(term) for term in terms)
 
     def _matched_query_term_is_specific(self, term: Any) -> bool:
         key = self._compact_lookup_key(term)
@@ -14457,8 +14422,6 @@ class GatewayService:
             bucket_text_key = self._compact_lookup_key(self._date_recall_bucket_text(bucket))
             if any(self._compact_lookup_key(phrase) in bucket_text_key for phrase in protected_phrases):
                 labels.append("protected_phrase")
-        if self._planner_lexical_direct_signal(item):
-            labels.append("entity_match")
         if isinstance(bucket, dict) and self._is_identity_name_candidate_bucket(query, bucket):
             labels.append("identity_name_match")
         if isinstance(bucket, dict) and self._source_record_explicit_bucket_match_reason(query, bucket):
@@ -14491,7 +14454,6 @@ class GatewayService:
             "protected_phrase",
             "same_day_metadata",
             "exact_anchor",
-            "entity_match",
             "authored_cue",
             "identity_name_match",
             "source_record_exact",
@@ -14507,10 +14469,7 @@ class GatewayService:
     def _suppressed_bucket_moment_search_boost(self, query: str, item: dict) -> float:
         if not isinstance(item, dict):
             return 0.0
-        if (
-            self._planner_lexical_direct_signal(item)
-            or item.get("exact_anchor_match")
-        ):
+        if item.get("exact_anchor_match"):
             return 1.0
         if str(item.get("admission_reason") or "") == "session_hard_exclude":
             return 0.0
@@ -14565,7 +14524,6 @@ class GatewayService:
             return (
                 not bool(item.get("exact_anchor_match")),
                 not bool(item.get("authored_cue_match")),
-                not bool(self._planner_lexical_direct_signal(item)),
                 -self._safe_float(item.get("score"), 0.0),
                 self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
                 -self._safe_float(item.get("semantic_score"), 0.0),
@@ -14578,7 +14536,6 @@ class GatewayService:
             return (
                 not bool(item.get("exact_anchor_match")),
                 not bool(item.get("authored_cue_match")),
-                not bool(self._planner_lexical_direct_signal(item)),
                 item.get("rerank_score") is None,
                 -self._safe_float(item.get("combined_score", item.get("score")), 0.0),
                 -self._safe_float(item.get("score"), 0.0),
@@ -14595,7 +14552,6 @@ class GatewayService:
         return (
             not bool(item.get("exact_anchor_match")),
             not bool(item.get("authored_cue_match")),
-            not bool(self._planner_lexical_direct_signal(item)),
             -self._safe_float(item.get("semantic_score"), 0.0),
             -self._safe_float(item.get("keyword_score"), 0.0),
             self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
@@ -14612,7 +14568,6 @@ class GatewayService:
         if (
             item.get("exact_anchor_match")
             or item.get("authored_cue_match")
-            or self._planner_lexical_direct_signal(item)
         ):
             evidence_tier = 0
         elif item.get("title_anchor_terms"):
@@ -14700,8 +14655,7 @@ class GatewayService:
         if not isinstance(item, dict):
             return False
         return bool(
-            self._planner_lexical_direct_signal(item)
-            or item.get("exact_anchor_match")
+            item.get("exact_anchor_match")
             or item.get("authored_cue_match")
             or item.get("title_anchor_terms")
         )
@@ -14790,8 +14744,7 @@ class GatewayService:
             semantic_score=item.get("semantic_score"),
             rerank_score=item.get("rerank_score"),
             high_confidence_edge=bool(
-                self._planner_lexical_direct_signal(item)
-                or item.get("exact_anchor_match")
+                item.get("exact_anchor_match")
                 or item.get("authored_cue_match")
                 or item.get("semantic_rescue_direct_span")
                 or "title_anchor" in hard_evidence_labels
@@ -14955,10 +14908,7 @@ class GatewayService:
         )
 
     def _unselected_moment_has_reliable_recall_signal(self, query: str, moment: dict) -> bool:
-        if (
-            moment.get("exact_anchor_match")
-            or self._planner_lexical_direct_signal(moment)
-        ):
+        if moment.get("exact_anchor_match"):
             return True
         if not self._moment_has_query_topic_evidence(query, moment):
             return False
@@ -15214,8 +15164,7 @@ class GatewayService:
 
     def _dynamic_bucket_item_has_reliable_recall_signal(self, query: str, item: dict) -> bool:
         if (
-            self._planner_lexical_direct_signal(item)
-            or item.get("exact_anchor_match")
+            item.get("exact_anchor_match")
             or item.get("authored_cue_match")
             or item.get("title_anchor_terms")
         ):
@@ -15767,7 +15716,7 @@ class GatewayService:
             add_source(
                 "planner_lexical",
                 matched_terms=self._debug_str_list(item.get("matched_query_terms")),
-                direct_match=bool(self._planner_lexical_direct_signal(item)),
+                candidate_only=True,
             )
         if item.get("authored_cue_match"):
             add_source(
@@ -16699,8 +16648,7 @@ class GatewayService:
 
         signal = bucket.get("_recall_signal") if isinstance(bucket.get("_recall_signal"), dict) else {}
         reliable = bool(
-            self._planner_lexical_direct_signal(signal)
-            or signal.get("exact_anchor_match")
+            signal.get("exact_anchor_match")
             or signal.get("authored_cue_match")
             or self._is_high_confidence_semantic_match(
                 self._safe_float(signal.get("semantic_score"), 0.0)

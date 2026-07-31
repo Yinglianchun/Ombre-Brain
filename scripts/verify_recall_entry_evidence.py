@@ -197,6 +197,7 @@ def verify_retired_scaffolding_is_gone() -> None:
         "_word_map_direct_signal",
         "_word_map_low_frequency_direct_signal",
         "_keyword_multi_evidence_signal",
+        "_planner_lexical_direct_signal",
     ):
         assert not hasattr(GatewayService, name), name
 
