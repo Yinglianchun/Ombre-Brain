@@ -33,7 +33,7 @@ def build_service() -> GatewayService:
     service.gateway_tz = timezone.utc
     service.config = {
         "recall_thresholds": {
-            "vague_vector_min_score": 0.40,
+            "vector_min_score": 0.50,
             "explicit_vector_min_score": 0.55,
         }
     }
@@ -302,11 +302,11 @@ def verify_scene_admission_uses_only_authored_or_absolute_semantic_evidence() ->
         "content": "那晚我们一起修好了记忆网关。",
     }
 
-    weak_item = {"bucket": scene, "semantic_score": 0.39}
+    weak_item = {"bucket": scene, "semantic_score": 0.49}
     assert service._admit_bucket_for_recall("但是爱很伟大", weak_item) is False
     assert weak_item["admission_reason"] == "scene_without_authored_or_semantic_evidence"
 
-    semantic_item = {"bucket": scene, "semantic_score": 0.40}
+    semantic_item = {"bucket": scene, "semantic_score": 0.50}
     assert service._admit_bucket_for_recall("随便聊聊", semantic_item) is True
     assert semantic_item["admission_reason"] == "scene_strong_semantic"
 
@@ -319,10 +319,10 @@ def verify_scene_admission_uses_only_authored_or_absolute_semantic_evidence() ->
     assert service._admit_bucket_for_recall("为什么修网关时会担心", cue_item) is True
     assert cue_item["admission_reason"] == "scene_authored_evidence"
 
-    assert service._canonical_scene_recall_score(0.40) == 0.40
+    assert service._canonical_scene_recall_score(0.50) == 0.50
     assert service._dynamic_bucket_item_has_reliable_recall_signal(
         "普通查询",
-        {"bucket": scene, "semantic_score": 0.40},
+        {"bucket": scene, "semantic_score": 0.50},
     ) is True
     assert service._canonical_scene_recall_score(
         0.10,

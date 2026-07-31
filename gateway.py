@@ -14788,8 +14788,8 @@ class GatewayService:
         thresholds = self.config.get("recall_thresholds", {})
         if not isinstance(thresholds, dict):
             thresholds = {}
-        key = "explicit_vector_min_score" if self._bucket_is_tech_domain(bucket) else "vague_vector_min_score"
-        default = 0.55 if key == "explicit_vector_min_score" else 0.40
+        key = "explicit_vector_min_score" if self._bucket_is_tech_domain(bucket) else "vector_min_score"
+        default = 0.55 if key == "explicit_vector_min_score" else 0.50
         return self._clamp(self._safe_float(thresholds.get(key), default))
 
     def _item_has_high_confidence_semantic_evidence(
