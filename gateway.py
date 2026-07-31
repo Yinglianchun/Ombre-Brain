@@ -15982,6 +15982,8 @@ class GatewayService:
             "bucket_id": str(moment.get("bucket_id") or ""),
             "bucket_name": self._moment_bucket_title(moment),
             "moment_id": str(moment.get("moment_id") or ""),
+            "node_id": str(moment.get("node_id") or moment.get("moment_id") or ""),
+            "node_kind": str(moment.get("node_kind") or "legacy_moment"),
             "section": moment.get("section"),
             "admission_reason": admission_reason,
             "score": self._safe_float(moment.get("score"), 0.0),
