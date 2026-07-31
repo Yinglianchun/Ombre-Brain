@@ -14335,6 +14335,20 @@ class GatewayService:
         if str(meta.get("memory_value_source") or "") != "authored_scene":
             return []
         cues = normalize_scene_cues(meta.get("scene_cues"))
+        tag_derived_cue_keys = {
+            self._compact_lookup_key(value)
+            for value in normalize_scene_cues(
+                meta.get("migration_source_tags"),
+                limit=256,
+            )
+            if self._compact_lookup_key(value)
+        }
+        if tag_derived_cue_keys:
+            cues = [
+                cue
+                for cue in cues
+                if self._compact_lookup_key(cue) not in tag_derived_cue_keys
+            ]
         if not cues:
             return []
 

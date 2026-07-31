@@ -127,6 +127,21 @@ def verify_authored_cues_are_explicit_evidence() -> None:
             },
         },
     ) == ["修网关"]
+    migrated_scene = {
+        **authored_scene,
+        "metadata": {
+            **authored_scene["metadata"],
+            "scene_cues": ["老公", "人工写下的答辩称呼"],
+            "migration_source_tags": ["角色切换", "老公", "哥哥"],
+            "source": "scene_migration",
+            "write_contract": "scene-migration-v2",
+        },
+    }
+    assert service._bucket_authored_cue_terms("老公", migrated_scene) == []
+    assert service._bucket_authored_cue_terms(
+        "那次人工写下的答辩称呼",
+        migrated_scene,
+    ) == ["人工写下的答辩称呼"]
     assert service._explicit_lexical_score_basis(
         {"quoted-phrase": 0.88},
         {"scene-cue": ["提到黄色小花和名字的联系"]},
