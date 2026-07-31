@@ -111,6 +111,8 @@ def verify_retired_scaffolding_is_gone() -> None:
         "_route_domain_sentinel",
         "_dynamic_anchor_plan",
         "_query_is_category_overview",
+        "_bucket_has_reliable_recall_signal",
+        "_weak_bucket_evidence_block_reason",
     ):
         assert not hasattr(GatewayService, name), name
 

@@ -14878,21 +14878,6 @@ class GatewayService:
         }
         return [label for label in labels or [] if label in hard]
 
-    @staticmethod
-    def _weak_bucket_evidence_block_reason(labels: list[str]) -> str:
-        label_set = {str(label or "").strip() for label in labels or [] if str(label or "").strip()}
-        if not label_set:
-            return "no_hard_evidence"
-        if label_set == {"semantic_hit"}:
-            return "semantic_only"
-        if label_set.issubset({"retrieval_alias", "semantic_hit", "graph_related"}):
-            return "retrieval_alias_only"
-        if "category_seed" in label_set and label_set.issubset({"category_seed", "semantic_hit", "graph_related"}):
-            return "generic_category_only"
-        if label_set.issubset({"semantic_hit", "graph_related"}):
-            return "weak_evidence_only"
-        return "no_hard_evidence"
-
     def _suppressed_bucket_moment_search_boost(self, query: str, item: dict) -> float:
         if not isinstance(item, dict):
             return 0.0
@@ -15215,40 +15200,7 @@ class GatewayService:
                     **tech_rejection,
                 }
                 return False
-        if decision.admit_direct and decision.reason == "non_explicit_query":
-            if not self._bucket_has_reliable_recall_signal(query, item):
-                item["admission_reason"] = "low_recall_evidence"
-                return False
-        if decision.admit_direct and not hard_evidence_labels:
-            reason = self._weak_bucket_evidence_block_reason(evidence_labels)
-            item["admission_reason"] = reason
-            item["blocked_reason"] = reason
-            item["recall_policy_debug"] = {
-                **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
-                "evidence_labels": evidence_labels,
-                "hard_evidence_labels": hard_evidence_labels,
-                "blocked_reason": reason,
-            }
-            return False
         return decision.admit_direct
-
-    def _bucket_has_reliable_recall_signal(self, query: str, item: dict) -> bool:
-        if not isinstance(item, dict):
-            return False
-        if (
-            self._planner_lexical_direct_signal(item)
-            or item.get("exact_anchor_match")
-            or item.get("keyword_multi_evidence_signal")
-            or item.get("semantic_rescue_direct_span")
-        ):
-            return True
-        if self.recall_policy.has_strong_score(
-            semantic_score=item.get("semantic_score"),
-            rerank_score=item.get("rerank_score"),
-        ):
-            return True
-        bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else None
-        return bool(bucket and self._bucket_has_query_topic_evidence(query, bucket))
 
     def _can_bypass_anchor_with_strong_model_score(
         self,
