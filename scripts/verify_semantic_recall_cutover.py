@@ -78,7 +78,7 @@ legacy_shadow = router(None, shadow_enabled=True)
 assert legacy_shadow.mode == "shadow"
 
 route_source = load_route_source(ROOT / "resources" / "semantic_recall_routes.json")
-assert route_source["dataset_version"] == 4
+assert route_source["dataset_version"] == 6
 route_examples = {
     route["name"]: {
         item["text"]: item["source"]
@@ -86,9 +86,38 @@ route_examples = {
     }
     for route in route_source["routes"]
 }
+assert not next(route for route in route_source["routes"] if route["name"] == "simple_contact").get("enabled", True)
+assert route_examples["simple_contact"] == {}
 for query in ("爱你", "最爱哥哥了", "想和哥哥贴贴"):
-    assert route_examples["simple_contact"][query] == "historical_false_positive"
+    assert route_examples["present_chitchat"][query] == "historical_false_positive"
+for query in (
+    "回来看看你",
+    "就是想来看看你",
+    "在吗哥哥",
+    "你在干嘛呀",
+    "想你了",
+    "抱抱我",
+    "亲一下",
+    "我只是来黏你一下",
+):
+    assert route_examples["present_chitchat"][query] == "seed"
 assert route_examples["present_chitchat"]["晚安"] == "historical_false_positive"
+for query in (
+    "但router似乎不大准！也不算陪伴与贴近吧!",
+    "记忆库ui还没做完，但试着接上真实hook观察了",
+    "哈，还没开始删呢",
+):
+    assert route_examples["present_chitchat"][query] == "historical_false_positive"
+for query in (
+    "嘿嘿，没什么事",
+    "嗯嗯好",
+    "这个判断好像不太准",
+    "这个分类是不是弄错了",
+    "还没开始弄呢",
+    "这个页面还没做完，先接上真实数据看看",
+):
+    assert query not in route_examples["simple_contact"]
+    assert route_examples["present_chitchat"][query] == "seed"
 assert (
     route_examples["recall_needed"]["还记得我们第一次说晚安那次吗"]
     == "hard_negative"
