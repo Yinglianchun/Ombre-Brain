@@ -82,6 +82,36 @@ def verify_authored_cues_are_explicit_evidence() -> None:
         },
     }
     assert service._bucket_authored_cue_terms("黄色小花为什么和名字连在一起", legacy_bucket) == []
+    assert service._bucket_authored_cue_terms(
+        "但是爱很伟大",
+        {
+            **authored_scene,
+            "metadata": {
+                **authored_scene["metadata"],
+                "scene_cues": ["恋爱"],
+            },
+        },
+    ) == []
+    assert service._bucket_authored_cue_terms(
+        "我去修记忆库了",
+        {
+            **authored_scene,
+            "metadata": {
+                **authored_scene["metadata"],
+                "scene_cues": ["同质化修复"],
+            },
+        },
+    ) == []
+    assert service._bucket_authored_cue_terms(
+        "那晚修网关时发生了什么",
+        {
+            **authored_scene,
+            "metadata": {
+                **authored_scene["metadata"],
+                "scene_cues": ["修网关"],
+            },
+        },
+    ) == ["修网关"]
     assert service._explicit_lexical_score_basis(
         {"quoted-phrase": 0.88},
         {"scene-cue": ["提到黄色小花和名字的联系"]},

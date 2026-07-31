@@ -14298,7 +14298,7 @@ class GatewayService:
             return []
 
         query_key = self._compact_lookup_key(query)
-        specific_keys = {
+        query_term_keys = {
             self._compact_lookup_key(term)
             for term in self._specific_query_terms(query)
             if self._matched_query_term_is_specific(term)
@@ -14309,10 +14309,18 @@ class GatewayService:
             cue_key = self._compact_lookup_key(cue)
             if not cue_key:
                 continue
-            if (
-                cue_key in query_key
-                or any(term_key in cue_key for term_key in specific_keys)
-            ):
+            cue_term_keys = {
+                self._compact_lookup_key(term)
+                for term in self._specific_query_terms(cue)
+                if self._matched_query_term_is_specific(term)
+                and self._compact_lookup_key(term)
+            }
+            shared_keys = query_term_keys & cue_term_keys
+            paraphrase_match = (
+                any(len(key) >= 4 for key in shared_keys)
+                or len({key for key in shared_keys if len(key) >= 2}) >= 2
+            )
+            if cue_key in query_key or paraphrase_match:
                 matched.append(cue)
         return matched
 
