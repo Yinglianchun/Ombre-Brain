@@ -260,7 +260,6 @@ def build_config(args: argparse.Namespace, state_dir: Path, api_key: str) -> dic
         {
             "recall_fusion_mode": "dynamic",
             "semantic_candidate_top_k": args.semantic_top_k,
-            "query_planner_enabled": False,
         }
     )
     config["gateway"] = gateway
@@ -517,7 +516,6 @@ async def evaluate_diffusion_debug(
         "suppressed_moment_count": len(suppressed_moments),
         "suppressed_bucket_count": len(suppressed_buckets),
         "planner_skip_reason": str(planner_debug.get("skip_reason") or ""),
-        "relation_axis": list(planner_debug.get("relation_axis") or []),
         "related_memory_preview": related_memory[:500],
         "diffused": [compact_diffusion_debug(row) for row in diffused_debug_rows[: args.top]],
     }

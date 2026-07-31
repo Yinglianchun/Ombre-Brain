@@ -410,24 +410,6 @@ SHORT_CASUAL_ONLY_TERMS = frozenset(
     }
 )
 SHORT_TASTE_QUERY_TERMS = ("不好吃", "不好喝", "难吃", "难喝", "好吃", "好喝")
-AXIS_RELATION_QUERY_MARKERS = frozenset(
-    {
-        "有关",
-        "关联",
-        "相关",
-        "联系",
-        "关系",
-        "互相关联",
-        "互相带出",
-        "带出",
-        "连起来",
-        "连上",
-        "relate",
-        "related",
-        "relation",
-        "connection",
-    }
-)
 TASTE_OBJECT_TERMS = frozenset(
     {
         "饭",
@@ -967,7 +949,6 @@ class RecallQueryPlan:
     activated_axis_terms: tuple[str, ...]
     activated_axis_groups: tuple[tuple[str, ...], ...]
     activated_axis_multi: bool
-    auto_too_vague: bool
     short_taste_terms: tuple[str, ...]
     long_term_route: str
     skip_long_term_recall: bool
@@ -1349,10 +1330,7 @@ class RecallPolicy:
         allow_caution_diffusion = explicit_old_memory or str(context_mode or "").strip() in CAUTION_CONTEXT_MODES
         locatable_terms = tuple(self.locatable_query_terms(text))
         axis_terms, axis_groups, axis_multi = self._activated_axis_from_locatable_terms(text, locatable_terms)
-        skip_long_term_recall, skip_reason = self._long_term_skip_decision(
-            text,
-            locatable_terms=locatable_terms,
-        )
+        skip_long_term_recall, skip_reason = self._long_term_skip_decision(text)
         return RecallQueryPlan(
             query=text,
             wants_body_chain=wants_body_chain,
@@ -1369,7 +1347,6 @@ class RecallPolicy:
             activated_axis_terms=axis_terms,
             activated_axis_groups=axis_groups,
             activated_axis_multi=axis_multi,
-            auto_too_vague=self.is_auto_query_too_vague(text),
             short_taste_terms=tuple(self._short_taste_query_terms(text)),
             long_term_route="skip" if skip_long_term_recall else "search",
             skip_long_term_recall=skip_long_term_recall,
@@ -1401,11 +1378,6 @@ class RecallPolicy:
         if query_has_facet(query, "embodiment", self.options):
             body_groups = (("身体",), ("具身",))
             return ("身体", "具身"), body_groups, False
-
-        relation_groups = self._relation_axis_groups(query, terms)
-        if relation_groups:
-            relation_terms = tuple(dict.fromkeys(term for group in relation_groups for term in group))
-            return relation_terms[:8], relation_groups, len(relation_groups) > 1
 
         primary = self._primary_axis_term(terms)
         primary_key = self._compact_entity_keyword(primary)
@@ -1463,55 +1435,6 @@ class RecallPolicy:
                 return True
             start = index + max(1, len(term_key))
 
-    def _relation_axis_groups(
-        self,
-        query: str,
-        terms: list[str],
-    ) -> tuple[tuple[str, ...], ...]:
-        if not self._query_has_axis_relation_marker(query):
-            return ()
-        leaves = self._relation_axis_leaf_terms(terms)
-        groups: list[tuple[str, ...]] = []
-        seen = set()
-        for term in leaves[:6]:
-            key = self._compact_entity_keyword(term)
-            if not key or len(key) < 2:
-                continue
-            if key in seen:
-                continue
-            seen.add(key)
-            groups.append((term,))
-        return tuple(groups)
-
-    def _relation_axis_leaf_terms(self, terms: list[str]) -> list[str]:
-        keyed = [
-            (str(term or "").strip(), self._compact_entity_keyword(term))
-            for term in terms
-            if str(term or "").strip() and self._compact_entity_keyword(term)
-        ]
-        output: list[str] = []
-        seen = set()
-        keys = [key for _term, key in keyed]
-        for term, key in keyed:
-            contained_terms = [
-                other
-                for other in keys
-                if other != key and len(other) >= 2 and other in key
-            ]
-            if len(contained_terms) >= 2:
-                continue
-            if key in seen:
-                continue
-            seen.add(key)
-            output.append(term)
-        return output or [term for term, _key in keyed]
-
-    @classmethod
-    def _query_has_axis_relation_marker(cls, query: str) -> bool:
-        text = str(query or "").lower()
-        compact = re.sub(r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+", "", text)
-        return any(marker in text or marker in compact for marker in AXIS_RELATION_QUERY_MARKERS)
-
     @staticmethod
     def _axis_terms_related(primary_key: str, term_key: str) -> bool:
         return bool(primary_key and term_key and (term_key in primary_key or primary_key in term_key))
@@ -1568,60 +1491,17 @@ class RecallPolicy:
     def _long_term_skip_decision(
         self,
         query: str,
-        *,
-        locatable_terms: tuple[str, ...],
     ) -> tuple[bool, str]:
         text = str(query or "").strip()
         if not text:
             return True, "empty_query"
-        if self.is_auto_query_too_vague(text):
-            return True, "auto_vague_query"
-        protected_phrases = tuple(extract_protected_phrases(text))
-        if self._query_has_recall_system_meta_terms(text) and not locatable_terms and not protected_phrases:
-            return True, "recall_meta_without_target"
-        if (
-            not locatable_terms
-            and not protected_phrases
-            and not self._query_has_explicit_recall_marker(text)
-            and self._query_has_low_signal_shell(text)
-            and not self.is_emotional_reason_lookup(text)
-            and not self.is_detail_read_query(text)
-            and not self.requires_topic_evidence(text)
-            and not query_has_facet(text, "embodiment", self.options)
-        ):
-            return True, "no_locatable_terms"
         return False, ""
-
-    @staticmethod
-    def _query_has_explicit_recall_marker(query: str) -> bool:
-        text = str(query or "").strip().lower()
-        return bool(
-            text
-            and any(
-                str(marker or "").strip().lower() in text
-                for marker in query_intent_terms("memory_sentinel.explicit_recall_markers")
-                if str(marker or "").strip()
-            )
-        )
-
-    def _query_has_recall_system_meta_terms(self, query: str) -> bool:
-        compact = self._compact_entity_keyword(query)
-        if not compact:
-            return False
-        return any(
-            self._compact_entity_keyword(term) in compact
-            for term in RECALL_SYSTEM_META_TERMS
-            if self._compact_entity_keyword(term)
-        )
 
     def build_query_anchor_plan(self, query: str) -> QueryAnchorPlan:
         return build_query_anchor_plan(query, self.options)
 
     def direct_candidate_satisfies_anchor_plan(self, node: dict, plan: QueryAnchorPlan) -> bool:
         return direct_candidate_satisfies_anchor_plan(node, plan)
-
-    def has_axis_relation_marker(self, query: str) -> bool:
-        return self._query_has_axis_relation_marker(query)
 
     def _query_explicitly_requests_old_memory(self, query: str) -> bool:
         if not str(query or "").strip():
@@ -2428,8 +2308,6 @@ class RecallPolicy:
         if query_has_facet(raw, "embodiment", self.options):
             add("身体")
             add("具身")
-        for term in self._relation_axis_locatable_terms(raw, specific_terms):
-            add(term)
         for term in self._event_place_locatable_terms(raw, specific_terms):
             add(term, force=True)
 
@@ -2532,29 +2410,6 @@ class RecallPolicy:
         if flag.startswith("n") or flag in {"s"}:
             return True
         return bool(re.search(r"\d", key) and re.search(r"[a-z\u4e00-\u9fff]", key))
-
-    def _relation_axis_locatable_terms(self, raw: str, specific_terms: list[str]) -> list[str]:
-        output: list[str] = []
-        if not self._query_has_axis_relation_marker(raw):
-            terms = []
-        else:
-            terms = specific_terms
-        for term in terms:
-            key = self._compact_entity_keyword(term)
-            if not key:
-                continue
-            if key in LOCATABLE_GENERIC_TERMS or self._is_recall_context_term(key):
-                continue
-            if re.fullmatch(r"[一二三四五六七八九十百千万两0-9]+年(?:后)?", key):
-                output.append(term)
-                continue
-            if key in {"承诺", "约定", "未来"}:
-                output.append(term)
-        if not output:
-            for match in re.finditer(r"[一二三四五六七八九十百千万两0-9]+年(?:后)?", str(raw or "")):
-                value = match.group(0)
-                output.append(value[:-1] if value.endswith("后") else value)
-        return output
 
     def _event_place_locatable_terms(self, raw: str, specific_terms: list[str]) -> list[str]:
         compact = self._compact_entity_keyword(raw)
@@ -2821,17 +2676,10 @@ class RecallPolicy:
         high_confidence_edge: bool = False,
         context_only: bool = False,
         auto: bool = False,
-        semantic_entry_routed: bool = False,
     ) -> RecallPolicyDecision:
         query_plan = query_plan or self.plan_query(query)
         if has_topic_evidence is None:
             has_topic_evidence = self.node_has_topic_evidence(query, node)
-        legacy_auto_vague_would_suppress = bool(
-            auto and query_plan.auto_too_vague and not high_confidence_edge
-        )
-        auto_too_vague = bool(
-            legacy_auto_vague_would_suppress and not semantic_entry_routed
-        )
         debug = {
             "requires_topic_evidence": query_plan.requires_topic_evidence,
             "has_topic_evidence": bool(has_topic_evidence),
@@ -2842,20 +2690,7 @@ class RecallPolicy:
             "high_confidence_edge": bool(high_confidence_edge),
             "context_only": bool(context_only),
             "auto": bool(auto),
-            "auto_too_vague": bool(auto_too_vague),
-            "semantic_entry_routed": bool(semantic_entry_routed),
-            "legacy_auto_vague_would_suppress": legacy_auto_vague_would_suppress,
         }
-
-        if auto_too_vague:
-            return RecallPolicyDecision(
-                admit_direct=False,
-                admit_diffused=False,
-                seed_allowed=False,
-                reason="auto_vague_query_without_topic",
-                suppressed=True,
-                debug=debug,
-            )
 
         if context_only:
             return RecallPolicyDecision(

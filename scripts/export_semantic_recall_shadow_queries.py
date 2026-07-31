@@ -29,19 +29,12 @@ def _legacy_snapshot(payload_text: str) -> dict[str, Any]:
     except (TypeError, json.JSONDecodeError):
         payload = {}
     payload = payload if isinstance(payload, dict) else {}
-    memory_sentinel = payload.get("memory_sentinel_debug")
-    memory_sentinel = memory_sentinel if isinstance(memory_sentinel, dict) else {}
-    domain_sentinel = payload.get("domain_sentinel_debug")
-    domain_sentinel = domain_sentinel if isinstance(domain_sentinel, dict) else {}
     query_planner = payload.get("query_planner_debug")
     query_planner = query_planner if isinstance(query_planner, dict) else {}
     timing = payload.get("prepare_timing_debug")
     timing = timing if isinstance(timing, dict) else {}
     return {
         "available": bool(payload),
-        "memory_sentinel_called": bool(memory_sentinel.get("called")),
-        "memory_sentinel_route": str(memory_sentinel.get("route") or ""),
-        "domain_sentinel_called": bool(domain_sentinel.get("called")),
         "query_planner_triggered": bool(query_planner.get("triggered")),
         "query_planner_skip_reason": str(query_planner.get("skip_reason") or ""),
         "skip_broad_dynamic_recall": (

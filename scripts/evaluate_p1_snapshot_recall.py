@@ -88,7 +88,6 @@ async def select_buckets(
         all_buckets,
         search_query=service._dynamic_recall_search_query(query),
         include_query_planner_debug=True,
-        allow_query_planner=False,
         allow_semantic_session_dedupe=False,
         allow_rerank=False,
     )
@@ -270,7 +269,6 @@ async def main() -> int:
         config["gateway"] = {
             **dict(config.get("gateway") or {}),
             "retrieval_mode": "bucket",
-            "query_planner_enabled": False,
             "word_map_hint_enabled": False,
         }
         embedding = dict(config.get("embedding") or {})

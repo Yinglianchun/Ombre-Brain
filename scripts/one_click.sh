@@ -529,11 +529,6 @@ gateway:
   portrait_memory_budget: 360
   portrait_memory_max_sources: 8
   portrait_memory_include_anchors: false
-  query_planner_enabled: true
-  query_planner_model: ""
-  query_planner_min_chars: 16
-  query_planner_max_queries: 3
-  query_planner_max_tokens: 360
   memory_detail_recall_enabled: false
   memory_detail_recall_max_ids: 3
   memory_detail_recall_budget: 1200

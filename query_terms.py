@@ -178,65 +178,6 @@ DATE_RECALL_QUERY_SHELL_TERMS = frozenset(
     }
 )
 
-MEMORY_SENTINEL_RESIDUE_STRIP_TERMS = frozenset(
-    {
-        *DEFAULT_AI_ADDRESS_TERMS,
-        "乖乖",
-        "想你了",
-        "想你",
-        "想我吗",
-        "想我",
-        "抱抱",
-        "抱我",
-        "抱一下",
-        "亲亲",
-        "亲一下",
-        "贴贴",
-        "蹭蹭",
-        "爱你",
-        "爱我吗",
-        "爱我",
-        "mua",
-        "muah",
-        "kiss",
-        "hug",
-        "missyou",
-        "loveyou",
-        "loveu",
-    }
-)
-
-LOW_SIGNAL_AFFECTION_TERMS = frozenset(
-    {
-        *DEFAULT_AI_ADDRESS_TERMS,
-        "乖乖",
-        "想你",
-        "爱你",
-        "抱抱",
-        "亲亲",
-        "贴贴",
-    }
-)
-
-LOW_SIGNAL_CHECKIN_TERMS = frozenset(
-    {
-        "ping",
-        "test",
-        "ok",
-        "hi",
-        "hello",
-        "哈哈",
-        "嗯嗯",
-        "测试",
-        "想你",
-        "想你了",
-        "想你了抱抱",
-        "抱抱",
-        "在吗",
-        *(f"{address}在吗" for address in DEFAULT_AI_ADDRESS_TERMS),
-    }
-)
-
 RECALL_SYSTEM_META_TERMS = frozenset(
     {
         "关键词",
@@ -346,7 +287,6 @@ SOURCE_RECORD_FRAGMENT_TOPIC_STOPWORDS = QUERY_PLANNER_GENERIC_TERMS | frozenset
     }
 ) | frozenset(DEFAULT_AI_ADDRESS_TERMS)
 
-CHECKIN_TRAILING_PARTICLES = ("呢", "呀", "啊", "嘛", "吗", "么", "?", "？", "啦", "喔", "哦")
 LEADING_LOOKUP_ADDRESS_FOLLOWUPS = ("知道", "记得", "记不记得", "想起", "想起来", "问", "说")
 LEADING_LOOKUP_REASON_MARKERS = ("为什么", "怎么", "为何")
 

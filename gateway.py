@@ -43,7 +43,6 @@ from memory_edges import (
     legacy_moment_edges_for_recall,
 )
 from scene_linker import SceneEdgeStore
-from entity_edges import EntityEdgeStore
 from memory_moments import MemoryMomentStore, parse_bucket_moments, preview_bucket_moment_chunks
 from memory_relevance import (
     active_facets,
@@ -59,7 +58,6 @@ from memory_relevance import (
     recall_topic_query,
     relevance_multiplier,
 )
-from query_prompts import QUERY_PLANNER_SYSTEM_PROMPT
 from query_understanding import (
     query_intent_rules,
     query_intent_term_set,
@@ -82,14 +80,10 @@ from memory_layers import (
 )
 from memory_metadata import normalize_domain_key, normalize_memory_metadata
 from query_terms import (
-    CHECKIN_TRAILING_PARTICLES,
     DEFAULT_AI_ADDRESS_TERMS,
     GENERIC_LEXICAL_STOPWORDS,
     LEADING_LOOKUP_ADDRESS_FOLLOWUPS,
     LEADING_LOOKUP_REASON_MARKERS,
-    LOW_SIGNAL_AFFECTION_TERMS,
-    LOW_SIGNAL_CHECKIN_TERMS,
-    MEMORY_SENTINEL_RESIDUE_STRIP_TERMS,
     QUERY_PLANNER_GENERIC_TERMS,
     SOURCE_RECORD_FRAGMENT_TOPIC_STOPWORDS,
     date_recall_shell_terms,
@@ -137,17 +131,6 @@ GENERIC_LEXICAL_STOPWORD_KEYS = frozenset(
 FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
 RETRYABLE_UPSTREAM_STATUS_CODES = {401, 403, 429, 500, 502, 503, 504}
 DUPLICATE_CONVERSATION_TURN_WINDOW_SECONDS = 120
-DOMAIN_SENTINEL_ALLOWED_DOMAINS = frozenset(
-    {
-        "relationship",
-        "intimacy",
-        "life",
-        "tech",
-        "project",
-        "general",
-    }
-)
-
 SEMANTIC_RESCUE_SYSTEM_PROMPT = """You are a strict memory evidence verifier.
 Select at most one candidate only when its content directly supports the user's current query on one provided axis.
 Return JSON only with selected_bucket_id, direct_evidence_span, and matched_axis.
@@ -205,30 +188,6 @@ GENERIC_KEYWORD_MATCH_TERMS = WORD_MAP_CATEGORY_SEED_TERMS | frozenset(
         "玩过",
     }
 )
-DYNAMIC_ANCHOR_CATEGORY_OVERVIEW_MARKERS = (
-    "哪些",
-    "哪几个",
-    "哪几种",
-    "有什么",
-    "都是什么",
-    "都有",
-    "列举",
-    "列一下",
-    "讲过什么",
-    "玩过什么",
-    "看过什么",
-    "读过什么",
-    "做过什么",
-)
-DYNAMIC_ANCHOR_CATEGORY_BLOCKED_KINDS = frozenset(
-    {
-        "preference",
-        "profile_fact",
-        "reflection",
-        "relationship_weather",
-        "affect_anchor",
-    }
-)
 MEMORY_DETAIL_REQUEST_RE = re.compile(
     r"^\s*\[memory_detail\s+ids\s*=\s*([\"'])(?P<ids>[^\"']+)\1\s*\]\s*",
     re.IGNORECASE,
@@ -265,41 +224,6 @@ EXACT_ANCHOR_COMPOUND_RE = re.compile(
 IDENTITY_NAME_INTENT_MARKERS = query_intent_terms("identity_name.intent_markers")
 IDENTITY_NAME_EVENT_MARKERS = query_intent_terms("identity_name.event_markers")
 DATE_RECALL_CHAT_MARKERS = query_intent_terms("date_recall.chat_markers")
-DATE_RECALL_ROLE_SENSITIVE_MARKERS = (
-    "谁说的",
-    "谁说过",
-    "谁说",
-    "谁提的",
-    "谁提过",
-    "谁提到",
-    "谁提",
-    "谁讲的",
-    "谁讲过",
-    "谁讲",
-    "谁问的",
-    "谁问",
-    "谁写的",
-    "谁写",
-    "谁发的",
-    "谁发",
-    "谁让",
-    "谁要",
-    "谁打算",
-    "是谁说的",
-    "是谁说",
-    "是谁提的",
-    "是谁提",
-    "原话",
-    "原文",
-    "当时怎么说",
-    "具体怎么说",
-    "怎么说的",
-)
-DATE_RECALL_ROLE_QUERY_SHELL_TERMS = frozenset(DATE_RECALL_ROLE_SENSITIVE_MARKERS)
-MEMORY_SENTINEL_RESIDUE_STOP_TERMS = query_intent_term_set("memory_sentinel.residue_stop_terms")
-MEMORY_SENTINEL_RESIDUE_PREFIXES = query_intent_terms("memory_sentinel.residue_prefixes")
-MEMORY_SENTINEL_SKIP_ONLY_TERMS = query_intent_term_set("memory_sentinel.skip_only_terms")
-MEMORY_SENTINEL_TONE_ONLY_MARKERS = query_intent_term_set("memory_sentinel.tone_only_markers")
 EXTERNAL_CONTEXT_ATTACHMENT_RE = re.compile(
     r"<attachment\b[^>]*>[\s\S]*?</attachment>",
     re.IGNORECASE,
@@ -398,56 +322,6 @@ PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feelin
 MOMENT_CHUNK_SHADOW_TARGET_CHARS = 320
 MOMENT_CHUNK_SHADOW_MAX_CHARS = 520
 MOMENT_CHUNK_SHADOW_MIN_TAIL_CHARS = 100
-DEFAULT_AXIS_LITE_TECHNICAL_AXIS_TERMS = (
-    "esp32",
-    "mpr121",
-    "sqlite",
-    "模块",
-    "硬件",
-    "接口",
-    "端点",
-    "api",
-    "gateway",
-    "bridge",
-    "mcp",
-    "embedding",
-    "rerank",
-    "代码",
-    "开源项目",
-)
-DEFAULT_AXIS_LITE_TECHNICAL_DATABASE_TERMS = (
-    "schema",
-    "端点",
-    "接口",
-    "代码",
-    "实现",
-    "导入",
-    "索引",
-    "查询",
-    "字段",
-    "表结构",
-    "迁移",
-    "sqlite",
-    "sql",
-)
-DEFAULT_AXIS_LITE_TECHNICAL_DOMAIN_TERMS = (
-    "projectcode",
-    "hardwareprotocol",
-    "hardware",
-    "code",
-    "debug",
-    "技术",
-    "技术计划",
-    "项目",
-    "工程",
-    "代码",
-    "硬件",
-    "协议",
-    "数据库",
-    "开发",
-)
-
-
 class GatewayService:
     """
     OpenAI-compatible gateway that injects Ombre memory before forwarding
@@ -482,7 +356,6 @@ class GatewayService:
         self.reranker_engine = reranker_engine or RerankerEngine(config)
         self.memory_edge_store = MemoryEdgeStore(config)
         self.scene_edge_store = SceneEdgeStore(config, create=False)
-        self.entity_edge_store = EntityEdgeStore(config)
         self.memory_node_store = memory_node_store or MemoryNodeStore(config)
         self.memory_moment_store = MemoryMomentStore(config)
         self._moment_graph_cache_signature = ""
@@ -494,26 +367,6 @@ class GatewayService:
         ] = ((0, 0), ((0, 0), (0, 0)))
         self._moment_graph_cache_store_stamp: tuple[int, int] = (0, 0)
         self.relevance_options = memory_relevance_options_from_config(config)
-        self.axis_lite_cfg = (
-            self.gateway_cfg.get("axis_lite", {})
-            if isinstance(self.gateway_cfg.get("axis_lite", {}), dict)
-            else {}
-        )
-        self.axis_lite_technical_axis_terms = self._axis_lite_config_terms(
-            self.axis_lite_cfg,
-            "technical_axis_terms",
-            DEFAULT_AXIS_LITE_TECHNICAL_AXIS_TERMS,
-        )
-        self.axis_lite_technical_database_terms = self._axis_lite_config_terms(
-            self.axis_lite_cfg,
-            "technical_database_terms",
-            DEFAULT_AXIS_LITE_TECHNICAL_DATABASE_TERMS,
-        )
-        self.axis_lite_technical_domain_terms = self._axis_lite_config_terms(
-            self.axis_lite_cfg,
-            "technical_domain_terms",
-            DEFAULT_AXIS_LITE_TECHNICAL_DOMAIN_TERMS,
-        )
         self.state_store = state_store or GatewayStateStore(
             os.path.join(config["buckets_dir"], "gateway_state.db")
         )
@@ -557,26 +410,6 @@ class GatewayService:
             0,
             int(self.gateway_cfg.get("conversation_turns_max_entries", 500)),
         )
-        self.memory_sentinel_enabled = self._bool_config_value(
-            self.gateway_cfg.get("memory_sentinel_enabled"),
-            True,
-        )
-        self.domain_sentinel_enabled = self._bool_config_value(
-            self.gateway_cfg.get("domain_sentinel_enabled"),
-            True,
-        )
-        self.domain_sentinel_model = self._resolve_domain_sentinel_model()
-        self.domain_sentinel_base_url = self._resolve_domain_sentinel_base_url()
-        self.domain_sentinel_api_key = self._resolve_domain_sentinel_api_key()
-        self.domain_sentinel_max_tokens = max(
-            128,
-            min(800, int(self.gateway_cfg.get("domain_sentinel_max_tokens", 260))),
-        )
-        self.domain_sentinel_timeout_seconds = max(
-            1.0,
-            min(30.0, float(self.gateway_cfg.get("domain_sentinel_timeout_seconds", 4.0))),
-        )
-        self.domain_sentinel_enable_thinking = False
         self.dynamic_top_k = int(self.gateway_cfg.get("dynamic_top_k", 10))
         self.semantic_candidate_top_k = max(
             self.dynamic_top_k,
@@ -777,26 +610,6 @@ class GatewayService:
             rerank_threshold=self.recall_admission_rerank_score,
             ai_reaction_names=[self.identity.get("ai_name")],
         )
-        self.query_planner_enabled = self._bool_config_value(
-            self.gateway_cfg.get("query_planner_enabled"),
-            False,
-        )
-        (
-            self.query_planner_model,
-            self.query_planner_uses_dehydrator,
-        ) = self._resolve_query_planner_model()
-        self.query_planner_min_chars = max(0, int(self.gateway_cfg.get("query_planner_min_chars", 16)))
-        self.query_planner_max_queries = max(1, min(3, int(self.gateway_cfg.get("query_planner_max_queries", 3))))
-        self.query_planner_max_tokens = max(128, int(self.gateway_cfg.get("query_planner_max_tokens", 360)))
-        self.query_planner_supplemental_semantic = self._bool_config_value(
-            self.gateway_cfg.get("query_planner_supplemental_semantic"),
-            False,
-        )
-        self.query_planner_score_bonus = self._clamp(
-            float(self.gateway_cfg.get("query_planner_score_bonus", 0.04)),
-            0.0,
-            0.30,
-        )
         self.semantic_rescue_enabled = self._bool_config_value(
             self.gateway_cfg.get("semantic_rescue_enabled"),
             False,
@@ -904,21 +717,11 @@ class GatewayService:
                 "just_now_context_hours": self.just_now_context_hours,
                 "just_now_context_max_turns": self.just_now_context_max_turns,
                 "just_now_context_budget": self.just_now_context_budget,
-                "memory_sentinel_enabled": self.memory_sentinel_enabled,
                 "semantic_recall_router": {
                     "mode": self.semantic_recall_router.mode,
                     "enabled": self.semantic_recall_router.enabled,
                     "active": self.semantic_recall_router.active,
                 },
-                "domain_sentinel_enabled": self.domain_sentinel_enabled,
-                "domain_sentinel_model": self.domain_sentinel_model,
-                "domain_sentinel_base_url": self.domain_sentinel_base_url,
-                "domain_sentinel_api_ready": bool(
-                    self.domain_sentinel_base_url and self.domain_sentinel_api_key
-                ),
-                "domain_sentinel_enable_thinking": self.domain_sentinel_enable_thinking,
-                "domain_sentinel_max_tokens": self.domain_sentinel_max_tokens,
-                "domain_sentinel_timeout_seconds": self.domain_sentinel_timeout_seconds,
                 "date_persona_trace_enabled": self.date_persona_trace_enabled,
                 "date_persona_trace_budget": self.date_persona_trace_budget,
                 "date_persona_trace_max_events": self.date_persona_trace_max_events,
@@ -985,21 +788,11 @@ class GatewayService:
             "just_now_context_max_turns": self.just_now_context_max_turns,
             "just_now_context_budget": self.just_now_context_budget,
             "conversation_turns_max_entries": self.conversation_turns_max_entries,
-            "memory_sentinel_enabled": self.memory_sentinel_enabled,
             "semantic_recall_router": {
                 "mode": self.semantic_recall_router.mode,
                 "enabled": self.semantic_recall_router.enabled,
                 "active": self.semantic_recall_router.active,
             },
-            "domain_sentinel_enabled": self.domain_sentinel_enabled,
-            "domain_sentinel_model": self.domain_sentinel_model,
-            "domain_sentinel_base_url": self.domain_sentinel_base_url,
-            "domain_sentinel_api_ready": bool(
-                self.domain_sentinel_base_url and self.domain_sentinel_api_key
-            ),
-            "domain_sentinel_enable_thinking": self.domain_sentinel_enable_thinking,
-            "domain_sentinel_max_tokens": self.domain_sentinel_max_tokens,
-            "domain_sentinel_timeout_seconds": self.domain_sentinel_timeout_seconds,
             "date_persona_trace_enabled": self.date_persona_trace_enabled,
             "date_persona_trace_budget": self.date_persona_trace_budget,
             "date_persona_trace_max_events": self.date_persona_trace_max_events,
@@ -1028,11 +821,6 @@ class GatewayService:
             "portrait_memory_budget": self.portrait_memory_budget,
             "portrait_memory_max_sources": self.portrait_memory_max_sources,
             "portrait_memory_include_anchors": self.portrait_memory_include_anchors,
-            "query_planner_enabled": self.query_planner_enabled,
-            "query_planner_model": self.query_planner_model,
-            "query_planner_min_chars": self.query_planner_min_chars,
-            "query_planner_max_queries": self.query_planner_max_queries,
-            "query_planner_max_tokens": self.query_planner_max_tokens,
             "semantic_rescue_enabled": self.semantic_rescue_enabled,
             "semantic_rescue_candidate_limit": self.semantic_rescue_candidate_limit,
             "semantic_rescue_max_tokens": self.semantic_rescue_max_tokens,
@@ -1352,51 +1140,6 @@ class GatewayService:
             self.conversation_turns_max_entries = max(0, int(payload["conversation_turns_max_entries"]))
             self.gateway_cfg["conversation_turns_max_entries"] = self.conversation_turns_max_entries
             updated.append("gateway.conversation_turns_max_entries")
-        if "memory_sentinel_enabled" in payload:
-            self.memory_sentinel_enabled = self._bool_config_value(
-                payload["memory_sentinel_enabled"],
-                True,
-            )
-            self.gateway_cfg["memory_sentinel_enabled"] = self.memory_sentinel_enabled
-            updated.append("gateway.memory_sentinel_enabled")
-        if "domain_sentinel_enabled" in payload:
-            self.domain_sentinel_enabled = self._bool_config_value(
-                payload["domain_sentinel_enabled"],
-                True,
-            )
-            self.gateway_cfg["domain_sentinel_enabled"] = self.domain_sentinel_enabled
-            updated.append("gateway.domain_sentinel_enabled")
-        if "domain_sentinel_model" in payload:
-            configured_model = str(payload["domain_sentinel_model"] or "").strip()
-            self.domain_sentinel_model = self._resolve_domain_sentinel_model(configured_model)
-            self.gateway_cfg["domain_sentinel_model"] = configured_model
-            updated.append("gateway.domain_sentinel_model")
-        if "domain_sentinel_base_url" in payload:
-            configured_base_url = str(payload["domain_sentinel_base_url"] or "").strip()
-            self.domain_sentinel_base_url = self._resolve_domain_sentinel_base_url(configured_base_url)
-            self.gateway_cfg["domain_sentinel_base_url"] = configured_base_url
-            updated.append("gateway.domain_sentinel_base_url")
-        if "domain_sentinel_api_key" in payload and payload["domain_sentinel_api_key"]:
-            self.domain_sentinel_api_key = str(payload["domain_sentinel_api_key"] or "").strip()
-            self.gateway_cfg["domain_sentinel_api_key"] = self.domain_sentinel_api_key
-            updated.append("gateway.domain_sentinel_api_key")
-        if "domain_sentinel_enable_thinking" in payload:
-            self.gateway_cfg["domain_sentinel_enable_thinking"] = False
-            updated.append("gateway.domain_sentinel_enable_thinking")
-        if "domain_sentinel_max_tokens" in payload:
-            self.domain_sentinel_max_tokens = max(
-                64,
-                min(800, int(payload["domain_sentinel_max_tokens"])),
-            )
-            self.gateway_cfg["domain_sentinel_max_tokens"] = self.domain_sentinel_max_tokens
-            updated.append("gateway.domain_sentinel_max_tokens")
-        if "domain_sentinel_timeout_seconds" in payload:
-            self.domain_sentinel_timeout_seconds = max(
-                1.0,
-                min(30.0, float(payload["domain_sentinel_timeout_seconds"])),
-            )
-            self.gateway_cfg["domain_sentinel_timeout_seconds"] = self.domain_sentinel_timeout_seconds
-            updated.append("gateway.domain_sentinel_timeout_seconds")
         if "date_persona_trace_enabled" in payload:
             self.date_persona_trace_enabled = self._bool_config_value(
                 payload["date_persona_trace_enabled"],
@@ -1532,30 +1275,6 @@ class GatewayService:
             )
             self.gateway_cfg["portrait_memory_include_anchors"] = self.portrait_memory_include_anchors
             updated.append("gateway.portrait_memory_include_anchors")
-        if "query_planner_enabled" in payload:
-            self.query_planner_enabled = self._bool_config_value(payload["query_planner_enabled"], False)
-            self.gateway_cfg["query_planner_enabled"] = self.query_planner_enabled
-            updated.append("gateway.query_planner_enabled")
-        if "query_planner_model" in payload:
-            configured_model = str(payload["query_planner_model"] or "").strip()
-            (
-                self.query_planner_model,
-                self.query_planner_uses_dehydrator,
-            ) = self._resolve_query_planner_model(configured_model)
-            self.gateway_cfg["query_planner_model"] = configured_model
-            updated.append("gateway.query_planner_model")
-        if "query_planner_min_chars" in payload:
-            self.query_planner_min_chars = max(0, int(payload["query_planner_min_chars"]))
-            self.gateway_cfg["query_planner_min_chars"] = self.query_planner_min_chars
-            updated.append("gateway.query_planner_min_chars")
-        if "query_planner_max_queries" in payload:
-            self.query_planner_max_queries = max(1, min(3, int(payload["query_planner_max_queries"])))
-            self.gateway_cfg["query_planner_max_queries"] = self.query_planner_max_queries
-            updated.append("gateway.query_planner_max_queries")
-        if "query_planner_max_tokens" in payload:
-            self.query_planner_max_tokens = max(128, int(payload["query_planner_max_tokens"]))
-            self.gateway_cfg["query_planner_max_tokens"] = self.query_planner_max_tokens
-            updated.append("gateway.query_planner_max_tokens")
         if "semantic_rescue_enabled" in payload:
             self.semantic_rescue_enabled = self._bool_config_value(
                 payload["semantic_rescue_enabled"],
@@ -1637,17 +1356,6 @@ class GatewayService:
                 base_url=self.dehydrator.base_url,
             )
 
-        if not str(self.gateway_cfg.get("query_planner_model") or "").strip():
-            (
-                self.query_planner_model,
-                self.query_planner_uses_dehydrator,
-            ) = self._resolve_query_planner_model("")
-        if not str(self.gateway_cfg.get("domain_sentinel_model") or "").strip():
-            self.domain_sentinel_model = self._resolve_domain_sentinel_model("")
-        if not str(self.gateway_cfg.get("domain_sentinel_base_url") or "").strip():
-            self.domain_sentinel_base_url = self._resolve_domain_sentinel_base_url("")
-        if not str(self.gateway_cfg.get("domain_sentinel_api_key") or "").strip():
-            self.domain_sentinel_api_key = self._resolve_domain_sentinel_api_key("")
         return updated
 
     def _apply_reranker_config(self, payload: dict[str, Any]) -> list[str]:
@@ -2273,11 +1981,10 @@ class GatewayService:
         include_debug = self._truthy_header(
             str(body.get("include_debug")) if body.get("include_debug") is not None else None
         )
-        allow_semantic = self._truthy_header(
-            str(body.get("allow_semantic")) if body.get("allow_semantic") is not None else None
-        )
-        allow_query_planner = self._truthy_header(
-            str(body.get("allow_query_planner")) if body.get("allow_query_planner") is not None else None
+        allow_semantic = (
+            True
+            if body.get("allow_semantic") is None
+            else self._truthy_header(str(body.get("allow_semantic")))
         )
         allow_semantic_session_dedupe = self._truthy_header(
             str(body.get("allow_semantic_session_dedupe"))
@@ -2314,6 +2021,42 @@ class GatewayService:
                 include_recent_context=include_recent_context,
             )
 
+        semantic_recall_debug, semantic_query_vector = (
+            await self.semantic_recall_router.route_with_vector(query)
+        )
+        semantic_skip = self.semantic_recall_router.should_apply_skip(
+            semantic_recall_debug
+        )
+        semantic_recall_debug["skip_applied"] = semantic_skip
+        semantic_recall_debug["applied_action"] = (
+            "skip" if semantic_skip else "recall"
+        )
+        if semantic_skip:
+            response: dict[str, Any] = {
+                "ok": True,
+                "query": query,
+                "session_id": session_id,
+                "cards": [],
+                "notes": [],
+                "additional_context": "",
+                "recalled_ids": [],
+                "debug": {
+                    "query": query,
+                    "candidate_count": 0,
+                    "semantic_recall_debug": semantic_recall_debug,
+                    "hook_recall_debug": {
+                        "mode": "fast_bucket",
+                        "skip_reason": "semantic_recall_skip",
+                    },
+                },
+            }
+            if not include_debug:
+                response["debug"] = {
+                    "query": query,
+                    "candidate_count": 0,
+                }
+            return JSONResponse(response)
+
         try:
             cards, recalled_ids, debug_payload = await self._hook_recall_fast_cards(
                 query,
@@ -2322,7 +2065,7 @@ class GatewayService:
                 max_chars=max_chars,
                 include_diffused=include_diffused,
                 allow_semantic=allow_semantic,
-                allow_query_planner=allow_query_planner,
+                query_embedding=semantic_query_vector,
                 allow_semantic_session_dedupe=allow_semantic_session_dedupe,
                 allow_rerank=allow_rerank,
             )
@@ -2331,11 +2074,9 @@ class GatewayService:
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=503)
 
-        domain_debug = (debug_payload or {}).get("domain_sentinel_debug") or {}
         hook_debug = (debug_payload or {}).get("hook_recall_debug") or {}
         minimal_debug = {
-            "domains": list(domain_debug.get("domains") or []),
-            "query": str(domain_debug.get("query") or hook_debug.get("search_query") or query),
+            "query": str(hook_debug.get("search_query") or query),
             "candidate_count": int(hook_debug.get("candidate_count") or len(cards or [])),
             "snowflake_boosted": [],
         }
@@ -2351,6 +2092,7 @@ class GatewayService:
         }
         if include_debug:
             debug = dict(debug_payload)
+            debug["semantic_recall_debug"] = semantic_recall_debug
             if not include_context_debug:
                 for key in (
                     "stable_context",
@@ -2589,7 +2331,6 @@ class GatewayService:
             "unexpected_excluded_bucket_ids": unexpected_excluded_ids,
             "max_elapsed_ms": max_elapsed_ms,
             "sections": sections,
-            "memory_sentinel": (debug or {}).get("memory_sentinel_debug") or {},
             "query_planner": (debug or {}).get("query_planner_debug") or {},
         }
         if include_context:
@@ -2720,7 +2461,6 @@ class GatewayService:
             self.date_recall_enabled
             and self._query_requests_date_recall(current_user_query)
         )
-        low_signal_auto_recall = self._auto_recall_low_signal_query(current_user_query)
         mark_step("classify_request", stage_started_at)
 
         persona_block = ""
@@ -2761,15 +2501,11 @@ class GatewayService:
         persona_state: dict[str, Any] | None = None
         injected_ids: list[str] | None = None
         query_planner_debug: dict[str, Any] = self._query_planner_debug_base(current_user_query)
-        memory_sentinel_debug: dict[str, Any] = self._memory_sentinel_debug_base(current_user_query)
-        domain_sentinel_debug: dict[str, Any] = self._domain_sentinel_rule_plan(current_user_query)
         semantic_recall_debug: dict[str, Any] = self.semantic_recall_router.debug_base(
             current_user_query
         )
         semantic_recall_query_vector: list[float] | None = None
         skip_broad_dynamic_recall = False
-        legacy_skip_broad_dynamic_recall = False
-        legacy_entry_skip_reason = ""
         date_persona_trace_requested = False
 
         if is_new_user_turn:
@@ -2787,80 +2523,19 @@ class GatewayService:
                 session_id,
             )
             mark_step("targeted_skip_check", stage_started_at)
-            stage_started_at = time.perf_counter()
-            memory_sentinel_debug = await self._route_memory_sentinel(
-                current_user_query,
-                session_id,
-                all_buckets,
-                needs_handoff_first=needs_handoff_first,
-                just_now_context_requested=just_now_context_requested,
-                date_recall_requested=date_recall_requested,
-                targeted_detail_skip=skip_for_targeted_detail,
-            )
-            mark_step("memory_sentinel", stage_started_at)
-            sentinel_route = str(memory_sentinel_debug.get("route") or "")
-            (
-                semantic_skip_broad,
-                sentinel_skip_broad,
-                legacy_sentinel_skip_broad,
-                low_signal_skip_broad,
-            ) = self._recall_entry_skip_routes(
-                semantic_recall_debug,
-                sentinel_route=sentinel_route,
-                low_signal_auto_recall=low_signal_auto_recall,
+            semantic_skip_broad = self.semantic_recall_router.should_apply_skip(
+                semantic_recall_debug
             )
             semantic_recall_debug["skip_applied"] = semantic_skip_broad
             semantic_recall_debug["applied_action"] = (
                 "skip" if semantic_skip_broad else "recall"
             )
-            memory_sentinel_debug["would_skip"] = legacy_sentinel_skip_broad
-            memory_sentinel_debug["decision_applied"] = sentinel_skip_broad
-            memory_sentinel_debug["shadow_only"] = bool(
-                self.semantic_recall_router.active
-            )
-            sentinel_search = sentinel_route == "search"
-            fixed_pre_domain_skip_broad = (
+            skip_broad_dynamic_recall = (
                 skip_for_targeted_detail
                 or needs_handoff_first
                 or just_now_context_requested
                 or date_recall_requested
-            )
-            pre_domain_skip_broad = (
-                fixed_pre_domain_skip_broad
                 or semantic_skip_broad
-                or sentinel_skip_broad
-                or (low_signal_skip_broad and not sentinel_search)
-            )
-            legacy_pre_domain_skip_broad = (
-                fixed_pre_domain_skip_broad
-                or legacy_sentinel_skip_broad
-                or (low_signal_auto_recall and not sentinel_search)
-            )
-            if legacy_sentinel_skip_broad:
-                legacy_entry_skip_reason = f"memory_sentinel_{sentinel_route}"
-            elif low_signal_auto_recall and not sentinel_search:
-                legacy_entry_skip_reason = "low_signal_auto_recall"
-            domain_sentinel_skip_broad = False
-            if not pre_domain_skip_broad:
-                stage_started_at = time.perf_counter()
-                domain_sentinel_debug = await self._route_domain_sentinel(current_user_query)
-                mark_step("domain_sentinel", stage_started_at)
-                domain_sentinel_skip_broad = self._domain_sentinel_should_skip_recall(
-                    domain_sentinel_debug,
-                    current_user_query,
-                )
-            if domain_sentinel_skip_broad:
-                domain_sentinel_debug["skip_applied"] = True
-            skip_broad_dynamic_recall = (
-                pre_domain_skip_broad
-                or domain_sentinel_skip_broad
-            )
-            legacy_skip_broad_dynamic_recall = (
-                legacy_pre_domain_skip_broad
-                or domain_sentinel_skip_broad
-            )
-            recall_plan_skip_reason = str(
-                (query_planner_debug.get("recall_query_plan") or {}).get("skip_reason") or ""
             )
             if needs_handoff_first:
                 query_planner_debug["skip_reason"] = handoff_skip_reason
@@ -2901,16 +2576,6 @@ class GatewayService:
             elif semantic_skip_broad:
                 query_planner_debug["skip_reason"] = (
                     f"semantic_recall_{semantic_recall_debug.get('route') or 'skip'}"
-                )
-            elif sentinel_skip_broad:
-                query_planner_debug["skip_reason"] = f"memory_sentinel_{sentinel_route}"
-            elif domain_sentinel_skip_broad:
-                query_planner_debug["skip_reason"] = "domain_sentinel_skip"
-            elif low_signal_skip_broad:
-                query_planner_debug["skip_reason"] = (
-                    recall_plan_skip_reason
-                    if recall_plan_skip_reason == "recall_meta_without_target"
-                    else "low_signal_auto_recall"
                 )
             if self.persona_engine.enabled and self._should_inject_interval(
                 session_id,
@@ -2970,11 +2635,9 @@ class GatewayService:
                         session_id,
                         all_buckets,
                         search_query=self._dynamic_recall_search_query(
-                            current_user_query,
-                            memory_sentinel_debug,
+                            current_user_query
                         ),
                         query_embedding=semantic_recall_query_vector,
-                        semantic_entry_routed=self.semantic_recall_router.active,
                         include_query_planner_debug=True,
                     )
                     mark_step("dynamic_recall_bucket_select", stage_started_at)
@@ -3030,11 +2693,9 @@ class GatewayService:
                         grouped_moments,
                         all_moments=all_moments,
                         search_query=self._dynamic_recall_search_query(
-                            current_user_query,
-                            memory_sentinel_debug,
+                            current_user_query
                         ),
                         query_embedding=semantic_recall_query_vector,
-                        semantic_entry_routed=self.semantic_recall_router.active,
                         include_query_planner_debug=True,
                     )
                     mark_step("dynamic_recall_graph_select", stage_started_at)
@@ -3155,10 +2816,8 @@ class GatewayService:
                     "memory_detail again. Do not mention this line in the final answer."
                 )
             reliable_dynamic_context = bool(recalled_memory.strip() or related_memory.strip())
-            memory_sentinel_blocks_context = str(memory_sentinel_debug.get("route") or "") in {"tone_only", "skip"}
             if (
                 include_recent_context
-                and not memory_sentinel_blocks_context
                 and not just_now_context_requested
                 and not date_recall_requested
                 and self._should_inject_recent_context(
@@ -3350,7 +3009,6 @@ class GatewayService:
             "just_now_context_requested": just_now_context_requested,
             "date_recall_requested": date_recall_requested,
             "date_persona_trace_requested": date_persona_trace_requested,
-            "low_signal_auto_recall": low_signal_auto_recall,
             "skip_broad_dynamic_recall": skip_broad_dynamic_recall,
             "retrieval_mode": self.retrieval_mode,
             "context_mode": context_mode,
@@ -3397,30 +3055,18 @@ class GatewayService:
             semantic_action = str(
                 semantic_recall_debug.get("recommended_action") or "recall"
             )
-            legacy_action = "skip" if legacy_skip_broad_dynamic_recall else "recall"
             applied_action = "skip" if skip_broad_dynamic_recall else "recall"
-            semantic_recall_debug["legacy_comparison"] = {
-                "legacy_action": legacy_action,
-                "legacy_skip_reason": str(
-                    legacy_entry_skip_reason
-                    or query_planner_debug.get("skip_reason")
-                    or ""
-                ),
-                "agrees": semantic_action == legacy_action,
-                "applied_action": applied_action,
-                "final_injected_ids": list(injected_ids or []),
-            }
+            semantic_recall_debug["applied_action"] = applied_action
+            semantic_recall_debug["final_injected_ids"] = list(injected_ids or [])
             if semantic_recall_debug.get("called"):
                 logger.info(
-                    "Semantic recall route | session=%s mode=%s semantic=%s legacy=%s "
-                    "applied=%s agrees=%s route=%s confidence=%s margin=%s reason=%s "
+                    "Semantic recall route | session=%s mode=%s semantic=%s "
+                    "applied=%s route=%s confidence=%s margin=%s reason=%s "
                     "injected_ids=%s",
                     session_id,
                     semantic_recall_debug.get("mode") or "shadow",
                     semantic_action,
-                    legacy_action,
                     applied_action,
-                    semantic_action == legacy_action,
                     semantic_recall_debug.get("route") or "",
                     semantic_recall_debug.get("confidence") or 0,
                     semantic_recall_debug.get("margin") or 0,
@@ -3462,8 +3108,6 @@ class GatewayService:
                 suppressed_moments=suppressed_moments,
                 suppressed_buckets=suppressed_buckets,
                 query_planner_debug=query_planner_debug,
-                memory_sentinel_debug=memory_sentinel_debug,
-                domain_sentinel_debug=domain_sentinel_debug,
                 semantic_recall_debug=semantic_recall_debug,
                 debug_detail=debug_detail,
             )
@@ -7926,7 +7570,6 @@ class GatewayService:
             "turn_count": 0,
             "turn_source": "",
             "bucket_count": 0,
-            "role_safe_transcript_required": False,
             "selected_turn_ids": [],
             "selected_bucket_ids": [],
         }
@@ -7953,19 +7596,12 @@ class GatewayService:
         start_at, end_at = self._date_recall_range(date_key)
         protected_phrases = self._date_recall_protected_topic_terms(query_text)
         topic_terms = self._date_recall_topic_terms(query_text)
-        role_safe_transcript_required = self._query_requires_role_safe_date_transcript(query_text)
         turns, turn_source = self._date_recall_turns_for_range(
             start_at,
             end_at,
             topic_terms,
-            match_assistant_text=role_safe_transcript_required,
         )
-        exact_phrase_raw_hit = bool(turns) and bool(protected_phrases)
-        include_buckets = (
-            (not role_safe_transcript_required)
-            and bool(topic_terms)
-            and not exact_phrase_raw_hit
-        )
+        include_buckets = bool(topic_terms) and not turns
         buckets = self._date_recall_buckets_for_date(all_buckets, date_key, topic_terms) if include_buckets else []
         buckets = buckets[: self.date_recall_max_buckets]
         bucket_ids = [str(bucket.get("id") or "") for bucket in buckets if bucket.get("id")]
@@ -7990,7 +7626,6 @@ class GatewayService:
                 "turn_count": len(turns),
                 "turn_source": turn_source,
                 "bucket_count": len(buckets),
-                "role_safe_transcript_required": role_safe_transcript_required,
                 "selected_turn_ids": [int(turn.get("id") or 0) for turn in turns],
                 "selected_bucket_ids": bucket_ids,
             }
@@ -8005,8 +7640,7 @@ class GatewayService:
         ]
         if topic_terms:
             lines.append("topic_filter: " + ", ".join(topic_terms[:8]))
-        if role_safe_transcript_required:
-            lines.append("speaker_policy: use transcript speaker labels only; do not infer speakers from summaries.")
+        lines.append("speaker_policy: use transcript speaker labels only; do not infer speakers from summaries.")
         if buckets and not turns:
             lines.append("evidence_policy: memory_buckets are same-day summaries, not transcript; do not quote or infer speakers from them.")
         if turns:
@@ -8030,14 +7664,11 @@ class GatewayService:
         start_at: datetime,
         end_at: datetime,
         topic_terms: list[str],
-        *,
-        match_assistant_text: bool = False,
     ) -> tuple[list[dict[str, Any]], str]:
         raw_turns = self._date_recall_raw_turns_for_range(
             start_at,
             end_at,
             topic_terms,
-            match_assistant_text=match_assistant_text,
         )
         if raw_turns:
             return raw_turns[: self.date_recall_max_turns], "raw_events"
@@ -8053,11 +7684,7 @@ class GatewayService:
             turns = [
                 turn for turn in turns
                 if self._date_recall_text_has_topic_terms(
-                    (
-                        str(turn.get("user_text") or "") + "\n" + str(turn.get("assistant_text") or "")
-                        if match_assistant_text
-                        else str(turn.get("user_text") or "")
-                    ),
+                    str(turn.get("user_text") or "") + "\n" + str(turn.get("assistant_text") or ""),
                     topic_terms,
                 )
             ]
@@ -8068,8 +7695,6 @@ class GatewayService:
         start_at: datetime,
         end_at: datetime,
         topic_terms: list[str],
-        *,
-        match_assistant_text: bool = False,
     ) -> list[dict[str, Any]]:
         limit = max(self.date_recall_max_turns * 12, self.date_recall_max_turns * 4, 80)
         try:
@@ -8119,8 +7744,7 @@ class GatewayService:
             combined = str(row.get("user_text") or "") + "\n" + str(row.get("assistant_text") or "")
             if not combined.strip():
                 continue
-            topic_text = combined if match_assistant_text else str(row.get("user_text") or "").strip() or combined
-            if topic_terms and not self._date_recall_text_has_topic_terms(topic_text, topic_terms):
+            if topic_terms and not self._date_recall_text_has_topic_terms(combined, topic_terms):
                 continue
             turns.append(row)
         turns.sort(
@@ -8208,13 +7832,6 @@ class GatewayService:
             return False
         return bool(self._date_recall_protected_topic_terms(text))
 
-    def _query_requires_role_safe_date_transcript(self, query: str) -> bool:
-        compact = self._compact_lookup_key(query)
-        return any(
-            self._compact_lookup_key(marker) in compact
-            for marker in DATE_RECALL_ROLE_SENSITIVE_MARKERS
-        )
-
     def _query_date_recall_hint(self, query: str) -> dict[str, str] | None:
         text = str(query or "").strip()
         if not text:
@@ -8254,7 +7871,7 @@ class GatewayService:
 
     def _strip_date_recall_query_shell(self, query: str) -> str:
         text = strip_human_date_references(query)
-        shell_terms = date_recall_shell_terms(self.identity) | DATE_RECALL_ROLE_QUERY_SHELL_TERMS
+        shell_terms = date_recall_shell_terms(self.identity)
         for term in sorted(shell_terms, key=lambda item: len(str(item)), reverse=True):
             if str(term).strip():
                 text = text.replace(str(term), " ")
@@ -8262,7 +7879,7 @@ class GatewayService:
 
     @staticmethod
     def _dedupe_date_recall_topic_terms(terms: list[str]) -> list[str]:
-        stop = {"工作吗", "状态", "怎么样", "如何", "知道", "当前", "现在", "最近", "career"}
+        stop = {"谁", "工作吗", "状态", "怎么样", "如何", "知道", "当前", "现在", "最近", "career"}
         candidates = []
         seen = set()
         for index, term in enumerate(terms or []):
@@ -9451,17 +9068,6 @@ class GatewayService:
             "rare_name_match",
             "rare_name_terms",
             "rare_name_sources",
-            "entity_edge_match",
-            "entity_edge_score",
-            "entity_edge_subject",
-            "entity_edge_relation",
-            "entity_edge_object",
-            "entity_edge_shadow",
-            "explicit_relation_edge_match",
-            "explicit_relation_edge_confidence",
-            "explicit_relation_edge_peer_bucket_id",
-            "explicit_relation_edge_type",
-            "explicit_relation_edge_focused",
             "fusion_mode",
             "fusion_score",
             "vector_norm",
@@ -9474,19 +9080,7 @@ class GatewayService:
             "specific_matched_query_terms",
             "keyword_direct_terms",
             "keyword_multi_evidence_signal",
-            "legacy_distinctive_keyword_match",
-            "legacy_passive_statement_would_block",
-            "passive_statement_shadow",
-            "legacy_distinctive_anchor_would_block",
-            "legacy_category_overview_would_block",
             "title_anchor_terms",
-            "dynamic_anchor_plan",
-            "distinctive_anchor_match",
-            "distinctive_anchor_terms",
-            "distinctive_anchor_missing_terms",
-            "anchor_coverage",
-            "category_overview_item",
-            "category_overview_terms",
             "retrieval_alias_match",
             "retrieval_alias_score",
             "retrieval_alias_terms",
@@ -9583,7 +9177,6 @@ class GatewayService:
             if strong_sources & {
                 "exact_anchor",
                 "planner_lexical",
-                "explicit_relation_edge",
             }:
                 return True
         scores = why.get("score") if isinstance(why.get("score"), dict) else {}
@@ -10008,7 +9601,6 @@ class GatewayService:
         all_moments: list[dict] | None = None,
         search_query: str = "",
         query_embedding: list[float] | None = None,
-        semantic_entry_routed: bool = False,
         include_query_planner_debug: bool = False,
     ) -> tuple[list[dict], list[dict], list[dict], list[dict]] | tuple[
         list[dict], list[dict], list[dict], list[dict], dict[str, Any]
@@ -10016,20 +9608,6 @@ class GatewayService:
         query_planner_debug = self._query_planner_debug_base(query)
         timing_debug = query_planner_debug.setdefault("timing_ms", {})
         if not query or self.inject_max_cards <= 0:
-            return self._empty_moment_selection(
-                include_query_planner_debug=include_query_planner_debug,
-                query_planner_debug=query_planner_debug,
-            )
-        legacy_auto_vague_would_skip = (
-            self._auto_query_too_vague(query)
-            and not self._has_named_exact_anchor_candidate(query, all_buckets)
-        )
-        query_planner_debug["legacy_auto_vague_would_skip"] = legacy_auto_vague_would_skip
-        if self._legacy_auto_vague_skip_applies(
-            legacy_auto_vague_would_skip,
-            semantic_entry_routed=semantic_entry_routed,
-        ):
-            query_planner_debug["skip_reason"] = "auto_vague_query"
             return self._empty_moment_selection(
                 include_query_planner_debug=include_query_planner_debug,
                 query_planner_debug=query_planner_debug,
@@ -10071,7 +9649,6 @@ class GatewayService:
             all_buckets,
             search_query=search_query,
             query_embedding=query_embedding,
-            semantic_entry_routed=semantic_entry_routed,
             include_query_planner_debug=True,
         )
         timing_debug = query_planner_debug.setdefault("timing_ms", {})
@@ -11562,8 +11139,6 @@ class GatewayService:
             return "", []
 
         query_plan = self._recall_query_plan(query_text, context_mode=context_mode)
-        dynamic_anchor_plan = self._dynamic_anchor_plan_from_items(seed_moments)
-        explicit_lookup_query = self.recall_policy.is_explicit_lookup_query(query_text)
         diffusion_seed_moments = [
             moment for moment in seed_moments
             if not self._is_source_record_capsule_only_moment(moment)
@@ -11611,19 +11186,6 @@ class GatewayService:
                 query_text,
                 moment,
             )
-            if dynamic_anchor_plan:
-                row.update(self._dynamic_anchor_node_payload(moment, dynamic_anchor_plan))
-                if dynamic_anchor_plan.get("strict_diffusion"):
-                    if not explicit_lookup_query:
-                        row["dynamic_anchor_required_terms"] = list(
-                            dynamic_anchor_plan.get("required_terms") or []
-                        )
-                    row["dynamic_anchor_category_terms"] = list(
-                        dynamic_anchor_plan.get("category_terms") or []
-                    )
-                    row["dynamic_anchor_category_overview"] = bool(
-                        dynamic_anchor_plan.get("category_overview")
-                    )
             row["runtime_allowed"] = can_moment_be_related_target(
                 moment,
                 explicit_lookup=allow_archive_targets,
@@ -11901,94 +11463,15 @@ class GatewayService:
             and path_len <= 1
             and confidence >= max(self.diffusion_inject_min_confidence + 0.2, 0.80)
         )
-        strong_explicit_edge = (
-            high_confidence_explicit_edge
-            and not self._axis_lite_has_technical_axis(query_plan)
-        )
-        legacy_dynamic_anchor_missing = bool(
-            row.get("dynamic_anchor_required_terms")
-            and not row.get("distinctive_anchor_match")
-            and not high_confidence_explicit_edge
-        )
-        row["legacy_distinctive_anchor_would_block"] = legacy_dynamic_anchor_missing
-        if legacy_dynamic_anchor_missing:
-            row["distinctive_anchor_shadow"] = {
-                "would_block": True,
-                "required_terms": list(row.get("dynamic_anchor_required_terms") or []),
-                "matched_terms": list(row.get("distinctive_anchor_terms") or []),
-                "missing_terms": list(row.get("distinctive_anchor_missing_terms") or []),
-                "stage": "diffusion_candidate",
-                "auto": True,
-            }
-        legacy_category_overview_missing = bool(
-            row.get("dynamic_anchor_category_overview")
-            and row.get("dynamic_anchor_category_terms")
-            and not row.get("category_overview_item")
-        )
-        row["legacy_category_overview_would_block"] = legacy_category_overview_missing
-        if row.get("category_overview_item") or legacy_category_overview_missing:
-            row["category_overview_shadow"] = {
-                "would_promote": bool(row.get("category_overview_item")),
-                "would_block": legacy_category_overview_missing,
-                "category_terms": list(row.get("dynamic_anchor_category_terms") or []),
-                "matched_terms": list(row.get("category_overview_terms") or []),
-                "stage": "diffusion_candidate",
-                "auto": True,
-            }
-        has_caution_path = bool(row.get("path") is not None and path_has_caution(row.get("path")))
-        has_source_record_topic_evidence = self._diffusion_path_source_record_evidence_extends_axis(
-            row.get("path"),
-            query_plan,
-        )
         has_reverse_evidence_edge = self._diffusion_path_has_reverse_evidence_edge(
             row.get("path")
-        )
-        explicit_edge_axis_bypass = (
-            strong_explicit_edge
-            and self._diffusion_explicit_edge_can_bridge_axis(query_plan)
-            and not has_reverse_evidence_edge
         )
         topic_supported_local_chain = (
             bool(row.get("chain_bundle"))
             and path_len <= 2
             and confidence >= 0.85
-            and not self._axis_lite_has_technical_axis(query_plan)
             and bool(row.get("has_topic_evidence"))
         )
-        axis_groups = getattr(query_plan, "activated_axis_groups", ()) or ()
-        axis_candidate_matched = (
-            self._axis_lite_candidate_matches(query_plan, moment)
-            if axis_groups
-            else True
-        )
-        axis_candidate_would_reject = bool(
-            axis_groups
-            and not axis_candidate_matched
-            and not (
-                has_caution_path
-                or has_source_record_topic_evidence
-                or explicit_edge_axis_bypass
-                or topic_supported_local_chain
-                or self._semantic_neighbor_has_strong_confidence(row)
-            )
-        )
-        axis_domain_would_reject = bool(
-            axis_groups
-            and self._axis_lite_domain_mismatch(query_plan, moment)
-            and not (
-                has_caution_path
-                or has_source_record_topic_evidence
-                or explicit_edge_axis_bypass
-            )
-        )
-        if axis_candidate_would_reject or axis_domain_would_reject:
-            row["axis_lite_shadow"] = {
-                "would_reject": True,
-                "reason": "activated_axis_mismatch",
-                "candidate_mismatch": axis_candidate_would_reject,
-                "domain_mismatch": axis_domain_would_reject,
-                **self._axis_lite_debug(query_plan, matched=axis_candidate_matched),
-            }
         if topic_supported_local_chain:
             return True, ""
         if why in {"same_topic", "date_neighbor"}:
@@ -11998,8 +11481,6 @@ class GatewayService:
                 return True, ""
             if has_reverse_evidence_edge:
                 return False, "reverse_evidence_edge_without_strong_topic_evidence"
-            if explicit_edge_axis_bypass:
-                return True, ""
             return False, "query_topic_evidence_not_strong"
         if row.get("has_topic_evidence"):
             if (
@@ -12014,12 +11495,6 @@ class GatewayService:
                 return True, ""
             return False, "query_topic_evidence_missing"
         return False, "unknown_diffusion_reason"
-
-    def _diffusion_explicit_edge_can_bridge_axis(self, query_plan: Any) -> bool:
-        if not bool(getattr(query_plan, "activated_axis_multi", False)):
-            return False
-        query = str(getattr(query_plan, "query", "") or "")
-        return bool(query and self.recall_policy.has_axis_relation_marker(query))
 
     @staticmethod
     def _diffusion_path_has_reverse_evidence_edge(path: Any) -> bool:
@@ -12112,27 +11587,6 @@ class GatewayService:
                 "has_topic_evidence": bool(row.get("has_topic_evidence")),
                 "topic_evidence_terms": list(row.get("topic_evidence_terms") or []),
                 "strong_topic_evidence": bool(row.get("strong_topic_evidence")),
-                "legacy_distinctive_anchor_would_block": bool(
-                    row.get("legacy_distinctive_anchor_would_block")
-                ),
-                "distinctive_anchor_shadow": (
-                    row.get("distinctive_anchor_shadow")
-                    if isinstance(row.get("distinctive_anchor_shadow"), dict)
-                    else {}
-                ),
-                "legacy_category_overview_would_block": bool(
-                    row.get("legacy_category_overview_would_block")
-                ),
-                "category_overview_shadow": (
-                    row.get("category_overview_shadow")
-                    if isinstance(row.get("category_overview_shadow"), dict)
-                    else {}
-                ),
-                "distinctive_anchor_match": bool(row.get("distinctive_anchor_match")),
-                "distinctive_anchor_terms": list(row.get("distinctive_anchor_terms") or []),
-                "distinctive_anchor_missing_terms": list(row.get("distinctive_anchor_missing_terms") or []),
-                "category_overview_item": bool(row.get("category_overview_item")),
-                "category_overview_terms": list(row.get("category_overview_terms") or []),
                 "reading_note": row.get("reading_note") if isinstance(row.get("reading_note"), dict) else {},
                 "diffusion_trace": self._format_diffusion_candidate_trace(row, moment_map),
             }
@@ -12225,30 +11679,6 @@ class GatewayService:
         for step in tuple(getattr(path, "steps", ()) or ()):
             reason = str(getattr(step, "reason", "") or "").lower()
             if "source_record_fragment_topic_evidence" in reason:
-                return True
-        return False
-
-    def _diffusion_path_source_record_evidence_extends_axis(self, path: Any, query_plan: Any) -> bool:
-        terms: list[str] = []
-        for step in tuple(getattr(path, "steps", ()) or ()):
-            reason = str(getattr(step, "reason", "") or "")
-            marker = "source_record_fragment_topic_evidence:"
-            if marker not in reason:
-                continue
-            tail = reason.split(marker, 1)[1]
-            terms.extend(part.strip() for part in re.split(r"[,，、/|]", tail) if part.strip())
-        if not terms:
-            return False
-        axis_keys = {
-            self._compact_axis_text(term)
-            for term in (getattr(query_plan, "activated_axis_terms", ()) or ())
-            if self._compact_axis_text(term)
-        }
-        if not axis_keys:
-            return True
-        for term in terms:
-            key = self._compact_axis_text(term)
-            if key and not any(key in axis_key or axis_key in key for axis_key in axis_keys):
                 return True
         return False
 
@@ -12594,22 +12024,9 @@ class GatewayService:
             return " ".join(entity_terms[:4])
         return self._normalized_recall_query(query)
 
-    def _dynamic_recall_search_query(self, query: str, sentinel_debug: dict[str, Any] | None = None) -> str:
+    def _dynamic_recall_search_query(self, query: str) -> str:
         identity_name_terms = self._identity_name_search_terms(query)
-        residue_terms = self._memory_sentinel_searchable_residue_terms(query)
-        if residue_terms:
-            word_map_terms = [
-                term
-                for term in self._word_map_query_terms(query)
-                if self._compact_lookup_key(term)
-                and self._compact_lookup_key(term) not in {
-                    self._compact_lookup_key(existing)
-                    for existing in residue_terms
-                }
-            ]
-            base_terms = [*residue_terms, *word_map_terms]
-        else:
-            base_terms = list(self._word_map_query_terms(query))
+        base_terms = list(self._word_map_query_terms(query))
         if not base_terms:
             fallback = self._entity_priority_recall_search_query(query)
             base_terms = [fallback] if fallback else []
@@ -12626,22 +12043,7 @@ class GatewayService:
             existing_keys.add(key)
             identity_extras.append(term)
         core_limit = max(1, 8 - len(identity_extras))
-        base = " ".join([*base_terms[:core_limit], *identity_extras])
-        anchors = []
-        if isinstance(sentinel_debug, dict) and sentinel_debug.get("route") == "search":
-            anchors = self._normalize_planner_terms(sentinel_debug.get("anchors"))
-        if not anchors:
-            return base
-        anchor_text = " ".join(anchors[:6])
-        if not base:
-            return anchor_text
-        existing_key = self._compact_lookup_key(base)
-        extras = [
-            anchor
-            for anchor in anchors[:6]
-            if self._compact_lookup_key(anchor) and self._compact_lookup_key(anchor) not in existing_key
-        ]
-        return " ".join([base, *extras]).strip()
+        return " ".join([*base_terms[:core_limit], *identity_extras])
 
     def _recall_query_plan(self, query: str, *, context_mode: str = ""):
         return self.recall_policy.plan_query(query, context_mode=context_mode)
@@ -13147,636 +12549,13 @@ class GatewayService:
     ) -> str:
         return await self._build_diffused_memory_block(recalled_buckets, all_buckets)
 
-    def _memory_sentinel_debug_base(self, query: str) -> dict[str, Any]:
-        return {
-            "enabled": bool(self.memory_sentinel_enabled),
-            "called": False,
-            "route": "",
-            "reason": "",
-            "anchors": [],
-            "confidence": None,
-            "hard_bypass_reason": "",
-            "rule_route": False,
-            "would_skip": False,
-            "decision_applied": False,
-            "shadow_only": False,
-            "searchable_residue_terms": [],
-            "original_query": self._clip_text(str(query or ""), 500),
-        }
-
-    def _recall_entry_skip_routes(
-        self,
-        semantic_debug: dict[str, Any] | None,
-        *,
-        sentinel_route: str,
-        low_signal_auto_recall: bool,
-    ) -> tuple[bool, bool, bool, bool]:
-        """Return active semantic, active sentinel, legacy sentinel, and active low-signal skips."""
-        legacy_sentinel_skip = str(sentinel_route or "") in {"tone_only", "skip"}
-        semantic_active = bool(self.semantic_recall_router.active)
-        semantic_skip = self.semantic_recall_router.should_apply_skip(semantic_debug)
-        return (
-            semantic_skip,
-            legacy_sentinel_skip and not semantic_active,
-            legacy_sentinel_skip,
-            bool(low_signal_auto_recall) and not semantic_active,
-        )
-
-    @staticmethod
-    def _legacy_auto_vague_skip_applies(
-        legacy_would_skip: bool,
-        *,
-        semantic_entry_routed: bool,
-    ) -> bool:
-        return bool(legacy_would_skip) and not bool(semantic_entry_routed)
-
-    async def _route_memory_sentinel(
-        self,
-        query: str,
-        session_id: str,
-        all_buckets: list[dict],
-        *,
-        needs_handoff_first: bool = False,
-        just_now_context_requested: bool = False,
-        date_recall_requested: bool = False,
-        targeted_detail_skip: bool = False,
-    ) -> dict[str, Any]:
-        debug = self._memory_sentinel_debug_base(query)
-        debug["searchable_residue_terms"] = self._memory_sentinel_searchable_residue_terms(query)
-        hard_bypass = self._memory_sentinel_hard_bypass_reason(
-            query,
-            all_buckets,
-            needs_handoff_first=needs_handoff_first,
-            just_now_context_requested=just_now_context_requested,
-            date_recall_requested=date_recall_requested,
-            targeted_detail_skip=targeted_detail_skip,
-        )
-        if hard_bypass:
-            debug["hard_bypass_reason"] = hard_bypass
-            return debug
-        if not self.memory_sentinel_enabled or not str(query or "").strip():
-            return debug
-
-        rule_plan = self._memory_sentinel_rule_route(query)
-        if rule_plan:
-            debug["rule_route"] = True
-            debug.update(rule_plan)
-            return debug
-        return debug
-
-    def _memory_sentinel_hard_bypass_reason(
-        self,
-        query: str,
-        all_buckets: list[dict],
-        *,
-        needs_handoff_first: bool = False,
-        just_now_context_requested: bool = False,
-        date_recall_requested: bool = False,
-        targeted_detail_skip: bool = False,
-    ) -> str:
-        text = str(query or "").strip()
-        if not text:
-            return "empty_query"
-        if needs_handoff_first:
-            return "handoff"
-        if just_now_context_requested:
-            return "just_now"
-        if date_recall_requested:
-            return "date_recall"
-        if targeted_detail_skip:
-            return "targeted_memory_detail"
-        if self._extract_explicit_bucket_ids_from_text(text) or self._extract_explicit_moment_ids_from_text(text):
-            return "explicit_memory_id"
-        if self._query_has_explicit_recall_marker(text):
-            return "explicit_recall_marker"
-        if not self._query_looks_emotional_reason_lookup(text):
-            residue_terms = self._memory_sentinel_searchable_residue_terms(text)
-            if residue_terms:
-                return "searchable_residue"
-        if self._memory_sentinel_should_review_checkin(text):
-            return ""
-        normalized = self._normalized_recall_query(text)
-        locatable_terms = self._locatable_query_terms(text)
-        exact_terms = self._extract_exact_anchor_terms(text, normalized)
-        if exact_terms and locatable_terms and not self._memory_sentinel_low_signal_exact_anchor_only(text, exact_terms):
-            return "exact_anchor"
-        if locatable_terms and not self._memory_sentinel_rule_should_review_entity(text, locatable_terms):
-            return "entity"
-        if self.recall_policy.requires_topic_evidence(text):
-            return "topic_evidence_marker"
-        if any(
-            self._is_source_record_bucket(bucket)
-            and self._source_record_explicit_bucket_match_reason(text, bucket)
-            for bucket in all_buckets or []
-        ):
-            return "source_record"
-        return ""
-
-    def _memory_sentinel_rule_route(self, query: str) -> dict[str, Any] | None:
-        text = str(query or "").strip()
-        if not text:
-            return {
-                "route": "skip",
-                "reason": "empty query",
-                "anchors": [],
-                "confidence": 1.0,
-            }
-        if self._memory_sentinel_searchable_residue_terms(text):
-            return None
-        if self._memory_sentinel_obvious_skip_query(text):
-            return {
-                "route": "skip",
-                "reason": "ack/test without memory anchor",
-                "anchors": [],
-                "confidence": 0.95,
-            }
-        if self._memory_sentinel_should_review_checkin(text):
-            return {
-                "route": "tone_only",
-                "reason": "presence check-in without memory anchor",
-                "anchors": [],
-                "confidence": 0.95,
-            }
-        if self._memory_sentinel_obvious_tone_only_query(text):
-            return {
-                "route": "tone_only",
-                "reason": "tone contact without searchable anchor",
-                "anchors": [],
-                "confidence": 0.9,
-            }
-        return None
-
-    def _memory_sentinel_searchable_residue_terms(self, query: str) -> list[str]:
-        text = str(query or "").strip()
-        if not text:
-            return []
-        terms = list(self._locatable_query_terms(text))
-        normalized = self._normalized_recall_query(text)
-        if normalized:
-            terms.extend(self._locatable_query_terms(normalized))
-        output: list[str] = []
-        seen: set[str] = set()
-        for term in terms:
-            residue = self._memory_sentinel_searchable_residue_term(term)
-            key = self._compact_lookup_key(residue)
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            output.append(residue)
-        return output[:6]
-
-    def _memory_sentinel_searchable_residue_term(self, term: object) -> str:
-        cleaned = str(term or "").strip()
-        if not cleaned:
-            return ""
-        compact = self._compact_lookup_key(cleaned)
-        if not compact:
-            return ""
-        if re.fullmatch(r"[a-z0-9_.:-]+", cleaned.lower()):
-            key = cleaned.lower()
-            if self._memory_sentinel_residue_key_allowed(key):
-                return cleaned
-            return ""
-
-        residue = compact
-        strip_terms = set(MEMORY_SENTINEL_RESIDUE_STRIP_TERMS)
-        strip_terms.update(self._identity_match_terms(compact=True))
-        strip_terms.update(
-            self._compact_lookup_key(term)
-            for term in (
-                self.identity.get("ai_name"),
-                self.identity.get("user_name"),
-                self.identity.get("user_display_name"),
-                *(self.identity.get("user_aliases") or []),
-            )
-            if self._compact_lookup_key(term)
-        )
-        for fragment in sorted(strip_terms, key=len, reverse=True):
-            if fragment:
-                residue = residue.replace(fragment, "")
-        changed = True
-        while changed and residue:
-            changed = False
-            for prefix in MEMORY_SENTINEL_RESIDUE_PREFIXES:
-                if residue.startswith(prefix):
-                    residue = residue[len(prefix):]
-                    changed = True
-                    break
-        residue = re.sub(r"[我你他她它的是了啦呢啊呀嘛吗吧欸诶]+", "", residue)
-        if self._memory_sentinel_residue_key_allowed(residue):
-            return residue
-        return ""
-
-    def _memory_sentinel_residue_key_allowed(self, key: str) -> bool:
-        value = str(key or "").strip().lower()
-        if not value:
-            return False
-        if value in MEMORY_SENTINEL_RESIDUE_STOP_TERMS:
-            return False
-        if not self._planner_must_term_allowed(value):
-            return False
-        if re.fullmatch(r"\d+(?:[._:-]\d+)+", value):
-            return True
-        if re.fullmatch(r"[a-z][a-z0-9_.:/-]{2,}", value):
-            return True
-        if re.search(r"\d", value) and re.search(r"[a-z]", value):
-            return True
-        if re.fullmatch(r"[\u4e00-\u9fff]+", value):
-            if len(value) < 2 or len(value) > 16:
-                return False
-            if value in MEMORY_SENTINEL_RESIDUE_STOP_TERMS:
-                return False
-            if all(char in MEMORY_SENTINEL_RESIDUE_STOP_TERMS for char in value):
-                return False
-            return True
-        return bool(re.search(r"[\u4e00-\u9fffA-Za-z0-9]", value))
-
-    def _memory_sentinel_obvious_skip_query(self, query: str) -> bool:
-        compact = self._compact_lookup_key(query)
-        if not compact:
-            return True
-        if compact in MEMORY_SENTINEL_SKIP_ONLY_TERMS:
-            return True
-        if re.fullmatch(r"(哈|哈哈)+", compact):
-            return True
-        return False
-
-    def _memory_sentinel_obvious_tone_only_query(self, query: str) -> bool:
-        compact = self._compact_lookup_key(query)
-        if not compact:
-            return False
-        has_tone_marker = any(marker in compact for marker in MEMORY_SENTINEL_TONE_ONLY_MARKERS)
-        if not has_tone_marker:
-            return False
-        return self._auto_recall_low_signal_query(query) or self.recall_policy.is_auto_query_too_vague(query)
-
-    @staticmethod
-    def _query_has_explicit_recall_marker(query: str) -> bool:
-        text = str(query or "").lower()
-        return any(marker in text for marker in query_intent_terms("memory_sentinel.explicit_recall_markers"))
-
-    def _memory_sentinel_should_review_checkin(self, query: str) -> bool:
-        compact = self._compact_lookup_key(query)
-        if not compact:
-            return False
-        checkin_markers = query_intent_terms("memory_sentinel.checkin_markers")
-        if any(marker in compact for marker in checkin_markers):
-            return True
-        address_terms = identity_address_terms(self.identity, include_legacy_ai=True)
-        address_keys = [
-            self._compact_lookup_key(term)
-            for term in address_terms
-            if self._compact_lookup_key(term)
-        ]
-        trailing_particles = CHECKIN_TRAILING_PARTICLES
-        for address in address_keys:
-            if compact == address or any(compact == f"{address}{particle}" for particle in trailing_particles):
-                return True
-        return False
-
-    def _memory_sentinel_low_signal_entity_only(self, query: str, entity_terms: list[str]) -> bool:
-        if not entity_terms:
-            return False
-        low_signal_terms = LOW_SIGNAL_CHECKIN_TERMS
-        keys = [self._compact_lookup_key(term) for term in entity_terms]
-        return bool(keys) and self._auto_recall_low_signal_query(query) and all(key in low_signal_terms for key in keys)
-
-    def _memory_sentinel_low_signal_exact_anchor_only(self, query: str, exact_terms: list[str]) -> bool:
-        if not exact_terms or not self._auto_recall_low_signal_query(query):
-            return False
-        low_signal_terms = LOW_SIGNAL_CHECKIN_TERMS | query_intent_term_set(
-            "memory_sentinel.low_signal_exact_anchor_extra_terms"
-        )
-        keys = [self._compact_lookup_key(term) for term in exact_terms]
-        return bool(keys) and all(key in low_signal_terms for key in keys)
-
-    def _memory_sentinel_rule_should_review_entity(self, query: str, entity_terms: list[str]) -> bool:
-        if self._memory_sentinel_low_signal_entity_only(query, entity_terms):
-            return True
-        compact = self._compact_lookup_key(query)
-        vague_refs = query_intent_terms("memory_sentinel.vague_reference_markers")
-        if any(ref in compact for ref in vague_refs):
-            return True
-        if self._query_looks_emotional_reason_lookup(query):
-            return True
-        return False
-
-    def _domain_sentinel_rule_plan(self, query: str) -> dict[str, Any]:
-        text = str(query or "")
-        compact = self._compact_lookup_key(text)
-        domains: list[str] = []
-
-        def add(domain: str) -> None:
-            key = normalize_domain_key(domain)
-            if key and key in DOMAIN_SENTINEL_ALLOWED_DOMAINS and key not in domains:
-                domains.append(key)
-
-        for rule in query_intent_rules("domain_sentinel.rules"):
-            unless_domain = str(rule.get("unless_domain") or "").strip()
-            if unless_domain and unless_domain in domains:
-                continue
-            unless_any = {str(domain) for domain in rule.get("unless_any_domain") or []}
-            if unless_any and any(domain in unless_any for domain in domains):
-                continue
-            terms = [str(term).strip() for term in rule.get("terms") or [] if str(term or "").strip()]
-            if not terms or not any(term in compact for term in terms):
-                continue
-            for domain in rule.get("domains") or []:
-                add(str(domain))
-        if not domains:
-            add("general")
-
-        query_terms = self._specific_query_terms(text)[:6]
-        planned_query = " ".join(query_terms).strip() or text
-        if any(domain in {"relationship", "intimacy"} for domain in domains):
-            names = [
-                str(self.identity.get("user_name") or "").strip(),
-                str(self.identity.get("ai_name") or "").strip(),
-            ]
-            for name in names:
-                if name and self._compact_lookup_key(name) not in self._compact_lookup_key(planned_query):
-                    planned_query = f"{planned_query} {name}".strip()
-
-        return {
-            "enabled": bool(self.domain_sentinel_enabled),
-            "source": "rules",
-            "called": False,
-            "domains": domains[:4],
-            "query": self._clip_text(planned_query, 220),
-            "confidence": 0.55 if domains and domains != ["general"] else 0.35,
-            "errors": [],
-        }
-
-    def _domain_sentinel_query_explicitly_needs_memory(self, query: str) -> bool:
-        text = str(query or "").strip()
-        if not text:
-            return False
-        if self._extract_explicit_bucket_ids_from_text(text) or self._extract_explicit_moment_ids_from_text(text):
-            return True
-        if self._query_has_explicit_recall_marker(text):
-            return True
-        if self._query_requests_date_recall(text):
-            return True
-        if self._query_requests_direct_detail(text) or self.recall_policy.is_detail_read_query(text):
-            return True
-        if self.recall_policy.has_axis_relation_marker(text) and self._locatable_query_terms(text):
-            return True
-        if re.search(r"[A-Za-z]+[A-Za-z0-9_.:-]*\d", text):
-            return True
-        return False
-
-    def _resolve_domain_sentinel_model(self, configured_model: Any = None) -> str:
-        if configured_model is None:
-            configured_model = self.gateway_cfg.get("domain_sentinel_model")
-        explicit_model = str(configured_model or "").strip()
-        if explicit_model:
-            return explicit_model
-        model = str(getattr(self.dehydrator, "model", "") or "").strip()
-        if not model:
-            dehy_cfg = self.config.get("dehydration", {})
-            if isinstance(dehy_cfg, dict):
-                model = str(dehy_cfg.get("model") or "").strip()
-        return model
-
-    def _resolve_domain_sentinel_base_url(self, configured_base_url: Any = None) -> str:
-        if configured_base_url is None:
-            configured_base_url = self.gateway_cfg.get("domain_sentinel_base_url")
-        explicit_base_url = str(configured_base_url or "").strip().rstrip("/")
-        if explicit_base_url:
-            return explicit_base_url
-        base_url = str(getattr(self.dehydrator, "base_url", "") or "").strip().rstrip("/")
-        if not base_url:
-            dehy_cfg = self.config.get("dehydration", {})
-            if isinstance(dehy_cfg, dict):
-                base_url = str(dehy_cfg.get("base_url") or "").strip().rstrip("/")
-        if not base_url:
-            base_url = str(self.embedding_cfg.get("base_url") or "").strip().rstrip("/")
-        return base_url
-
-    def _resolve_domain_sentinel_api_key(self, configured_api_key: Any = None) -> str:
-        if configured_api_key is None:
-            configured_api_key = self.gateway_cfg.get("domain_sentinel_api_key")
-        env_api_key = str(os.environ.get("OMBRE_DOMAIN_SENTINEL_API_KEY", "") or "").strip()
-        if env_api_key:
-            return env_api_key
-        explicit_api_key = str(configured_api_key or "").strip()
-        if explicit_api_key:
-            return explicit_api_key
-        dehy_cfg = self.config.get("dehydration", {})
-        dehy_api_key = ""
-        if isinstance(dehy_cfg, dict):
-            dehy_api_key = str(dehy_cfg.get("api_key") or "").strip()
-        return str(
-            dehy_api_key
-            or getattr(self.dehydrator, "api_key", "")
-            or os.environ.get("OMBRE_API_KEY", "")
-            or os.environ.get("OMBRE_EMBEDDING_API_KEY", "")
-            or self.embedding_cfg.get("api_key", "")
-            or ""
-        ).strip()
-
-    async def _route_domain_sentinel(self, query: str) -> dict[str, Any]:
-        debug = self._domain_sentinel_rule_plan(query)
-        if self._domain_sentinel_query_explicitly_needs_memory(query):
-            debug.update(
-                source="rules",
-                called=False,
-                message_type="recall_request",
-                should_recall=True,
-                recall_route="search",
-                reason="explicit_memory_need",
-            )
-            return debug
-        if self._domain_sentinel_should_skip_recall(debug, query):
-            return debug
-        if not self.domain_sentinel_enabled or not self.domain_sentinel_model:
-            return debug
-        if not self.domain_sentinel_base_url or not self.domain_sentinel_api_key:
-            debug["errors"].append("domain_sentinel_api_not_configured")
-            return debug
-
-        payload = {
-            "model": self.domain_sentinel_model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Classify the user's latest message for memory recall routing. "
-                        "Return JSON only with keys: message_type, primary_domain, domains, query, confidence, should_recall, reason. "
-                        "message_type must be one of: auto_trigger, troubleshooting, recall_request, ordinary_chat, other. "
-                        "primary_domain must be one of: relationship, intimacy, life, tech, project, general. "
-                        "domains is optional but if present must use only those same domain keys. "
-                        "First decide whether the message is an automatic trigger/status payload or a troubleshooting/debugging message; if so set message_type accordingly and should_recall=false. "
-                        "For ordinary chat without a locatable memory need, set should_recall=false. "
-                        "For explicit recall, detail-read, date recall, or named-entity questions, set message_type=recall_request and should_recall=true. "
-                        "Use intimacy only for clearly intimate/body/desire content; otherwise use relationship for relationship anchors, signals, symbols, and communication."
-                    ),
-                },
-                {"role": "user", "content": query},
-            ],
-            "temperature": 0,
-            "max_tokens": self.domain_sentinel_max_tokens,
-            "stream": False,
-            "response_format": {"type": "json_object"},
-            "enable_thinking": False,
-        }
-
-        try:
-            response = await asyncio.wait_for(
-                self.http_client.post(
-                    f"{self.domain_sentinel_base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.domain_sentinel_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                ),
-                timeout=self.domain_sentinel_timeout_seconds,
-            )
-            if response.status_code >= 400:
-                debug["errors"].append(f"domain_sentinel_upstream_status:{response.status_code}")
-                return debug
-            body = response.json()
-            content = self._chat_completion_content(body)
-            parsed = self._parse_domain_sentinel_response(content)
-            if parsed:
-                parsed["enabled"] = True
-                parsed["source"] = "llm"
-                parsed["called"] = True
-                parsed["errors"] = []
-                return parsed
-            debug["errors"].append("domain_sentinel_empty_response")
-        except Exception as exc:
-            debug["errors"].append(f"domain_sentinel_failed:{type(exc).__name__}")
-        return debug
-
-    def _parse_domain_sentinel_response(self, content: str) -> dict[str, Any]:
-        text = str(content or "").strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-            text = re.sub(r"\s*```$", "", text).strip()
-        if not text.startswith("{"):
-            start = text.find("{")
-            end = text.rfind("}")
-            if start >= 0 and end > start:
-                text = text[start : end + 1]
-        raw = json.loads(text)
-        if not isinstance(raw, dict):
-            return {}
-        domains = []
-        primary_domain = normalize_domain_key(raw.get("primary_domain"))
-        if primary_domain and primary_domain in DOMAIN_SENTINEL_ALLOWED_DOMAINS:
-            domains.append(primary_domain)
-        raw_domains = raw.get("domains") if isinstance(raw.get("domains"), list) else []
-        for item in raw_domains:
-            candidates = []
-            if isinstance(item, dict):
-                candidates = [item.get("key"), item.get("domain"), item.get("name")]
-            else:
-                candidates = [item]
-            for candidate in candidates:
-                if self._is_sentinel_rejected_domain(candidate):
-                    continue
-                key = normalize_domain_key(candidate)
-                if key and key in DOMAIN_SENTINEL_ALLOWED_DOMAINS and key not in domains:
-                    domains.append(key)
-                    break
-        if not domains:
-            return {}
-        should_recall = self._parse_sentinel_bool(raw.get("should_recall"))
-        message_type = self._parse_domain_sentinel_message_type(raw.get("message_type"))
-        return {
-            "domains": domains[:4],
-            "primary_domain": domains[0],
-            "query": self._clip_text(str(raw.get("query") or "").strip(), 220),
-            "confidence": self._clamp(self._safe_float(raw.get("confidence"), 0.0)),
-            "should_recall": should_recall,
-            "recall_route": "skip" if should_recall is False else "search" if should_recall is True else "",
-            "message_type": message_type,
-            "reason": self._clip_text(str(raw.get("reason") or "").strip(), 160),
-        }
-
-    @staticmethod
-    def _parse_sentinel_bool(value: Any) -> bool | None:
-        if isinstance(value, bool):
-            return value
-        text = str(value or "").strip().lower()
-        if text in {"true", "yes", "y", "1", "search", "recall"}:
-            return True
-        if text in {"false", "no", "n", "0", "skip", "none", "no_recall"}:
-            return False
-        return None
-
-    @staticmethod
-    def _parse_domain_sentinel_message_type(value: Any) -> str:
-        text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-        aliases = {
-            "automatic": "auto_trigger",
-            "auto": "auto_trigger",
-            "auto_status": "auto_trigger",
-            "system_status": "auto_trigger",
-            "debug": "troubleshooting",
-            "debugging": "troubleshooting",
-            "diagnostic": "troubleshooting",
-            "diagnostics": "troubleshooting",
-            "recall": "recall_request",
-            "memory_recall": "recall_request",
-            "chat": "ordinary_chat",
-            "ordinary": "ordinary_chat",
-        }
-        text = aliases.get(text, text)
-        if text in {"auto_trigger", "troubleshooting", "recall_request", "ordinary_chat", "other"}:
-            return text
-        return "other"
-
-    def _domain_sentinel_should_skip_recall(self, debug: dict[str, Any] | None, query: str = "") -> bool:
-        if not isinstance(debug, dict):
-            return False
-        if query and self._domain_sentinel_query_explicitly_needs_memory(query):
-            return False
-        if debug.get("should_recall") is not False:
-            return False
-        confidence = self._clamp(self._safe_float(debug.get("confidence"), 0.0))
-        if confidence < 0.55:
-            return False
-        if str(debug.get("recall_route") or "").strip().lower() in {"search", "recall"}:
-            return False
-        return True
-
-    @staticmethod
-    def _is_sentinel_rejected_domain(value: Any) -> bool:
-        text = str(value or "").strip().lower()
-        compact = re.sub(r"[\s\-_]+", "", text)
-        return compact in {
-            "relationship.weather",
-            "relationshipweather",
-            "dailyimpression",
-            "weeklyimpression",
-            "关系天气",
-            "日印象",
-            "周印象",
-        }
-
-    def _resolve_query_planner_model(self, configured_model: Any = None) -> tuple[str, bool]:
-        if configured_model is None:
-            configured_model = self.gateway_cfg.get("query_planner_model")
-        explicit_model = str(configured_model or "").strip()
-        if explicit_model:
-            return explicit_model, False
-        model = str(getattr(self.dehydrator, "model", "") or "").strip()
-        if not model:
-            dehy_cfg = self.config.get("dehydration", {})
-            if isinstance(dehy_cfg, dict):
-                model = str(dehy_cfg.get("model") or "").strip()
-        return model, True
-
     def _query_planner_debug_base(self, query: str) -> dict[str, Any]:
         anchor_plan = self._query_anchor_plan(query)
         query_plan = self._recall_query_plan(query)
         raw_query = str(query or "")
         normalized_query = self._normalized_recall_query(raw_query)
         return {
-            "enabled": bool(self.query_planner_enabled),
+            "enabled": False,
             "triggered": False,
             "trigger_reason": "",
             "skip_reason": "",
@@ -13800,30 +12579,14 @@ class GatewayService:
                 "rare_name_bucket_ids": [],
                 "rare_name_terms": [],
             },
-            "dynamic_anchor": {
-                "version": 1,
-                "query": self._clip_text(raw_query, 500),
-                "category_overview": False,
-                "discriminative_terms": [],
-                "required_terms": [],
-                "category_terms": [],
-                "support_terms": [],
-                "term_stats": [],
-                "retrieval_alias_bucket_ids": [],
-                "retrieval_alias_hits": [],
-            },
             "structural_activation_debug": self._structural_activation_debug_base(query),
             "exact_anchor_hints": {
                 "bucket_ids": [],
                 "terms": [],
             },
-            "relation_axis": [],
             "errors": [],
-            "model": self.query_planner_model,
-            "model_source": "dehydration" if self.query_planner_uses_dehydrator else "gateway",
             "semantic": {
                 "query_timeout_seconds": self.embedding_query_timeout_seconds,
-                "supplemental_enabled": self.query_planner_supplemental_semantic,
             },
             "semantic_rescue": {
                 "enabled": bool(self.semantic_rescue_enabled),
@@ -14388,26 +13151,6 @@ class GatewayService:
             "specific_terms": list(getattr(plan, "specific_terms", ()) or ()),
         }
 
-    def _relation_axis_supplemental_queries(self, query: str) -> list[dict[str, Any]]:
-        if not self.recall_policy.has_axis_relation_marker(query):
-            return []
-        plan = self._recall_query_plan(query)
-        if not bool(getattr(plan, "activated_axis_multi", False)):
-            return []
-        output: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for group in (getattr(plan, "activated_axis_groups", ()) or ())[:6]:
-            terms = self._planner_lexical_match_terms(list(group or ()))
-            if not terms:
-                continue
-            short_query = " ".join(terms).strip()
-            key = self._compact_lookup_key(short_query)
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            output.append({"query": short_query, "must_terms": terms})
-        return output[:4]
-
     @staticmethod
     def _add_timing_ms(target: dict[str, Any] | None, name: str, started_at: float) -> None:
         if not isinstance(target, dict):
@@ -14473,81 +13216,8 @@ class GatewayService:
             "auto": True,
         }
 
-    def _query_planner_trigger_reason(self, query: str, selected_items: list[dict]) -> str:
-        if not self.query_planner_enabled:
-            return ""
-        text = str(query or "").strip()
-        if not text:
-            return ""
-        if self._auto_query_too_vague(text):
-            return ""
-        compact_len = len(re.sub(r"\s+", "", text))
-        long_enough = compact_len >= self.query_planner_min_chars
-        if self._query_looks_operational_task_without_recall(text):
-            return ""
-        multi_topic = self._query_looks_multi_topic(text)
-        if multi_topic:
-            return "multi_topic"
-        if self._query_looks_emotional_reason_lookup(text):
-            return "emotional_reason_lookup"
-        if not selected_items and long_enough:
-            return "direct_recall_empty_or_low_confidence"
-        return ""
-
-    def _query_looks_operational_task_without_recall(self, query: str) -> bool:
-        text = str(query or "").strip().lower()
-        if not text:
-            return False
-        recall_markers = query_intent_terms("operational_task.recall_markers")
-        if any(marker in text for marker in recall_markers):
-            return False
-        task_markers = query_intent_terms("operational_task.task_markers")
-        return any(marker in text for marker in task_markers)
-
     def _query_looks_emotional_reason_lookup(self, query: str) -> bool:
         return emotional_recall_plan(query, self.relevance_options).triggered
-
-    def _emotional_reason_lookup_fallback_plan(self, query: str) -> dict[str, Any] | None:
-        plan = emotional_recall_plan(query, self.relevance_options)
-        if not plan.triggered:
-            return None
-        if plan.strong_terms:
-            terms = [plan.strong_terms[0]]
-        elif plan.event_terms and plan.weak_terms:
-            weak_keys = {str(term).strip() for term in plan.weak_terms}
-            event_term = next(
-                (
-                    term for term in plan.event_terms
-                    if not any(weak and weak in str(term) for weak in weak_keys)
-                ),
-                plan.event_terms[0],
-            )
-            terms = [event_term, plan.weak_terms[0]]
-        else:
-            terms = list(plan.search_terms[:2])
-        terms = [
-            term
-            for term in (
-                self._strip_leading_lookup_address_from_text(term, query)
-                for term in terms
-            )
-            if term
-        ]
-        if not terms:
-            return None
-        anchor = " ".join(terms[:3])
-        return {
-            "should_search": True,
-            "too_vague": False,
-            "queries": [
-                {
-                    "query": anchor,
-                    "must_terms": terms[:3],
-                    "intent": "deterministic emotional reason lookup",
-                    "risk": "medium",
-                }
-            ],
-        }
 
     def _emotional_reason_lookup_terms(self, query: str) -> list[str]:
         plan = emotional_recall_plan(query, self.relevance_options)
@@ -14555,81 +13225,12 @@ class GatewayService:
             return []
         return list(plan.search_terms[:4])
 
-    def _query_looks_multi_topic(self, query: str) -> bool:
-        text = str(query or "").strip()
-        if not text:
-            return False
-        compact_len = len(re.sub(r"\s+", "", text))
-        if compact_len < max(12, self.query_planner_min_chars // 2):
-            return False
-        terms = self.recall_policy.specific_query_terms(text)
-        separator_count = len(re.findall(r"[，,。！？!?；;、/\n]", text))
-        topic_markers = ("另外", "还有", "而且", "同时", "顺便", "然后", "以及", "但是", "不过", "再说")
-        if len(terms) >= 5 and (separator_count >= 1 or compact_len >= self.query_planner_min_chars):
-            return True
-        if len(terms) >= 3 and (separator_count >= 2 or any(marker in text for marker in topic_markers)):
-            return True
-        return False
-
-    async def _call_query_planner(self, query: str) -> tuple[dict[str, Any] | None, str | None]:
-        model = self.query_planner_model
-        if not model:
-            return None, "query_planner_model_missing"
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": QUERY_PLANNER_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "message": query,
-                            "max_queries": self.query_planner_max_queries,
-                        },
-                        ensure_ascii=False,
-                    ),
-                },
-            ],
-            "temperature": 0,
-            "max_tokens": self.query_planner_max_tokens,
-            "stream": False,
-        }
-        if self.query_planner_uses_dehydrator:
-            content, error = await self._call_query_planner_with_dehydrator(payload)
-            if error:
-                return None, error
-            if not content:
-                return None, "query_planner_empty_response"
-            try:
-                return self._parse_query_planner_response(content), None
-            except ValueError as exc:
-                return None, f"query_planner_parse_failed:{exc}"
-
-        try:
-            response = await self._forward_upstream(payload)
-        except Exception as exc:
-            logger.warning("Gateway query planner call failed: %s", exc)
-            return None, f"query_planner_call_failed:{type(exc).__name__}"
-        if response.status_code >= 400:
-            return None, f"query_planner_upstream_status:{response.status_code}"
-        try:
-            body = response.json()
-        except Exception:
-            return None, "query_planner_invalid_upstream_json"
-        content = self._chat_completion_content(body)
-        if not content:
-            return None, "query_planner_empty_response"
-        try:
-            return self._parse_query_planner_response(content), None
-        except ValueError as exc:
-            return None, f"query_planner_parse_failed:{exc}"
-
-    async def _call_query_planner_with_dehydrator(self, payload: dict) -> tuple[str | None, str | None]:
+    async def _call_dehydrator_completion(self, payload: dict) -> tuple[str | None, str | None]:
         client = getattr(self.dehydrator, "client", None)
         if client is None:
-            return None, "query_planner_dehydration_unavailable"
+            return None, "dehydration_unavailable"
         completion_options = getattr(self.dehydrator, "_completion_options", None)
-        max_tokens = int(payload.get("max_tokens") or self.query_planner_max_tokens)
+        max_tokens = int(payload.get("max_tokens") or 256)
         if callable(completion_options):
             options = completion_options(
                 max_tokens=max_tokens,
@@ -14647,8 +13248,8 @@ class GatewayService:
                 **options,
             )
         except Exception as exc:
-            logger.warning("Gateway query planner dehydration call failed: %s", exc)
-            return None, f"query_planner_dehydration_call_failed:{type(exc).__name__}"
+            logger.warning("Gateway dehydration completion failed: %s", exc)
+            return None, f"dehydration_call_failed:{type(exc).__name__}"
         choices = getattr(response, "choices", None) or []
         if not choices:
             return None, None
@@ -14726,9 +13327,6 @@ class GatewayService:
         if self._auto_recall_low_signal_query(query):
             finish("low_signal_query")
             return None
-        if self._query_is_category_overview(query):
-            finish("category_overview")
-            return None
         axes = self._semantic_rescue_axes(query)
         if not axes:
             finish("no_specific_axis")
@@ -14794,7 +13392,7 @@ class GatewayService:
         debug["called"] = True
         try:
             content, error = await asyncio.wait_for(
-                self._call_query_planner_with_dehydrator(payload),
+                self._call_dehydrator_completion(payload),
                 timeout=self.semantic_rescue_timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -14802,7 +13400,7 @@ class GatewayService:
             finish("model_error")
             return None
         if error:
-            debug["error"] = str(error).replace("query_planner", "semantic_rescue")
+            debug["error"] = str(error)
             finish("model_error")
             return None
         try:
@@ -14898,80 +13496,9 @@ class GatewayService:
         text = first.get("text") if isinstance(first, dict) else ""
         return str(text or "").strip()
 
-    def _parse_query_planner_response(self, content: str) -> dict[str, Any]:
-        text = str(content or "").strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-            text = re.sub(r"\s*```$", "", text).strip()
-        if not text.startswith("{"):
-            start = text.find("{")
-            end = text.rfind("}")
-            if start >= 0 and end > start:
-                text = text[start : end + 1]
-        try:
-            raw = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError("invalid_json") from exc
-        if not isinstance(raw, dict):
-            raise ValueError("json_root_not_object")
-
-        plan = {
-            "should_search": bool(raw.get("should_search", False)),
-            "too_vague": bool(raw.get("too_vague", False)),
-            "queries": [],
-        }
-        raw_queries = raw.get("queries")
-        if not isinstance(raw_queries, list):
-            raw_queries = []
-        for item in raw_queries[: self.query_planner_max_queries]:
-            if not isinstance(item, dict):
-                continue
-            query = self._clip_text(str(item.get("query") or "").strip(), 80)
-            if not query:
-                continue
-            must_terms = self._filter_planner_must_terms(
-                self._normalize_planner_terms(item.get("must_terms"))
-            )
-            if not must_terms:
-                must_terms = self._filter_planner_must_terms(
-                    self._normalize_planner_terms(self._locatable_query_terms(query)[:4])
-                )
-            if not must_terms:
-                continue
-            risk = str(item.get("risk") or "medium").strip().lower()
-            if risk not in {"low", "medium", "high"}:
-                risk = "medium"
-            plan["queries"].append(
-                {
-                    "query": query,
-                    "must_terms": must_terms[:5],
-                    "intent": self._clip_text(str(item.get("intent") or ""), 80),
-                    "risk": risk,
-                }
-            )
-        if not plan["queries"]:
-            plan["should_search"] = False
-        return plan
-
-    def _filter_planner_must_terms(self, terms: list[str]) -> list[str]:
-        filtered: list[str] = []
-        seen: set[str] = set()
-        for term in terms or []:
-            key = self._compact_lookup_key(term)
-            if not key or not self._planner_must_term_allowed(key):
-                continue
-            if key in seen:
-                continue
-            seen.add(key)
-            filtered.append(term)
-        return filtered
-
-    def _planner_must_term_allowed(self, compact_term: str) -> bool:
+    def _word_map_term_allowed_by_identity(self, compact_term: str) -> bool:
         key = str(compact_term or "").strip().lower()
         if not key:
-            return False
-        low_signal_terms = LOW_SIGNAL_AFFECTION_TERMS
-        if key in {self._compact_lookup_key(term) for term in low_signal_terms}:
             return False
         identity_terms = [
             self.identity.get("ai_name"),
@@ -15189,18 +13716,6 @@ class GatewayService:
             {bucket_id: debug[bucket_id] for bucket_id in ranked_ids if bucket_id in kept_ids},
         )
 
-    def _has_named_exact_anchor_candidate(self, query: str, buckets: list[dict]) -> bool:
-        _scores, debug = self._get_exact_anchor_candidates(
-            query,
-            self._normalized_recall_query(query),
-            buckets,
-        )
-        return any(
-            any(field != "content" for field in (item.get("fields") or []))
-            for item in debug.values()
-            if isinstance(item, dict)
-        )
-
     def _bucket_exact_anchor_score(self, bucket: dict, term: str) -> tuple[float, str]:
         anchor = self._compact_exact_anchor_text(term)
         if not anchor:
@@ -15304,576 +13819,6 @@ class GatewayService:
             )
         return output
 
-    def _dynamic_anchor_query_terms(self, query: str) -> list[str]:
-        text = str(query or "").strip()
-        if not text:
-            return []
-        raw_terms: list[str] = []
-        raw_terms.extend(self._locatable_query_terms(text))
-        raw_terms.extend(extract_protected_phrases(text))
-        raw_terms.extend(
-            self._extract_exact_anchor_terms(
-                text,
-                self._normalized_recall_query(text),
-            )
-        )
-
-        output: list[str] = []
-        seen: set[str] = set()
-
-        def add(value: Any) -> None:
-            cleaned = " ".join(str(value or "").split()).strip()
-            key = self._compact_lookup_key(cleaned)
-            if not key or key in seen:
-                return
-            if key in MEMORY_SENTINEL_RESIDUE_STOP_TERMS:
-                return
-            if key in GENERIC_LEXICAL_STOPWORD_KEYS:
-                return
-            if key in self._identity_match_terms(compact=True):
-                return
-            if re.fullmatch(r"[\u4e00-\u9fff]+", key) and len(key) < 2:
-                return
-            if re.fullmatch(r"[a-z0-9_.:/-]+", key) and len(key) < 3 and not re.search(r"\d", key):
-                return
-            seen.add(key)
-            output.append(cleaned)
-
-        for term in raw_terms:
-            add(term)
-        for term in list(output):
-            key = self._compact_lookup_key(term)
-            if re.fullmatch(r"[\u4e00-\u9fff]{4}", key):
-                add(key[:2])
-                add(key[-2:])
-        return output[:16]
-
-    def _dynamic_anchor_term_is_category(self, term: str) -> bool:
-        key = self._compact_lookup_key(term)
-        if not key:
-            return False
-        return key in {
-            self._compact_lookup_key(value)
-            for value in self._dynamic_anchor_category_terms()
-            if self._compact_lookup_key(value)
-        }
-
-    def _dynamic_anchor_authored_cue_is_strong(self, cue: str, metadata: dict) -> bool:
-        """Recognize an exact authored phrase without treating every project token as hard."""
-        text = " ".join(str(cue or "").split()).strip()
-        key = self._compact_lookup_key(text)
-        if not key or self._dynamic_anchor_term_is_category(text):
-            return False
-        configured = []
-        for field in ("scene_hard_cues", "hard_scene_cues"):
-            values = metadata.get(field, []) if isinstance(metadata, dict) else []
-            if isinstance(values, str):
-                values = [values]
-            configured.extend(values or [])
-        if key in {
-            self._compact_lookup_key(value)
-            for value in configured
-            if self._compact_lookup_key(value)
-        }:
-            return True
-        cjk_count = len(re.findall(r"[\u4e00-\u9fff]", key))
-        has_latin = bool(re.search(r"[a-z]", key))
-        has_digit = bool(re.search(r"\d", key))
-        has_structure = bool(re.search(r"[_:/#@.-]", text))
-        latin_words = re.findall(r"[A-Za-z0-9]+", text)
-        return bool(
-            cjk_count >= 5
-            or (cjk_count >= 2 and has_latin and len(key) >= 6)
-            or (len(latin_words) >= 2 and len(key) >= 8)
-            or ((has_digit or has_structure) and len(key) >= 4)
-        )
-
-    def _dynamic_anchor_category_terms(self) -> set[str]:
-        terms = set(GENERIC_KEYWORD_MATCH_TERMS)
-        word_map_cfg = self.config.get("word_map", {})
-        if isinstance(word_map_cfg, dict):
-            configured = word_map_cfg.get("weak_hint_terms", []) or []
-            if isinstance(configured, str):
-                configured = [configured]
-            terms.update(str(value).strip() for value in configured if str(value).strip())
-        if self.word_map_store is not None:
-            terms.update(getattr(self.word_map_store, "weak_hint_terms", set()) or set())
-        return terms
-
-    @staticmethod
-    def _query_is_category_overview(query: str) -> bool:
-        text = str(query or "").strip().lower()
-        return bool(text and any(marker in text for marker in DYNAMIC_ANCHOR_CATEGORY_OVERVIEW_MARKERS))
-
-    def _dynamic_anchor_plan(
-        self,
-        query: str,
-        buckets: list[dict],
-        alias_hits: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        terms = self._dynamic_anchor_query_terms(query)
-        stats_method = getattr(self.bucket_mgr, "lexical_term_specificity_stats", None)
-        stats = stats_method(terms, buckets) if callable(stats_method) else {}
-        alias_counts: dict[str, int] = {}
-        for row in alias_hits or []:
-            count = max(1, int(row.get("bucket_count") or 1))
-            for term in row.get("matched_terms") or []:
-                key = self._compact_lookup_key(term)
-                if key:
-                    alias_counts[key] = min(alias_counts.get(key, count), count)
-
-        query_key = self._compact_lookup_key(query)
-        identity_keys = self._identity_match_terms(compact=True)
-        cue_rows: dict[str, dict[str, Any]] = {}
-        for bucket in buckets or []:
-            if not isinstance(bucket, dict):
-                continue
-            bucket_id = str(bucket.get("id") or "").strip()
-            meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
-            for cue in meta.get("scene_cues", []) or []:
-                cue_text = " ".join(str(cue or "").split()).strip()
-                cue_key = self._compact_lookup_key(cue_text)
-                if (
-                    not cue_key
-                    or cue_key not in query_key
-                    or cue_key in GENERIC_LEXICAL_STOPWORD_KEYS
-                    or cue_key in MEMORY_SENTINEL_RESIDUE_STOP_TERMS
-                    or cue_key in identity_keys
-                    or (re.fullmatch(r"[\u4e00-\u9fff]+", cue_key) and len(cue_key) < 2)
-                    or (
-                        re.fullmatch(r"[a-z0-9_.:/-]+", cue_key)
-                        and len(cue_key) < 3
-                        and not re.search(r"\d", cue_key)
-                    )
-                ):
-                    continue
-                row = cue_rows.setdefault(
-                    cue_key,
-                    {
-                        "term": cue_text,
-                        "bucket_ids": set(),
-                        "query_index": query_key.find(cue_key),
-                        "strong": False,
-                    },
-                )
-                if bucket_id:
-                    row["bucket_ids"].add(bucket_id)
-                row["strong"] = bool(
-                    row["strong"]
-                    or self._dynamic_anchor_authored_cue_is_strong(cue_text, meta)
-                )
-
-        cue_terms = self._dynamic_anchor_independent_terms([
-            str(row["term"])
-            for _key, row in sorted(
-                cue_rows.items(),
-                key=lambda item: (
-                    int(item[1].get("query_index") or 0),
-                    -len(item[0]),
-                    item[0],
-                ),
-            )
-        ])
-        independent_cue_keys = {
-            self._compact_lookup_key(term)
-            for term in cue_terms
-            if self._compact_lookup_key(term)
-        }
-        strong_cue_keys = {
-            key
-            for key in independent_cue_keys
-            if bool((cue_rows.get(key) or {}).get("strong"))
-        }
-        for cue_term in cue_terms:
-            cue_key = self._compact_lookup_key(cue_term)
-            if all(self._compact_lookup_key(term) != cue_key for term in terms):
-                terms.append(cue_term)
-
-        overview = self._query_is_category_overview(query)
-        term_rows: list[dict[str, Any]] = []
-        discriminative: list[str] = []
-        category: list[str] = []
-        support: list[str] = []
-        for term in terms:
-            raw = stats.get(term) if isinstance(stats, dict) else {}
-            raw = raw if isinstance(raw, dict) else {}
-            document_frequency = max(0, int(raw.get("document_frequency") or 0))
-            document_count = max(0, int(raw.get("document_count") or 0))
-            alias_count = alias_counts.get(self._compact_lookup_key(term), 0)
-            cue_row = cue_rows.get(self._compact_lookup_key(term)) or {}
-            cue_bucket_count = len(cue_row.get("bucket_ids") or ())
-            observed = document_frequency > 0 or alias_count > 0 or cue_bucket_count > 0
-            fixed_category = self._dynamic_anchor_term_is_category(term)
-            is_discriminative = bool(
-                self._compact_lookup_key(term) in independent_cue_keys
-                and not fixed_category
-            )
-            is_category = bool(
-                observed
-                and not is_discriminative
-                and (fixed_category or overview)
-            )
-            if is_discriminative:
-                discriminative.append(term)
-            elif is_category:
-                category.append(term)
-            elif observed:
-                support.append(term)
-            term_rows.append(
-                {
-                    "term": term,
-                    "document_frequency": document_frequency,
-                    "document_count": document_count,
-                    "document_ratio": round(
-                        document_frequency / max(document_count, 1),
-                        4,
-                    ) if document_count else 0.0,
-                    "specificity": self._safe_float(raw.get("specificity"), 0.0),
-                    "alias_bucket_count": alias_count,
-                    "scene_cue_bucket_count": cue_bucket_count,
-                    "kind": (
-                        "discriminative"
-                        if is_discriminative
-                        else "category"
-                        if is_category
-                        else "support"
-                        if observed
-                        else "unseen"
-                    ),
-                }
-            )
-
-        discriminative.sort(
-            key=lambda term: (
-                query_key.find(self._compact_lookup_key(term)),
-                -len(self._compact_lookup_key(term)),
-            )
-        )
-        strict_diffusion = bool(
-            overview
-            or (discriminative and category)
-        )
-        return {
-            "version": 1,
-            "query": self._clip_text(query, 500),
-            "category_overview": overview,
-            "discriminative_terms": discriminative,
-            "strong_cue_terms": [
-                term
-                for term in discriminative
-                if self._compact_lookup_key(term) in strong_cue_keys
-            ],
-            "required_terms": discriminative,
-            "required_match_count": 2 if discriminative else 0,
-            "category_terms": list(dict.fromkeys(category)),
-            "support_terms": list(dict.fromkeys(support)),
-            "strict_diffusion": strict_diffusion,
-            "term_stats": term_rows,
-            "retrieval_alias_bucket_ids": list(
-                dict.fromkeys(str(row.get("bucket_id") or "") for row in alias_hits if row.get("bucket_id"))
-            ),
-        }
-
-    def _dynamic_anchor_term_matches_text(self, term: str, text_key: str) -> bool:
-        key = self._compact_lookup_key(term)
-        if not key or not text_key:
-            return False
-        if key in text_key:
-            return True
-        if re.fullmatch(r"[\u4e00-\u9fff]{4}", key):
-            return key[:2] in text_key and key[-2:] in text_key
-        return False
-
-    def _dynamic_anchor_independent_terms(self, terms: list[str]) -> list[str]:
-        """Collapse nested cues so one phrase cannot count as two anchors."""
-        output: list[str] = []
-        output_keys: list[str] = []
-        for term in terms or []:
-            key = self._compact_lookup_key(term)
-            if not key:
-                continue
-            overlap_index = next(
-                (
-                    index
-                    for index, existing_key in enumerate(output_keys)
-                    if key in existing_key or existing_key in key
-                ),
-                None,
-            )
-            if overlap_index is None:
-                output.append(term)
-                output_keys.append(key)
-                continue
-            if len(key) > len(output_keys[overlap_index]):
-                output[overlap_index] = term
-                output_keys[overlap_index] = key
-        return output
-
-    def _dynamic_anchor_bucket_payload(
-        self,
-        bucket: dict,
-        plan: dict[str, Any],
-        alias_hits: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        cue_key = self._compact_lookup_key(
-            " ".join(str(item) for item in meta.get("scene_cues", []) or [])
-        )
-        trusted_key = self._compact_lookup_key(
-            " ".join(
-                [
-                    str(meta.get("name") or ""),
-                    str(meta.get("subject") or ""),
-                    " ".join(str(item) for item in meta.get("keywords", []) or []),
-                    " ".join(str(item) for item in meta.get("tags", []) or []),
-                ]
-            )
-        )
-        full_key = self._compact_lookup_key(self._date_recall_bucket_text(bucket))
-        alias_key = self._compact_lookup_key(
-            " ".join(
-                str(row.get("alias_text") or "")
-                for row in alias_hits or []
-            )
-        )
-
-        def covered_for_category(term: str, *, allow_full: bool = False) -> bool:
-            return bool(
-                self._dynamic_anchor_term_matches_text(term, trusted_key)
-                or self._dynamic_anchor_term_matches_text(term, alias_key)
-                or (allow_full and self._dynamic_anchor_term_matches_text(term, full_key))
-            )
-
-        discriminative_terms = list(plan.get("discriminative_terms") or [])
-        required_terms = list(plan.get("required_terms") or [])
-        matched_terms = [
-            term
-            for term in discriminative_terms
-            if self._dynamic_anchor_term_matches_text(term, cue_key)
-        ]
-        matched_strong_terms = [
-            term
-            for term in plan.get("strong_cue_terms") or []
-            if term in matched_terms
-        ]
-        required_match_count = max(0, int(plan.get("required_match_count") or 0))
-        distinctive_anchor_match = bool(
-            matched_strong_terms
-            or (
-                required_match_count
-                and len(matched_terms) >= required_match_count
-            )
-        )
-        missing_terms = [term for term in required_terms if term not in matched_terms]
-        category_terms = list(plan.get("category_terms") or [])
-        matched_category_terms = [
-            term for term in category_terms
-            if covered_for_category(term, allow_full=True)
-        ]
-        view = normalize_memory_metadata(bucket)
-        title = str(meta.get("name") or bucket.get("name") or "").strip()
-        title_key = self._compact_lookup_key(title)
-        title_residue = title_key
-        for term in matched_category_terms:
-            title_residue = title_residue.replace(self._compact_lookup_key(term), "")
-        concrete_title = bool(
-            len(title_residue) >= 2
-            and not any(marker in title for marker in ("喜欢", "偏好", "爱听", "想听"))
-        )
-        category_item = bool(
-            plan.get("category_overview")
-            and matched_category_terms
-            and concrete_title
-            and str(view.get("kind") or "") not in DYNAMIC_ANCHOR_CATEGORY_BLOCKED_KINDS
-        )
-        return {
-            "dynamic_anchor_plan": plan,
-            "distinctive_anchor_match": distinctive_anchor_match,
-            "distinctive_anchor_terms": matched_terms,
-            "strong_authored_cue_match": bool(matched_strong_terms),
-            "strong_authored_cue_terms": matched_strong_terms,
-            "distinctive_anchor_missing_terms": missing_terms,
-            "anchor_coverage": round(
-                len(matched_terms) / max(len(discriminative_terms), 1),
-                4,
-            ) if discriminative_terms else 0.0,
-            "category_overview_item": category_item,
-            "category_overview_terms": matched_category_terms,
-            "retrieval_alias_match": bool(alias_hits),
-            "retrieval_alias_score": max(
-                (self._safe_float(row.get("score"), 0.0) for row in alias_hits or []),
-                default=0.0,
-            ),
-            "retrieval_alias_terms": list(
-                dict.fromkeys(
-                    term
-                    for row in alias_hits or []
-                    for term in row.get("matched_terms") or []
-                    if str(term or "").strip()
-                )
-            ),
-            "retrieval_alias_sources": list(
-                dict.fromkeys(str(row.get("source") or "") for row in alias_hits or [] if row.get("source"))
-            ),
-            "retrieval_alias_moment_ids": list(
-                dict.fromkeys(str(row.get("moment_id") or "") for row in alias_hits or [] if row.get("moment_id"))
-            ),
-            "retrieval_alias_bucket_count": min(
-                (max(1, int(row.get("bucket_count") or 1)) for row in alias_hits or []),
-                default=0,
-            ),
-        }
-
-    def _dynamic_anchor_node_payload(self, node: dict, plan: dict[str, Any]) -> dict[str, Any]:
-        meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
-        cue_key = self._compact_lookup_key(
-            " ".join(str(item) for item in meta.get("bucket_scene_cues", []) or [])
-        )
-        fields = self._compact_lookup_key(self._moment_search_fields(node))
-        required_terms = list(plan.get("required_terms") or [])
-        matched_terms = [
-            term for term in plan.get("discriminative_terms") or []
-            if self._dynamic_anchor_term_matches_text(term, cue_key)
-        ]
-        matched_strong_terms = [
-            term
-            for term in plan.get("strong_cue_terms") or []
-            if term in matched_terms
-        ]
-        required_match_count = max(0, int(plan.get("required_match_count") or 0))
-        distinctive_anchor_match = bool(
-            matched_strong_terms
-            or (
-                required_match_count
-                and len(matched_terms) >= required_match_count
-            )
-        )
-        missing_terms = [term for term in required_terms if term not in matched_terms]
-        matched_category_terms = [
-            term for term in plan.get("category_terms") or []
-            if self._dynamic_anchor_term_matches_text(term, fields)
-        ]
-        meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
-        title = str(meta.get("bucket_name") or meta.get("name") or "").strip()
-        title_key = self._compact_lookup_key(title)
-        title_residue = title_key
-        for term in matched_category_terms:
-            title_residue = title_residue.replace(self._compact_lookup_key(term), "")
-        view = normalize_memory_metadata(self._reading_note_bucket_view(None, node))
-        return {
-            "distinctive_anchor_match": distinctive_anchor_match,
-            "distinctive_anchor_terms": matched_terms,
-            "strong_authored_cue_match": bool(matched_strong_terms),
-            "strong_authored_cue_terms": matched_strong_terms,
-            "distinctive_anchor_missing_terms": missing_terms,
-            "category_overview_item": bool(
-                plan.get("category_overview")
-                and matched_category_terms
-                and len(title_residue) >= 2
-                and not any(marker in title for marker in ("喜欢", "偏好", "爱听", "想听"))
-                and str(view.get("kind") or "") not in DYNAMIC_ANCHOR_CATEGORY_BLOCKED_KINDS
-            ),
-            "category_overview_terms": matched_category_terms,
-        }
-
-    @staticmethod
-    def _dynamic_anchor_plan_from_items(items: list[dict]) -> dict[str, Any]:
-        for item in items or []:
-            plan = item.get("dynamic_anchor_plan") if isinstance(item, dict) else None
-            if isinstance(plan, dict) and (
-                plan.get("required_terms")
-                or plan.get("category_terms")
-                or plan.get("support_terms")
-                or plan.get("retrieval_alias_bucket_ids")
-            ):
-                return dict(plan)
-        return {}
-
-    def _merge_dynamic_anchor_debug(self, target: dict[str, Any], items: list[dict]) -> None:
-        if not isinstance(target, dict):
-            return
-        plan = self._dynamic_anchor_plan_from_items(items)
-        if not plan:
-            return
-        alias_hits = []
-        for item in items or []:
-            bucket = item.get("bucket") if isinstance(item, dict) else {}
-            if not isinstance(bucket, dict) or not item.get("retrieval_alias_match"):
-                continue
-            alias_hits.append(
-                {
-                    "bucket_id": str(bucket.get("id") or ""),
-                    "bucket_name": str((bucket.get("metadata") or {}).get("name") or bucket.get("id") or ""),
-                    "terms": list(item.get("retrieval_alias_terms") or []),
-                    "sources": list(item.get("retrieval_alias_sources") or []),
-                    "moment_ids": list(item.get("retrieval_alias_moment_ids") or []),
-                    "bucket_count": int(item.get("retrieval_alias_bucket_count") or 0),
-                    "admission_reason": str(item.get("admission_reason") or ""),
-                }
-            )
-        target["dynamic_anchor"] = {
-            **plan,
-            "retrieval_alias_hits": alias_hits[:12],
-        }
-
-    def _merge_dynamic_bucket_items(self, items: list[dict], query: str) -> list[dict]:
-        merged: dict[str, dict] = {}
-        for item in items:
-            bucket = item.get("bucket") if isinstance(item, dict) else None
-            if not isinstance(bucket, dict):
-                continue
-            bucket_id = str(bucket.get("id") or "")
-            if not bucket_id:
-                continue
-            incoming = dict(item)
-            incoming_queries = list(incoming.get("planner_queries") or [])
-            existing = merged.get(bucket_id)
-            if existing is None:
-                incoming["planner_queries"] = incoming_queries
-                incoming["planner_match_count"] = len({str(q.get("query") or "") for q in incoming_queries})
-                incoming["matched_query_terms"] = list(dict.fromkeys(incoming.get("matched_query_terms") or []))
-                merged[bucket_id] = incoming
-                continue
-
-            existing_queries = list(existing.get("planner_queries") or [])
-            query_keys = {str(q.get("query") or "") for q in existing_queries}
-            for query_info in incoming_queries:
-                key = str(query_info.get("query") or "")
-                if key and key not in query_keys:
-                    existing_queries.append(query_info)
-                    query_keys.add(key)
-            best = incoming if self._safe_float(incoming.get("score"), 0.0) > self._safe_float(existing.get("score"), 0.0) else existing
-            preserved_queries = existing_queries
-            preserved_count = len(query_keys)
-            preserved_terms = list(
-                dict.fromkeys(
-                    list(existing.get("matched_query_terms") or [])
-                    + list(incoming.get("matched_query_terms") or [])
-                )
-            )
-            merged[bucket_id] = dict(best)
-            merged[bucket_id]["planner_queries"] = preserved_queries
-            merged[bucket_id]["planner_match_count"] = preserved_count
-            merged[bucket_id]["matched_query_terms"] = preserved_terms
-
-        output = []
-        for item in merged.values():
-            match_count = int(item.get("planner_match_count") or 0)
-            if match_count > 1:
-                bonus = min(self.query_planner_score_bonus * (match_count - 1), self.query_planner_score_bonus * 3)
-                item["score"] = round(self._safe_float(item.get("score"), 0.0) + bonus, 4)
-                item["planner_score_bonus"] = round(bonus, 4)
-            output.append(item)
-
-        output.sort(
-            key=lambda item: (
-                self._bucket_recall_rank(query, item["bucket"], item.get("score", 0.0))[0],
-                -int(item.get("planner_match_count") or 0),
-                -self._safe_float(item.get("score"), 0.0),
-            )
-        )
-        return output
-
     async def _dynamic_bucket_candidate_items(
         self,
         query: str,
@@ -15897,25 +13842,6 @@ class GatewayService:
         if not query or self.inject_max_cards <= 0:
             return [], []
         all_buckets = suppress_migrated_legacy_sources(all_buckets)
-        early_query_plan = self._recall_query_plan(query)
-        if getattr(early_query_plan, "skip_reason", "") == "recall_meta_without_target":
-            return [], []
-        allow_raw_semantic_for_auto_vague = (
-            getattr(early_query_plan, "skip_reason", "") == "auto_vague_query"
-            and allow_semantic
-            and not self._auto_query_too_vague(query)
-        )
-        named_exact_anchor_match = bool(
-            getattr(early_query_plan, "skip_long_term_recall", False)
-            and self._has_named_exact_anchor_candidate(query, all_buckets)
-        )
-        if (
-            getattr(early_query_plan, "skip_long_term_recall", False)
-            and not str(search_query or "").strip()
-            and not allow_raw_semantic_for_auto_vague
-            and not named_exact_anchor_match
-        ):
-            return [], []
 
         raw_query = query
         policy_query = str(context_query or query or "").strip() or query
@@ -15956,47 +13882,6 @@ class GatewayService:
             retrieval_alias_scores[bucket_id] = max(
                 retrieval_alias_scores.get(bucket_id, 0.0),
                 self._clamp(self._safe_float(row.get("score"), 0.0)),
-            )
-        dynamic_anchor_plan = self._dynamic_anchor_plan(
-            policy_query,
-            list(alias_eligible_map.values()),
-            retrieval_alias_hits,
-        )
-        if (
-            dynamic_anchor_plan.get("category_overview")
-            and dynamic_anchor_plan.get("category_terms")
-        ):
-            seen_alias_hits = {
-                (
-                    str(row.get("bucket_id") or ""),
-                    str(row.get("moment_id") or ""),
-                    str(row.get("alias_text") or ""),
-                    str(row.get("source") or ""),
-                )
-                for row in retrieval_alias_hits
-            }
-            for category_term in dynamic_anchor_plan.get("category_terms") or []:
-                for row in self._retrieval_alias_hits(str(category_term), set(alias_eligible_map)):
-                    key = (
-                        str(row.get("bucket_id") or ""),
-                        str(row.get("moment_id") or ""),
-                        str(row.get("alias_text") or ""),
-                        str(row.get("source") or ""),
-                    )
-                    if key in seen_alias_hits:
-                        continue
-                    seen_alias_hits.add(key)
-                    retrieval_alias_hits.append(row)
-                    bucket_id = str(row.get("bucket_id") or "")
-                    retrieval_alias_by_bucket.setdefault(bucket_id, []).append(row)
-                    retrieval_alias_scores[bucket_id] = max(
-                        retrieval_alias_scores.get(bucket_id, 0.0),
-                        self._clamp(self._safe_float(row.get("score"), 0.0)),
-                    )
-            dynamic_anchor_plan = self._dynamic_anchor_plan(
-                policy_query,
-                list(alias_eligible_map.values()),
-                retrieval_alias_hits,
             )
         mark("retrieval_aliases", stage_started_at)
         normalized_query = str(search_query or "").strip()
@@ -16071,11 +13956,6 @@ class GatewayService:
         )
         if not candidate_ids:
             return [], []
-        entity_edge_shadow_matches = self._get_entity_edge_boosts(
-            raw_query,
-            set(candidate_ids),
-        )
-
         stage_started_at = time.perf_counter()
         semantic_norms = self._normalized_score_map(semantic_scores)
         keyword_basis = {
@@ -16111,8 +13991,6 @@ class GatewayService:
             keyword_score = self._clamp(keyword_scores.get(bucket_id, 0.0))
             exact_score = self._clamp(exact_scores.get(bucket_id, 0.0))
             word_map_score = self._clamp(word_map_scores.get(bucket_id, 0.0))
-            entity_edge = entity_edge_shadow_matches.get(bucket_id) or {}
-            entity_edge_score = self._clamp(entity_edge.get("score") or 0.0)
             word_map_item_debug = word_map_debug.get(bucket_id) or {}
             rare_name_terms = list(word_map_item_debug.get("rare_name_terms") or [])
             rare_name_match = bool(rare_name_terms)
@@ -16129,10 +14007,14 @@ class GatewayService:
             )
             lexical_match = bucket_id in lexical_ids
             exact_match = bucket_id in exact_scores
-            dynamic_anchor = self._dynamic_anchor_bucket_payload(
-                bucket,
-                dynamic_anchor_plan,
-                retrieval_alias_by_bucket.get(bucket_id, []),
+            alias_hits = retrieval_alias_by_bucket.get(bucket_id, [])
+            alias_terms = list(
+                dict.fromkeys(
+                    term
+                    for row in alias_hits
+                    for term in row.get("matched_terms") or []
+                    if str(term or "").strip()
+                )
             )
             if lexical_match:
                 keyword_score = max(keyword_score, 1.0)
@@ -16156,9 +14038,7 @@ class GatewayService:
             matched_query_terms = list(
                 dict.fromkeys(
                     matched_query_terms
-                    + list(dynamic_anchor.get("distinctive_anchor_terms") or [])
-                    + list(dynamic_anchor.get("category_overview_terms") or [])
-                    + list(dynamic_anchor.get("retrieval_alias_terms") or [])
+                    + alias_terms
                 )
             )
             keyword_signal_item = {
@@ -16223,10 +14103,6 @@ class GatewayService:
                     + freshness_score * self.freshness_weight
                 ) * relevance_score
                 final_score = round(fusion_score * cooldown_multiplier, 4)
-            entity_edge_shadow = self._entity_edge_shadow_debug(
-                score=entity_edge_score,
-                relation=str(entity_edge.get("relation") or ""),
-            )
             if (
                 planner_lexical_direct_match
                 or exact_match
@@ -16245,12 +14121,6 @@ class GatewayService:
                     "exact_anchor_fields": list((exact_debug.get(bucket_id) or {}).get("fields") or []),
                     "word_map_score": word_map_score,
                     "word_map_hint": bucket_id in word_map_scores,
-                    "entity_edge_match": bool(entity_edge_score > 0),
-                    "entity_edge_score": entity_edge_score,
-                    "entity_edge_subject": str(entity_edge.get("subject") or ""),
-                    "entity_edge_relation": str(entity_edge.get("relation") or ""),
-                    "entity_edge_object": str(entity_edge.get("object_text") or ""),
-                    "entity_edge_shadow": entity_edge_shadow,
                     "word_map_terms": list(word_map_item_debug.get("direct_terms") or []),
                     "word_map_variant_terms": list(word_map_item_debug.get("variant_terms") or []),
                     "word_map_neighbor_terms": list(
@@ -16293,7 +14163,30 @@ class GatewayService:
                     "specific_matched_query_terms": specific_matched_query_terms,
                     "keyword_direct_terms": keyword_direct_terms,
                     "keyword_multi_evidence_signal": keyword_multi_evidence_signal,
-                    **dynamic_anchor,
+                    "retrieval_alias_match": bool(alias_hits),
+                    "retrieval_alias_score": max(
+                        (self._safe_float(row.get("score"), 0.0) for row in alias_hits),
+                        default=0.0,
+                    ),
+                    "retrieval_alias_terms": alias_terms,
+                    "retrieval_alias_sources": list(
+                        dict.fromkeys(
+                            str(row.get("source") or "")
+                            for row in alias_hits
+                            if row.get("source")
+                        )
+                    ),
+                    "retrieval_alias_moment_ids": list(
+                        dict.fromkeys(
+                            str(row.get("moment_id") or "")
+                            for row in alias_hits
+                            if row.get("moment_id")
+                        )
+                    ),
+                    "retrieval_alias_bucket_count": min(
+                        (max(1, int(row.get("bucket_count") or 1)) for row in alias_hits),
+                        default=0,
+                    ),
                 }
             )
         mark("score_candidates", stage_started_at)
@@ -16376,7 +14269,6 @@ class GatewayService:
             semantic_dedupe_suppressed = []
         suppressed_candidates.extend(semantic_dedupe_suppressed)
         mark("semantic_session_dedupe", stage_started_at)
-        admitted_pool = self._boost_explicit_relation_edge_bucket_items(policy_query, admitted_pool)
         admitted_pool.sort(key=lambda item: self._bucket_final_candidate_rank(policy_query, item, recent_ids=recent_ids))
         return admitted_pool, suppressed_candidates
 
@@ -16388,10 +14280,8 @@ class GatewayService:
         *,
         search_query: str = "",
         query_embedding: list[float] | None = None,
-        semantic_entry_routed: bool = False,
         include_query_planner_debug: bool = False,
         allow_semantic: bool = True,
-        allow_query_planner: bool = True,
         allow_semantic_session_dedupe: bool = True,
         allow_rerank: bool = True,
     ) -> tuple[list[dict], list[dict]] | tuple[list[dict], list[dict], dict[str, Any]]:
@@ -16413,21 +14303,6 @@ class GatewayService:
                 ),
             }
             all_buckets = suppress_migrated_legacy_sources(all_buckets)
-        legacy_auto_vague_would_skip = (
-            self._auto_query_too_vague(query)
-            and not str(search_query or "").strip()
-            and not self._has_named_exact_anchor_candidate(query, all_buckets)
-        )
-        planner_debug["legacy_auto_vague_would_skip"] = legacy_auto_vague_would_skip
-        if self._legacy_auto_vague_skip_applies(
-            legacy_auto_vague_would_skip,
-            semantic_entry_routed=semantic_entry_routed,
-        ):
-            planner_debug["skip_reason"] = "auto_vague_query"
-            if include_query_planner_debug:
-                return [], [], planner_debug
-            return [], []
-
         stage_started_at = time.perf_counter()
         active_pool, suppressed_candidates = await self._dynamic_bucket_candidate_items(
             query,
@@ -16446,7 +14321,6 @@ class GatewayService:
         stage_started_at = time.perf_counter()
         self._merge_word_map_hint_debug(planner_debug, active_pool + suppressed_candidates)
         self._merge_exact_anchor_debug(planner_debug, active_pool + suppressed_candidates)
-        self._merge_dynamic_anchor_debug(planner_debug, active_pool + suppressed_candidates)
         direct_selected = self._pick_dynamic_cards(active_pool, query=query)
         selected_items = list(direct_selected)
         self._add_timing_ms(timing_debug, "direct.pick_cards", stage_started_at)
@@ -16490,166 +14364,6 @@ class GatewayService:
                     rescue_debug["selected_bucket_id"] = ""
                     rescue_debug["skip_reason"] = "semantic_session_dedupe"
                     suppressed_candidates.extend(rescue_dedupe_suppressed)
-
-        relation_axis_queries = (
-            []
-            if self._items_have_explicit_relation_pair(direct_selected)
-            else self._relation_axis_supplemental_queries(query)
-        )
-        if relation_axis_queries:
-            relation_axis_items: list[dict] = []
-            for index, axis_query in enumerate(relation_axis_queries):
-                short_query = axis_query["query"]
-                must_terms = list(axis_query.get("must_terms") or [])
-                stage_started_at = time.perf_counter()
-                admitted, suppressed = await self._dynamic_bucket_candidate_items(
-                    short_query,
-                    session_id,
-                    all_buckets,
-                    search_query=self._normalized_recall_query(short_query),
-                    required_terms=must_terms,
-                    planner_query={
-                        "query": short_query,
-                        "must_terms": must_terms,
-                        "source": "relation_axis",
-                    },
-                    allow_semantic=False,
-                    allow_semantic_session_dedupe=allow_semantic_session_dedupe,
-                    allow_rerank=False,
-                    context_query=query,
-                    timing_debug=timing_debug,
-                    timing_prefix=f"relation_axis_{index}",
-                )
-                self._add_timing_ms(
-                    timing_debug,
-                    f"relation_axis_{index}.candidate_items_total",
-                    stage_started_at,
-                )
-                relation_axis_items.extend(admitted)
-                suppressed_candidates.extend(suppressed)
-                structural_activation_items.extend(admitted)
-                structural_activation_items.extend(suppressed)
-                stage_started_at = time.perf_counter()
-                self._merge_word_map_hint_debug(planner_debug, admitted + suppressed)
-                self._merge_exact_anchor_debug(planner_debug, admitted + suppressed)
-                planner_debug["relation_axis"].append(
-                    {
-                        "query": short_query,
-                        "must_terms": must_terms,
-                        "survived_bucket_ids": [
-                            str((item.get("bucket") or {}).get("id") or "")
-                            for item in admitted
-                            if (item.get("bucket") or {}).get("id")
-                        ],
-                        "suppressed_bucket_ids": [
-                            str((item.get("bucket") or {}).get("id") or "")
-                            for item in suppressed
-                            if (item.get("bucket") or {}).get("id")
-                        ],
-                    }
-                )
-                self._add_timing_ms(timing_debug, f"relation_axis_{index}.debug_merge", stage_started_at)
-            if relation_axis_items:
-                stage_started_at = time.perf_counter()
-                merged_items = self._merge_dynamic_bucket_items(selected_items + relation_axis_items, query)
-                merged_items = self._boost_explicit_relation_edge_bucket_items(query, merged_items)
-                merged_items.sort(key=lambda item: self._bucket_final_candidate_rank(query, item))
-                selected_items = self._pick_dynamic_cards(merged_items, query=query)
-                self._add_timing_ms(timing_debug, "relation_axis.pick_cards", stage_started_at)
-
-        stage_started_at = time.perf_counter()
-        trigger_reason = self._query_planner_trigger_reason(query, direct_selected)
-        self._add_timing_ms(timing_debug, "query_planner_trigger_check", stage_started_at)
-        if trigger_reason and allow_query_planner:
-            planner_debug["triggered"] = True
-            planner_debug["trigger_reason"] = trigger_reason
-            stage_started_at = time.perf_counter()
-            plan, error = await self._call_query_planner(query)
-            self._add_timing_ms(timing_debug, "query_planner_call", stage_started_at)
-            if error:
-                planner_debug["errors"].append(error)
-                if trigger_reason == "emotional_reason_lookup":
-                    plan = self._emotional_reason_lookup_fallback_plan(query)
-                    if plan:
-                        planner_debug["errors"].append("query_planner_fallback_used")
-            if plan:
-                planner_debug["queries"] = plan.get("queries", [])
-                if plan.get("should_search") and not plan.get("too_vague"):
-                    supplemental_items: list[dict] = []
-                    planner_debug["supplemental_semantic_enabled"] = self.query_planner_supplemental_semantic
-                    for index, planner_query in enumerate(plan.get("queries", [])[: self.query_planner_max_queries]):
-                        short_query = str(planner_query.get("query") or "").strip()
-                        must_terms = list(planner_query.get("must_terms") or [])
-                        if not short_query or not must_terms:
-                            continue
-                        short_search_query = self._normalized_recall_query(short_query)
-                        stage_started_at = time.perf_counter()
-                        admitted, suppressed = await self._dynamic_bucket_candidate_items(
-                            short_query,
-                            session_id,
-                            all_buckets,
-                            search_query=short_search_query,
-                            required_terms=must_terms,
-                            planner_query=planner_query,
-                            allow_semantic=allow_semantic and self.query_planner_supplemental_semantic,
-                            allow_semantic_session_dedupe=allow_semantic_session_dedupe,
-                            allow_rerank=allow_rerank,
-                            timing_debug=timing_debug,
-                            timing_prefix=f"supplemental_{index}",
-                        )
-                        self._add_timing_ms(
-                            timing_debug,
-                            f"supplemental_{index}.candidate_items_total",
-                            stage_started_at,
-                        )
-                        supplemental_items.extend(admitted)
-                        suppressed_candidates.extend(suppressed)
-                        structural_activation_items.extend(admitted)
-                        structural_activation_items.extend(suppressed)
-                        stage_started_at = time.perf_counter()
-                        self._merge_word_map_hint_debug(planner_debug, admitted + suppressed)
-                        self._merge_exact_anchor_debug(planner_debug, admitted + suppressed)
-                        suppressed_must = [
-                            self._format_suppressed_bucket_debug(item, query=short_query)
-                            for item in suppressed
-                            if item.get("admission_reason") == "planner_must_terms_missing"
-                        ]
-                        planner_debug["suppressed_by_must_terms"].extend(suppressed_must)
-                        planner_debug["supplemental"].append(
-                            {
-                                "query": short_query,
-                                "must_terms": must_terms,
-                                "survived_bucket_ids": [
-                                    str((item.get("bucket") or {}).get("id") or "")
-                                    for item in admitted
-                                    if (item.get("bucket") or {}).get("id")
-                                ],
-                                "suppressed_bucket_ids": [
-                                    str((item.get("bucket") or {}).get("id") or "")
-                                    for item in suppressed
-                                    if (item.get("bucket") or {}).get("id")
-                                ],
-                                "suppressed_by_must_terms": [
-                                    row.get("bucket_id")
-                                    for row in suppressed_must
-                                    if isinstance(row, dict) and row.get("bucket_id")
-                                ],
-                            }
-                        )
-                        self._add_timing_ms(timing_debug, f"supplemental_{index}.debug_merge", stage_started_at)
-                    if supplemental_items:
-                        stage_started_at = time.perf_counter()
-                        merged_items = self._merge_dynamic_bucket_items(selected_items + supplemental_items, query)
-                        merged_items = self._boost_explicit_relation_edge_bucket_items(query, merged_items)
-                        merged_items.sort(key=lambda item: self._bucket_final_candidate_rank(query, item))
-                        selected_items = self._pick_dynamic_cards(merged_items, query=query)
-                        self._add_timing_ms(timing_debug, "supplemental.pick_cards", stage_started_at)
-                else:
-                    planner_debug["skip_reason"] = "planner_returned_no_search"
-        elif trigger_reason:
-            planner_debug["skip_reason"] = "query_planner_disabled_for_hook_fast_path"
-        elif self.query_planner_enabled:
-            planner_debug["skip_reason"] = "direct_recall_ok_or_query_short"
 
         selected_buckets = [
             self._bucket_with_recall_signal(item)
@@ -16798,23 +14512,6 @@ class GatewayService:
         bucket["_recall_signal"] = self._bucket_candidate_recall_signal(item)
         return bucket
 
-    @staticmethod
-    def _items_have_explicit_relation_pair(items: list[dict]) -> bool:
-        bucket_ids = {
-            str((item.get("bucket") or {}).get("id") or "")
-            for item in items or []
-            if isinstance(item, dict) and (item.get("bucket") or {}).get("id")
-        }
-        if len(bucket_ids) < 2:
-            return False
-        for item in items or []:
-            if not isinstance(item, dict) or not item.get("explicit_relation_edge_match"):
-                continue
-            peer_id = str(item.get("explicit_relation_edge_peer_bucket_id") or "")
-            if peer_id and peer_id in bucket_ids:
-                return True
-        return False
-
     def _bucket_candidate_recall_signal(self, item: dict) -> dict:
         return {
             key: item.get(key)
@@ -16847,17 +14544,6 @@ class GatewayService:
                 "rare_name_match",
                 "rare_name_terms",
                 "rare_name_sources",
-                "entity_edge_match",
-                "entity_edge_score",
-                "entity_edge_subject",
-                "entity_edge_relation",
-                "entity_edge_object",
-                "entity_edge_shadow",
-                "explicit_relation_edge_match",
-                "explicit_relation_edge_confidence",
-                "explicit_relation_edge_peer_bucket_id",
-                "explicit_relation_edge_type",
-                "explicit_relation_edge_focused",
                 "fusion_mode",
                 "fusion_score",
                 "vector_norm",
@@ -16871,20 +14557,8 @@ class GatewayService:
                 "specific_matched_query_terms",
                 "keyword_direct_terms",
                 "keyword_multi_evidence_signal",
-                "legacy_distinctive_keyword_match",
-                "legacy_passive_statement_would_block",
-                "passive_statement_shadow",
-                "legacy_distinctive_anchor_would_block",
-                "legacy_category_overview_would_block",
                 "title_anchor_terms",
                 "recall_policy_debug",
-                "dynamic_anchor_plan",
-                "distinctive_anchor_match",
-                "distinctive_anchor_terms",
-                "distinctive_anchor_missing_terms",
-                "anchor_coverage",
-                "category_overview_item",
-                "category_overview_terms",
                 "retrieval_alias_match",
                 "retrieval_alias_score",
                 "retrieval_alias_terms",
@@ -17013,16 +14687,6 @@ class GatewayService:
             for value in QUERY_PLANNER_GENERIC_TERMS
             if self._compact_lookup_key(value)
         )
-        generic_keys.update(
-            self._compact_lookup_key(value)
-            for value in MEMORY_SENTINEL_RESIDUE_STOP_TERMS
-            if self._compact_lookup_key(value)
-        )
-        generic_keys.update(
-            self._compact_lookup_key(value)
-            for value in self._dynamic_anchor_category_terms()
-            if self._compact_lookup_key(value)
-        )
         return key not in generic_keys
 
     def _bucket_title_anchor_terms(self, query: str, bucket: dict) -> list[str]:
@@ -17044,13 +14708,13 @@ class GatewayService:
             if self._compact_lookup_key(value)
         }
         output: list[str] = []
-        for term in self._dynamic_anchor_query_terms(query):
+        for term in self._specific_query_terms(query):
             key = self._compact_lookup_key(term)
             if (
                 not key
                 or key in identity_keys
                 or len(key) < 3
-                or self._dynamic_anchor_term_is_category(term)
+                or not self._matched_query_term_is_specific(term)
             ):
                 continue
             if key in title_key and term not in output:
@@ -17063,7 +14727,7 @@ class GatewayService:
                 len(key) >= 4
                 and key not in identity_keys
                 and key in query_key
-                and not self._dynamic_anchor_term_is_category(cleaned)
+                and self._matched_query_term_is_specific(cleaned)
                 and cleaned not in output
             ):
                 output.append(cleaned)
@@ -17085,7 +14749,7 @@ class GatewayService:
         if (
             len(stripped_key) >= 3
             and stripped_key in query_key
-            and not self._dynamic_anchor_term_is_category(stripped_key)
+            and self._matched_query_term_is_specific(stripped_key)
             and stripped_key not in output
         ):
             output.append(stripped_key)
@@ -17098,7 +14762,7 @@ class GatewayService:
         every Y.  A sufficiently long literal X in the bucket is direct lexical
         evidence even when X lives in the body rather than the title.
         """
-        if not query or not isinstance(bucket, dict) or self._query_is_category_overview(query):
+        if not query or not isinstance(bucket, dict):
             return []
         text = " ".join(str(query or "").split()).strip()
         match = re.search(
@@ -17160,8 +14824,6 @@ class GatewayService:
                 labels.append("protected_phrase")
         if self._planner_lexical_direct_signal(item):
             labels.append("entity_match")
-        if item.get("explicit_relation_edge_match"):
-            labels.append("entity_match")
         if isinstance(bucket, dict) and self._is_identity_name_candidate_bucket(query, bucket):
             labels.append("identity_name_match")
         if isinstance(bucket, dict) and self._source_record_explicit_bucket_match_reason(query, bucket):
@@ -17172,10 +14834,6 @@ class GatewayService:
             and self._bucket_has_query_topic_evidence(query, bucket)
         ):
             labels.append("taste_evidence")
-        if item.get("distinctive_anchor_match"):
-            labels.append("distinctive_anchor")
-        if item.get("category_overview_item"):
-            labels.append("category_overview_item")
         if item.get("retrieval_alias_match"):
             labels.append("retrieval_alias")
         if item.get("semantic_rescue_direct_span"):
@@ -17184,14 +14842,6 @@ class GatewayService:
             list(item.get("word_map_terms") or []) + list(item.get("low_frequency_terms") or [])
         ):
             labels.append("category_seed")
-        legacy_distinctive_keyword_match = bool(
-            isinstance(bucket, dict)
-            and self._safe_float(item.get("keyword_score"), 0.0) > 0
-            and item.get("distinctive_anchor_match")
-            and self._bucket_has_query_topic_evidence(query, bucket)
-            and self._matched_query_terms_have_specific_evidence(item)
-        )
-        item["legacy_distinctive_keyword_match"] = legacy_distinctive_keyword_match
         if self._keyword_multi_evidence_signal(query, item, bucket):
             labels.append("keyword_match")
         if self._safe_float(item.get("semantic_score"), 0.0) > 0:
@@ -17204,7 +14854,6 @@ class GatewayService:
         if (
             item.get("word_map_hint")
             or self._safe_float(item.get("word_map_score"), 0.0) > 0
-            or item.get("entity_edge_match")
         ):
             labels.append("graph_related")
         return self._dedupe_evidence_labels(labels)
@@ -17243,46 +14892,6 @@ class GatewayService:
         if label_set.issubset({"semantic_hit", "graph_related"}):
             return "weak_evidence_only"
         return "no_hard_evidence"
-
-    def _passive_statement_has_recall_evidence(
-        self,
-        query: str,
-        item: dict,
-        evidence_labels: list[str],
-    ) -> bool:
-        if self.recall_policy.is_explicit_lookup_query(query):
-            return True
-        if "keyword_match" in evidence_labels:
-            return True
-        label_set = {
-            str(label or "").strip()
-            for label in evidence_labels or []
-            if str(label or "").strip()
-        }
-        bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
-        if label_set & {
-            "raw_transcript_exact",
-            "same_day_metadata",
-            "definition_literal_span",
-        }:
-            return True
-        if "source_record_exact" in label_set and self._is_source_record_bucket(bucket):
-            return True
-        meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
-        title = str(meta.get("name") or bucket.get("name") or "").strip()
-        title_key = self._compact_lookup_key(title)
-        query_key = self._compact_lookup_key(query)
-        cjk_chars = len(re.findall(r"[\u4e00-\u9fff]", title_key))
-        precise_full_title = bool(
-            title_key
-            and title_key in query_key
-            and (
-                cjk_chars >= 4
-                or bool(re.search(r"\d", title_key))
-                or bool(re.search(r"[_.:/-]", title))
-            )
-        )
-        return precise_full_title
 
     def _suppressed_bucket_moment_search_boost(self, query: str, item: dict) -> float:
         if not isinstance(item, dict):
@@ -17385,128 +14994,6 @@ class GatewayService:
             -self._safe_float(item.get("score"), 0.0),
         )
 
-    def _get_entity_edge_boosts(self, query: str, candidate_ids: set[str]) -> dict[str, dict[str, Any]]:
-        if not query or not candidate_ids:
-            return {}
-        try:
-            return self.entity_edge_store.match_query(
-                query,
-                self.identity,
-                bucket_ids=candidate_ids,
-                min_score=0.48,
-            )
-        except Exception as exc:
-            logger.warning("Gateway entity edge boost failed: %s", exc)
-            return {}
-
-    @staticmethod
-    def _entity_edge_shadow_debug(*, score: Any, relation: str) -> dict[str, Any]:
-        edge_score = max(0.0, min(1.0, GatewayService._safe_float(score, 0.0)))
-        relation_name = str(relation or "")
-        return {
-            "mode": "shadow",
-            "active": False,
-            "would_add_final_score": round(min(0.08, edge_score * 0.08), 4),
-            "would_add_legacy_fusion_component": round(edge_score * 0.08, 4),
-            "would_direct_signal": bool(
-                relation_name
-                in {"likes", "dislikes", "prefers", "boundary", "participates_in"}
-                and edge_score >= 0.72
-            ),
-        }
-
-    def _boost_explicit_relation_edge_bucket_items(self, query: str, items: list[dict]) -> list[dict]:
-        if not items or not self.recall_policy.has_axis_relation_marker(query):
-            return items
-        by_bucket_id = {
-            str((item.get("bucket") or {}).get("id") or ""): item
-            for item in items
-            if isinstance(item, dict) and (item.get("bucket") or {}).get("id")
-        }
-        if len(by_bucket_id) < 2:
-            return items
-        strong_floor = max(self.edge_min_confidence, 0.75)
-        title_matched_ids = {
-            bucket_id
-            for bucket_id, item in by_bucket_id.items()
-            if self._relation_query_bucket_title_match(query, item.get("bucket") or {})
-        }
-        edge_rows: list[tuple[dict, bool]] = []
-        boosted: dict[str, dict[str, Any]] = {}
-        candidate_buckets = [
-            item.get("bucket") or {}
-            for item in items
-            if isinstance(item, dict) and isinstance(item.get("bucket"), dict)
-        ]
-        for edge in self._bucket_edges_for_recall(candidate_buckets):
-            try:
-                confidence = float(edge.get("confidence", 0.0))
-            except (TypeError, ValueError):
-                confidence = 0.0
-            edge_floor = strong_floor
-            if str(edge.get("graph_scope") or "") == "legacy":
-                # Legacy confidence has already been discounted by 0.72. Keep
-                # an explicit, title-focused relation query usable without
-                # letting the old graph regain multi-hop authority.
-                edge_floor = max(self.edge_min_confidence * 0.72, 0.54)
-            if confidence < edge_floor:
-                continue
-            source = str(edge.get("source") or "")
-            target = str(edge.get("target") or "")
-            if source not in by_bucket_id or target not in by_bucket_id:
-                continue
-            focused = source in title_matched_ids or target in title_matched_ids
-            edge_rows.append((edge, focused))
-        if title_matched_ids and any(focused for _edge, focused in edge_rows):
-            edge_rows = [(edge, focused) for edge, focused in edge_rows if focused]
-        for edge, focused in edge_rows:
-            try:
-                confidence = float(edge.get("confidence", 0.0))
-            except (TypeError, ValueError):
-                confidence = 0.0
-            source = str(edge.get("source") or "")
-            target = str(edge.get("target") or "")
-            for bucket_id, peer_id in ((source, target), (target, source)):
-                current = boosted.get(bucket_id)
-                if current is None or confidence > self._safe_float(current.get("confidence"), 0.0):
-                    boosted[bucket_id] = {
-                        "confidence": confidence,
-                        "peer_bucket_id": peer_id,
-                        "relation_type": edge.get("relation_type") or "relates_to",
-                        "reason": edge.get("reason") or "",
-                        "focused": focused,
-                    }
-        if not boosted:
-            return items
-        output: list[dict] = []
-        for item in items:
-            bucket_id = str((item.get("bucket") or {}).get("id") or "")
-            boost = boosted.get(bucket_id)
-            if not boost:
-                output.append(item)
-                continue
-            new_item = dict(item)
-            new_item["explicit_relation_edge_match"] = True
-            new_item["explicit_relation_edge_confidence"] = boost["confidence"]
-            new_item["explicit_relation_edge_peer_bucket_id"] = boost["peer_bucket_id"]
-            new_item["explicit_relation_edge_type"] = boost["relation_type"]
-            new_item["explicit_relation_edge_reason"] = boost["reason"]
-            new_item["explicit_relation_edge_focused"] = bool(boost.get("focused"))
-            floor = self.first_card_min_score
-            if boost.get("focused"):
-                floor = max(floor, self.first_card_min_score + 0.16)
-            new_item["score"] = max(self._safe_float(new_item.get("score"), 0.0), floor)
-            output.append(new_item)
-        return output
-
-    def _relation_query_bucket_title_match(self, query: str, bucket: dict) -> bool:
-        if not isinstance(bucket, dict):
-            return False
-        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        name_key = self._compact_lookup_key(meta.get("name") or bucket.get("name") or "")
-        query_key = self._compact_lookup_key(query)
-        return bool(name_key and len(name_key) >= 4 and query_key and name_key in query_key)
-
     def _bucket_final_candidate_rank(
         self,
         query: str,
@@ -17517,7 +15004,6 @@ class GatewayService:
         if (
             item.get("exact_anchor_match")
             or self._planner_lexical_direct_signal(item)
-            or item.get("explicit_relation_edge_match")
         ):
             evidence_tier = 0
         elif item.get("title_anchor_terms"):
@@ -17576,197 +15062,6 @@ class GatewayService:
             or keyword_score >= self.high_confidence_keyword_score
         )
 
-    @staticmethod
-    def _compact_axis_text(value: object) -> str:
-        return re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", str(value or "").strip().lower())
-
-    @staticmethod
-    def _axis_lite_config_terms(
-        cfg: dict[str, Any],
-        key: str,
-        fallback: tuple[str, ...],
-    ) -> tuple[str, ...]:
-        value = cfg.get(key) if isinstance(cfg, dict) and key in cfg else fallback
-        if isinstance(value, str):
-            raw_terms = [value]
-        else:
-            raw_terms = list(value or [])
-        return tuple(str(term).strip() for term in raw_terms if str(term or "").strip())
-
-    def _axis_lite_node_text(self, node: dict) -> str:
-        if not isinstance(node, dict):
-            return ""
-        meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
-        if "bucket_id" in node or node.get("moment_id"):
-            fields = [
-                str(node.get("text") or ""),
-                str(node.get("content") or ""),
-                str(meta.get("annotation_summary") or ""),
-                str(meta.get("bucket_name") or ""),
-                " ".join(str(tag) for tag in meta.get("bucket_tags", []) or []),
-                " ".join(str(item) for item in meta.get("bucket_domain", []) or []),
-            ]
-        else:
-            fields = [
-                str(meta.get("name") or node.get("id") or ""),
-                str(meta.get("annotation_summary") or ""),
-                " ".join(str(tag) for tag in meta.get("tags", []) or []),
-                " ".join(str(item) for item in meta.get("domain", []) or []),
-                bucket_content_for_recall(node),
-            ]
-        return self._compact_axis_text(" ".join(fields))
-
-    def _axis_lite_candidate_matches(self, query_plan: Any, node: dict) -> bool:
-        groups = getattr(query_plan, "activated_axis_groups", ()) or ()
-        if not groups:
-            return True
-        text = self._axis_lite_node_text(node)
-        if not text:
-            return False
-        for group in groups:
-            keys = [self._compact_axis_text(term) for term in group if self._compact_axis_text(term)]
-            if keys and all(key in text for key in keys):
-                return True
-        return False
-
-    def _axis_lite_has_technical_axis(self, query_plan: Any) -> bool:
-        terms = " ".join(str(term or "") for term in getattr(query_plan, "activated_axis_terms", ()) or ())
-        key = self._compact_axis_text(terms)
-        if not key:
-            return False
-        if any(self._compact_axis_text(marker) in key for marker in self.axis_lite_technical_axis_terms):
-            return True
-        if "数据库" not in key:
-            return False
-        query_key = self._compact_axis_text(getattr(query_plan, "query", ""))
-        return any(
-            self._compact_axis_text(marker) in query_key
-            for marker in self.axis_lite_technical_database_terms
-        )
-
-    def _axis_lite_node_has_technical_domain(self, node: dict) -> bool:
-        if not isinstance(node, dict):
-            return False
-        meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
-        domains = meta.get("bucket_domain") if ("bucket_id" in node or node.get("moment_id")) else meta.get("domain")
-        domain_text = self._compact_axis_text(" ".join(str(item) for item in domains or []))
-        if not domain_text:
-            return False
-        return any(
-            self._compact_axis_text(marker) in domain_text
-            for marker in self.axis_lite_technical_domain_terms
-        )
-
-    def _axis_lite_node_name_matches_primary(self, query_plan: Any, node: dict) -> bool:
-        groups = getattr(query_plan, "activated_axis_groups", ()) or ()
-        if not groups or not groups[0]:
-            return False
-        primary_key = self._compact_axis_text(groups[0][0])
-        if not primary_key:
-            return False
-        meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
-        if "bucket_id" in node or node.get("moment_id"):
-            name = str(meta.get("bucket_name") or "")
-        else:
-            name = str(meta.get("name") or node.get("name") or "")
-        return primary_key in self._compact_axis_text(name)
-
-    def _axis_lite_domain_mismatch(self, query_plan: Any, node: dict) -> bool:
-        if not self._axis_lite_has_technical_axis(query_plan):
-            return False
-        if self._axis_lite_node_has_technical_domain(node):
-            return False
-        if self._axis_lite_node_name_matches_primary(query_plan, node):
-            return False
-        return True
-
-    def _axis_lite_debug(self, query_plan: Any, *, matched: bool) -> dict[str, Any]:
-        return {
-            "activated_axis_terms": list(getattr(query_plan, "activated_axis_terms", ()) or ()),
-            "activated_axis_groups": [
-                list(group) for group in (getattr(query_plan, "activated_axis_groups", ()) or ())
-            ],
-            "activated_axis_multi": bool(getattr(query_plan, "activated_axis_multi", False)),
-            "activated_axis_matched": bool(matched),
-            "activated_axis_technical": self._axis_lite_has_technical_axis(query_plan),
-            "auto": True,
-        }
-
-    def _axis_lite_bypass_for_item(self, query: str, item: dict) -> bool:
-        if self._query_requests_direct_detail(query) or self.recall_policy.is_detail_read_query(query):
-            return True
-        if (
-            self._planner_lexical_direct_signal(item)
-            or item.get("exact_anchor_match")
-            or self._word_map_direct_signal(item)
-            or item.get("keyword_multi_evidence_signal")
-            or item.get("semantic_rescue_direct_span")
-        ):
-            return True
-        return self.recall_policy.has_strong_score(
-            semantic_score=item.get("semantic_score"),
-            rerank_score=item.get("rerank_score"),
-        )
-
-    def _axis_lite_bucket_rejection(
-        self,
-        query: str,
-        item: dict,
-        query_plan: Any,
-    ) -> tuple[str, dict[str, Any]] | None:
-        if not (getattr(query_plan, "activated_axis_groups", ()) or ()):
-            return None
-        if self._axis_lite_bypass_for_item(query, item):
-            return None
-        bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
-        matched = self._axis_lite_candidate_matches(query_plan, bucket)
-        if matched:
-            if self._axis_lite_domain_mismatch(query_plan, bucket):
-                debug = self._axis_lite_debug(query_plan, matched=True)
-                debug["activated_axis_domain_matched"] = False
-                return "activated_axis_mismatch", debug
-            return None
-        return "activated_axis_mismatch", self._axis_lite_debug(query_plan, matched=False)
-
-    def _axis_lite_moment_rejection(
-        self,
-        query: str,
-        moment: dict,
-        query_plan: Any,
-    ) -> tuple[str, dict[str, Any]] | None:
-        if not (getattr(query_plan, "activated_axis_groups", ()) or ()):
-            return None
-        if self._axis_lite_bypass_for_item(query, moment):
-            return None
-        matched = self._axis_lite_candidate_matches(query_plan, moment)
-        if matched:
-            if self._axis_lite_domain_mismatch(query_plan, moment):
-                debug = self._axis_lite_debug(query_plan, matched=True)
-                debug["activated_axis_domain_matched"] = False
-                return "activated_axis_mismatch", debug
-            return None
-        return "activated_axis_mismatch", self._axis_lite_debug(query_plan, matched=False)
-
-    @staticmethod
-    def _record_axis_lite_shadow(
-        item: dict,
-        rejection: tuple[str, dict[str, Any]] | None,
-    ) -> None:
-        if not rejection:
-            return
-        reason, debug = rejection
-        policy_debug = (
-            dict(item.get("recall_policy_debug"))
-            if isinstance(item.get("recall_policy_debug"), dict)
-            else {}
-        )
-        policy_debug["axis_lite_shadow"] = {
-            "would_reject": True,
-            "reason": reason,
-            **debug,
-        }
-        item["recall_policy_debug"] = policy_debug
-
     def _bucket_is_tech_domain(self, bucket: dict | None) -> bool:
         if not isinstance(bucket, dict):
             return False
@@ -17792,8 +15087,7 @@ class GatewayService:
         if self._extract_explicit_bucket_ids_from_text(text) or self._extract_explicit_moment_ids_from_text(text):
             return True
         if (
-            self._query_has_explicit_recall_marker(text)
-            or self._query_requests_date_recall(text)
+            self._query_requests_date_recall(text)
             or self._query_requests_direct_detail(text)
             or self.recall_policy.is_detail_read_query(text)
         ):
@@ -17808,7 +15102,6 @@ class GatewayService:
         return bool(
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")
-            or item.get("explicit_relation_edge_match")
             or item.get("keyword_multi_evidence_signal")
         )
 
@@ -17869,49 +15162,6 @@ class GatewayService:
         hard_evidence_labels = self._hard_bucket_evidence_labels(evidence_labels)
         item["evidence_labels"] = evidence_labels
         item["hard_evidence_labels"] = hard_evidence_labels
-        legacy_passive_statement_would_block = not self._passive_statement_has_recall_evidence(
-            query,
-            item,
-            evidence_labels,
-        )
-        item["legacy_passive_statement_would_block"] = legacy_passive_statement_would_block
-        if legacy_passive_statement_would_block:
-            item["passive_statement_shadow"] = {
-                "mode": "shadow",
-                "active": False,
-                "would_block": True,
-                "legacy_reason": "passive_statement_evidence_missing",
-                "evidence_labels": evidence_labels,
-                "hard_evidence_labels": hard_evidence_labels,
-                "required_evidence": "one_strong_cue_or_two_cues_or_one_cue_plus_strong_semantic",
-                "auto": True,
-            }
-        else:
-            item.pop("passive_statement_shadow", None)
-        dynamic_plan = item.get("dynamic_anchor_plan") if isinstance(item.get("dynamic_anchor_plan"), dict) else {}
-        independent_anchor_evidence = bool(
-            self._planner_lexical_direct_signal(item)
-            or item.get("exact_anchor_match")
-            or item.get("explicit_relation_edge_match")
-            or self._is_identity_name_candidate_bucket(query, bucket)
-            or "keyword_match" in hard_evidence_labels
-            or "title_anchor" in hard_evidence_labels
-            or "semantic_rescue_direct_span" in hard_evidence_labels
-            or "strong_semantic" in hard_evidence_labels
-            or "strong_rerank" in hard_evidence_labels
-        )
-        legacy_dynamic_anchor_missing = bool(
-            dynamic_plan.get("required_terms")
-            and not item.get("distinctive_anchor_match")
-            and not independent_anchor_evidence
-        )
-        item["legacy_distinctive_anchor_would_block"] = legacy_dynamic_anchor_missing
-        category_overview_missing = bool(
-            dynamic_plan.get("category_overview")
-            and dynamic_plan.get("category_terms")
-            and not item.get("category_overview_item")
-        )
-        item["legacy_category_overview_would_block"] = category_overview_missing
         query_plan = self._recall_query_plan(query)
         rejection = self._anchor_plan_direct_rejection(bucket, self._query_anchor_plan(query))
         if rejection:
@@ -17931,8 +15181,6 @@ class GatewayService:
                 return False
         else:
             item.pop("recall_policy_debug", None)
-        axis_rejection = self._axis_lite_bucket_rejection(query, item, query_plan)
-        self._record_axis_lite_shadow(item, axis_rejection)
         decision = self.recall_policy.assess(
             query,
             self._bucket_relevance_node(bucket),
@@ -17949,7 +15197,6 @@ class GatewayService:
                 or "title_anchor" in hard_evidence_labels
             ),
             auto=True,
-            semantic_entry_routed=self.semantic_recall_router.active,
         )
         item["admission_reason"] = decision.reason
         if item.get("recall_policy_debug"):
@@ -17972,30 +15219,6 @@ class GatewayService:
             if not self._bucket_has_reliable_recall_signal(query, item):
                 item["admission_reason"] = "low_recall_evidence"
                 return False
-        if legacy_dynamic_anchor_missing:
-            item["recall_policy_debug"] = {
-                **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
-                "distinctive_anchor_shadow": {
-                    "would_block": True,
-                    "required_terms": list(dynamic_plan.get("required_terms") or []),
-                    "matched_terms": list(item.get("distinctive_anchor_terms") or []),
-                    "missing_terms": list(item.get("distinctive_anchor_missing_terms") or []),
-                    "anchor_coverage": self._safe_float(item.get("anchor_coverage"), 0.0),
-                    "auto": True,
-                },
-            }
-        if item.get("category_overview_item") or category_overview_missing:
-            item["recall_policy_debug"] = {
-                **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
-                "category_overview_shadow": {
-                    "would_promote": bool(item.get("category_overview_item")),
-                    "would_block": category_overview_missing,
-                    "category_terms": list(dynamic_plan.get("category_terms") or []),
-                    "matched_terms": list(item.get("category_overview_terms") or []),
-                    "stage": "bucket_admission",
-                    "auto": True,
-                },
-            }
         if decision.admit_direct and not hard_evidence_labels:
             reason = self._weak_bucket_evidence_block_reason(evidence_labels)
             item["admission_reason"] = reason
@@ -18086,18 +15309,6 @@ class GatewayService:
                 "auto": True,
             }
             return False
-        dynamic_plan = moment.get("dynamic_anchor_plan") if isinstance(moment.get("dynamic_anchor_plan"), dict) else {}
-        dynamic_anchor_missing = bool(
-            dynamic_plan.get("required_terms")
-            and not moment.get("distinctive_anchor_match")
-        )
-        moment["legacy_distinctive_anchor_would_block"] = dynamic_anchor_missing
-        category_overview_missing = bool(
-            dynamic_plan.get("category_overview")
-            and dynamic_plan.get("category_terms")
-            and not moment.get("category_overview_item")
-        )
-        moment["legacy_category_overview_would_block"] = category_overview_missing
         rejection = self._anchor_plan_direct_rejection(moment, self._query_anchor_plan(query))
         if rejection:
             reason, debug = rejection
@@ -18125,7 +15336,6 @@ class GatewayService:
             rerank_score=moment.get("rerank_score"),
             context_only=moment.get("section") in MOMENT_TEMPERATURE_SECTIONS,
             auto=True,
-            semantic_entry_routed=self.semantic_recall_router.active,
         )
         moment["admission_reason"] = decision.reason
         if moment.get("recall_policy_debug"):
@@ -18135,22 +15345,6 @@ class GatewayService:
             }
         else:
             moment["recall_policy_debug"] = decision.debug
-        if dynamic_anchor_missing:
-            moment["recall_policy_debug"] = {
-                **(
-                    moment.get("recall_policy_debug")
-                    if isinstance(moment.get("recall_policy_debug"), dict)
-                    else {}
-                ),
-                "distinctive_anchor_shadow": {
-                    "would_block": True,
-                    "required_terms": list(dynamic_plan.get("required_terms") or []),
-                    "matched_terms": list(moment.get("distinctive_anchor_terms") or []),
-                    "missing_terms": list(moment.get("distinctive_anchor_missing_terms") or []),
-                    "stage": "moment_admission",
-                    "auto": True,
-                },
-            }
         if decision.admit_direct and self._moment_is_tech_domain(moment):
             tech_rejection = self._tech_domain_recall_rejection(query, moment)
             if tech_rejection:
@@ -18176,21 +15370,6 @@ class GatewayService:
                 "has_topic_evidence": self._moment_has_query_topic_evidence(query, moment),
             }
             return False
-        if moment.get("category_overview_item") or category_overview_missing:
-            moment["recall_policy_debug"] = {
-                **(moment.get("recall_policy_debug") if isinstance(moment.get("recall_policy_debug"), dict) else {}),
-                "category_overview_shadow": {
-                    "would_promote": bool(moment.get("category_overview_item")),
-                    "would_block": category_overview_missing,
-                    "category_terms": list(dynamic_plan.get("category_terms") or []),
-                    "matched_terms": list(moment.get("category_overview_terms") or []),
-                    "stage": "moment_admission",
-                    "auto": True,
-                },
-            }
-        if decision.admit_direct:
-            axis_rejection = self._axis_lite_moment_rejection(query, moment, query_plan)
-            self._record_axis_lite_shadow(moment, axis_rejection)
         return decision.admit_direct
 
     def _unselected_moment_min_score(self) -> float:
@@ -18384,8 +15563,6 @@ class GatewayService:
             return False
         if key in GENERIC_LEXICAL_STOPWORD_KEYS:
             return False
-        if key in MEMORY_SENTINEL_RESIDUE_STOP_TERMS:
-            return False
         if key in self._identity_match_terms(compact=True):
             return False
         address_keys = {
@@ -18395,7 +15572,7 @@ class GatewayService:
         }
         if any(address_key and address_key in key for address_key in address_keys):
             return False
-        if not self._planner_must_term_allowed(key):
+        if not self._word_map_term_allowed_by_identity(key):
             return False
         if re.fullmatch(r"[a-z0-9_.:/-]+", key):
             return len(key) >= 3 or bool(re.search(r"\d", key))
@@ -18544,10 +15721,6 @@ class GatewayService:
         if not scored_candidates:
             return []
 
-        axis_diverse = self._pick_axis_diverse_dynamic_cards(scored_candidates, query=query)
-        if axis_diverse:
-            return axis_diverse
-
         chosen = []
         first = None
         remaining_candidates = []
@@ -18606,60 +15779,6 @@ class GatewayService:
         ):
             chosen.append(second)
         return chosen
-
-    def _pick_axis_diverse_dynamic_cards(self, scored_candidates: list[dict], *, query: str = "") -> list[dict]:
-        if self.inject_max_cards < 2:
-            return []
-        query_plan = self._recall_query_plan(query)
-        if not bool(getattr(query_plan, "activated_axis_multi", False)):
-            return []
-        groups = [
-            tuple(term for term in group if str(term or "").strip())
-            for group in (getattr(query_plan, "activated_axis_groups", ()) or ())
-            if group
-        ]
-        if len(groups) < 2:
-            return []
-
-        chosen: list[dict] = []
-        chosen_ids: set[str] = set()
-        for group in groups:
-            for candidate in scored_candidates:
-                bucket = candidate.get("bucket") if isinstance(candidate, dict) else None
-                bucket_id = str((bucket or {}).get("id") or "")
-                if not bucket_id or bucket_id in chosen_ids:
-                    continue
-                if not self._axis_group_matches_item(group, candidate):
-                    continue
-                candidate_score = self._safe_float(candidate.get("score"), 0.0)
-                if (
-                    candidate_score >= self.first_card_min_score
-                    or self._dynamic_bucket_item_has_reliable_recall_signal(query, candidate)
-                ):
-                    chosen.append(candidate)
-                    chosen_ids.add(bucket_id)
-                    break
-            if len(chosen) >= self.inject_max_cards:
-                break
-        if len(chosen) < min(len(groups), self.inject_max_cards):
-            return []
-        for candidate in scored_candidates:
-            if len(chosen) >= self.inject_max_cards:
-                break
-            bucket = candidate.get("bucket") if isinstance(candidate, dict) else None
-            bucket_id = str((bucket or {}).get("id") or "")
-            if bucket_id and bucket_id not in chosen_ids:
-                chosen.append(candidate)
-                chosen_ids.add(bucket_id)
-        return chosen[: self.inject_max_cards]
-
-    def _axis_group_matches_item(self, group: tuple[str, ...], item: dict) -> bool:
-        bucket = item.get("bucket") if isinstance(item, dict) else None
-        if not isinstance(bucket, dict):
-            return False
-        text = self._axis_lite_node_text(bucket)
-        keys = [self._compact_axis_text(term) for term in group if self._compact_axis_text(term)]
-        return bool(keys and text and all(key in text for key in keys))
 
     def _dynamic_bucket_item_has_reliable_recall_signal(self, query: str, item: dict) -> bool:
         if (
@@ -19200,7 +16319,6 @@ class GatewayService:
         rerank_score = item.get("rerank_score")
         exact_anchor_score = item.get("exact_anchor_score")
         word_map_score = item.get("word_map_score")
-        entity_edge_score = item.get("entity_edge_score")
         admission_reason = str(
             item.get("admission_reason")
             or item.get("_admission_reason")
@@ -19235,28 +16353,6 @@ class GatewayService:
                 direct_terms=self._debug_str_list(item.get("low_frequency_direct_terms")),
                 category_terms=self._debug_str_list(item.get("low_frequency_category_terms")),
                 sources=self._debug_str_list(item.get("low_frequency_sources")),
-            )
-        if item.get("entity_edge_match"):
-            add_source(
-                "entity_edge_shadow",
-                mode="shadow",
-                score=self._safe_float(entity_edge_score, 0.0),
-                subject=str(item.get("entity_edge_subject") or ""),
-                relation=str(item.get("entity_edge_relation") or ""),
-                object=str(item.get("entity_edge_object") or ""),
-                shadow=(
-                    dict(item.get("entity_edge_shadow"))
-                    if isinstance(item.get("entity_edge_shadow"), dict)
-                    else {}
-                ),
-            )
-        if item.get("explicit_relation_edge_match"):
-            add_source(
-                "explicit_relation_edge",
-                confidence=self._safe_float(item.get("explicit_relation_edge_confidence"), 0.0),
-                peer_bucket_id=str(item.get("explicit_relation_edge_peer_bucket_id") or ""),
-                edge_type=str(item.get("explicit_relation_edge_type") or ""),
-                focused=bool(item.get("explicit_relation_edge_focused")),
             )
         if item.get("semantic_rescue_direct_span"):
             add_source(
@@ -19327,17 +16423,6 @@ class GatewayService:
                 ),
                 "exact_anchor": self._safe_float(exact_anchor_score, 0.0),
                 "word_map": self._safe_float(word_map_score, 0.0),
-                "entity_edge": (
-                    self._safe_float(entity_edge_score, 0.0)
-                    if entity_edge_score is not None
-                    else None
-                ),
-                "entity_edge_active": False,
-                "entity_edge_shadow": (
-                    dict(item.get("entity_edge_shadow"))
-                    if isinstance(item.get("entity_edge_shadow"), dict)
-                    else {}
-                ),
                 "fusion_mode": str(item.get("fusion_mode") or ""),
                 "fusion_score": self._safe_float(item.get("fusion_score"), 0.0),
                 "vector_norm": self._safe_float(item.get("vector_norm"), 0.0),
@@ -19450,28 +16535,7 @@ class GatewayService:
             "specific_matched_query_terms": list(item.get("specific_matched_query_terms") or []),
             "keyword_direct_terms": list(item.get("keyword_direct_terms") or []),
             "keyword_multi_evidence_signal": bool(item.get("keyword_multi_evidence_signal")),
-            "legacy_distinctive_keyword_match": bool(item.get("legacy_distinctive_keyword_match")),
-            "legacy_passive_statement_would_block": bool(
-                item.get("legacy_passive_statement_would_block")
-            ),
-            "passive_statement_shadow": (
-                dict(item.get("passive_statement_shadow"))
-                if isinstance(item.get("passive_statement_shadow"), dict)
-                else {}
-            ),
-            "legacy_distinctive_anchor_would_block": bool(
-                item.get("legacy_distinctive_anchor_would_block")
-            ),
-            "legacy_category_overview_would_block": bool(
-                item.get("legacy_category_overview_would_block")
-            ),
             "title_anchor_terms": list(item.get("title_anchor_terms") or []),
-            "distinctive_anchor_match": bool(item.get("distinctive_anchor_match")),
-            "distinctive_anchor_terms": list(item.get("distinctive_anchor_terms") or []),
-            "distinctive_anchor_missing_terms": list(item.get("distinctive_anchor_missing_terms") or []),
-            "anchor_coverage": self._safe_float(item.get("anchor_coverage"), 0.0),
-            "category_overview_item": bool(item.get("category_overview_item")),
-            "category_overview_terms": list(item.get("category_overview_terms") or []),
             "retrieval_alias_match": bool(item.get("retrieval_alias_match")),
             "retrieval_alias_score": self._safe_float(item.get("retrieval_alias_score"), 0.0),
             "retrieval_alias_terms": list(item.get("retrieval_alias_terms") or []),
@@ -19569,61 +16633,13 @@ class GatewayService:
             "specific_matched_query_terms": list(moment.get("specific_matched_query_terms") or []),
             "keyword_direct_terms": list(moment.get("keyword_direct_terms") or []),
             "keyword_multi_evidence_signal": bool(moment.get("keyword_multi_evidence_signal")),
-            "legacy_distinctive_keyword_match": bool(
-                moment.get("legacy_distinctive_keyword_match")
-            ),
-            "legacy_passive_statement_would_block": bool(
-                moment.get("legacy_passive_statement_would_block")
-            ),
-            "passive_statement_shadow": (
-                dict(moment.get("passive_statement_shadow"))
-                if isinstance(moment.get("passive_statement_shadow"), dict)
-                else {}
-            ),
-            "legacy_distinctive_anchor_would_block": bool(
-                moment.get("legacy_distinctive_anchor_would_block")
-            ),
-            "legacy_category_overview_would_block": bool(
-                moment.get("legacy_category_overview_would_block")
-            ),
             "title_anchor_terms": list(moment.get("title_anchor_terms") or []),
-            "distinctive_anchor_match": bool(moment.get("distinctive_anchor_match")),
-            "distinctive_anchor_terms": list(moment.get("distinctive_anchor_terms") or []),
-            "distinctive_anchor_missing_terms": list(moment.get("distinctive_anchor_missing_terms") or []),
-            "anchor_coverage": self._safe_float(moment.get("anchor_coverage"), 0.0),
-            "category_overview_item": bool(moment.get("category_overview_item")),
-            "category_overview_terms": list(moment.get("category_overview_terms") or []),
             "retrieval_alias_match": bool(moment.get("retrieval_alias_match")),
             "retrieval_alias_score": self._safe_float(moment.get("retrieval_alias_score"), 0.0),
             "retrieval_alias_terms": list(moment.get("retrieval_alias_terms") or []),
             "retrieval_alias_sources": list(moment.get("retrieval_alias_sources") or []),
             "retrieval_alias_moment_ids": list(moment.get("retrieval_alias_moment_ids") or []),
             "retrieval_alias_bucket_count": int(moment.get("retrieval_alias_bucket_count") or 0),
-            "entity_edge_match": bool(moment.get("entity_edge_match")),
-            "entity_edge_score": (
-                self._safe_float(moment.get("entity_edge_score"), 0.0)
-                if moment.get("entity_edge_score") is not None
-                else None
-            ),
-            "entity_edge_subject": str(moment.get("entity_edge_subject") or ""),
-            "entity_edge_relation": str(moment.get("entity_edge_relation") or ""),
-            "entity_edge_object": str(moment.get("entity_edge_object") or ""),
-            "entity_edge_shadow": (
-                dict(moment.get("entity_edge_shadow"))
-                if isinstance(moment.get("entity_edge_shadow"), dict)
-                else {}
-            ),
-            "explicit_relation_edge_match": bool(moment.get("explicit_relation_edge_match")),
-            "explicit_relation_edge_confidence": (
-                self._safe_float(moment.get("explicit_relation_edge_confidence"), 0.0)
-                if moment.get("explicit_relation_edge_confidence") is not None
-                else None
-            ),
-            "explicit_relation_edge_peer_bucket_id": str(
-                moment.get("explicit_relation_edge_peer_bucket_id") or ""
-            ),
-            "explicit_relation_edge_type": str(moment.get("explicit_relation_edge_type") or ""),
-            "explicit_relation_edge_focused": bool(moment.get("explicit_relation_edge_focused")),
             "fusion_mode": str(moment.get("fusion_mode") or ""),
             "fusion_score": self._safe_float(moment.get("fusion_score"), 0.0),
             "vector_norm": self._safe_float(moment.get("vector_norm"), 0.0),
@@ -19842,16 +16858,6 @@ class GatewayService:
             "score": self._safe_float(item.get("score"), 0.0),
             "semantic_score": self._safe_float(item.get("semantic_score"), 0.0),
             "keyword_score": self._safe_float(item.get("keyword_score"), 0.0),
-            "category_overview_item": bool(item.get("category_overview_item")),
-            "category_overview_terms": list(item.get("category_overview_terms") or []),
-            "legacy_category_overview_would_block": bool(
-                item.get("legacy_category_overview_would_block")
-            ),
-            "category_overview_shadow": (
-                policy_debug.get("category_overview_shadow")
-                if isinstance(policy_debug.get("category_overview_shadow"), dict)
-                else {}
-            ),
             "rerank_score": (
                 self._safe_float(item.get("rerank_score"), 0.0)
                 if item.get("rerank_score") is not None
@@ -19874,24 +16880,6 @@ class GatewayService:
                 moment.get("admission_reason") or moment.get("_admission_reason") or "suppressed"
             ),
             "score": self._safe_float(moment.get("score"), 0.0),
-            "legacy_passive_statement_would_block": bool(
-                moment.get("legacy_passive_statement_would_block")
-            ),
-            "passive_statement_shadow": (
-                dict(moment.get("passive_statement_shadow"))
-                if isinstance(moment.get("passive_statement_shadow"), dict)
-                else {}
-            ),
-            "category_overview_item": bool(moment.get("category_overview_item")),
-            "category_overview_terms": list(moment.get("category_overview_terms") or []),
-            "legacy_category_overview_would_block": bool(
-                moment.get("legacy_category_overview_would_block")
-            ),
-            "category_overview_shadow": (
-                policy_debug.get("category_overview_shadow")
-                if isinstance(policy_debug.get("category_overview_shadow"), dict)
-                else {}
-            ),
             "semantic_score": (
                 self._safe_float(moment.get("semantic_score"), 0.0)
                 if moment.get("semantic_score") is not None
@@ -19977,8 +16965,6 @@ class GatewayService:
         suppressed_moments: list[dict] | None = None,
         suppressed_buckets: list[dict] | None = None,
         query_planner_debug: dict[str, Any] | None = None,
-        memory_sentinel_debug: dict[str, Any] | None = None,
-        domain_sentinel_debug: dict[str, Any] | None = None,
         semantic_recall_debug: dict[str, Any] | None = None,
         date_persona_trace: str = "",
         date_persona_trace_debug: dict[str, Any] | None = None,
@@ -20183,8 +17169,6 @@ class GatewayService:
             "query_planner_debug": query_planner_debug or self._query_planner_debug_base(query),
             "structural_activation_debug": structural_activation_debug,
             "moment_chunk_shadow_debug": moment_chunk_shadow_debug,
-            "memory_sentinel_debug": memory_sentinel_debug or self._memory_sentinel_debug_base(query),
-            "domain_sentinel_debug": domain_sentinel_debug or self._domain_sentinel_rule_plan(query),
             "semantic_recall_debug": semantic_recall_debug
             or self.semantic_recall_router.debug_base(query),
             "memory_detail_recall_debug": self._memory_detail_recall_debug_base(injected_bucket_ids),
@@ -20233,82 +17217,30 @@ class GatewayService:
         max_chars: int,
         include_diffused: bool,
         allow_semantic: bool,
-        allow_query_planner: bool,
+        query_embedding: list[float] | None,
         allow_semantic_session_dedupe: bool,
         allow_rerank: bool,
     ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
-        memory_sentinel_debug = self._memory_sentinel_debug_base(query)
-        memory_sentinel_debug["searchable_residue_terms"] = self._memory_sentinel_searchable_residue_terms(query)
         query_planner_debug = self._query_planner_debug_base(query)
-        domain_sentinel_debug = await self._route_domain_sentinel(query)
         if max_cards <= 0:
             return [], [], {
                 "query_preview": self._clip_text(query, 500),
-                "domain_sentinel_debug": domain_sentinel_debug,
                 "query_planner_debug": query_planner_debug,
-                "memory_sentinel_debug": memory_sentinel_debug,
                 "recalled_bucket_ids": [],
                 "recalled_moment_debug": [],
                 "diffused_moment_debug": [],
                 "hook_recall_debug": {"mode": "fast", "skip_reason": "max_cards_zero"},
             }
-        query_plan = self._recall_query_plan(query)
-        if getattr(query_plan, "skip_reason", "") == "recall_meta_without_target":
-            query_planner_debug["skip_reason"] = "recall_meta_without_target"
-            return [], [], {
-                "query_preview": self._clip_text(query, 500),
-                "domain_sentinel_debug": domain_sentinel_debug,
-                "query_planner_debug": query_planner_debug,
-                "memory_sentinel_debug": memory_sentinel_debug,
-                "recalled_bucket_ids": [],
-                "recalled_bucket_debug": [],
-                "recalled_moment_ids": [],
-                "diffused_bucket_ids": [],
-                "diffused_moment_ids": [],
-                "recalled_moment_debug": [],
-                "diffused_moment_debug": [],
-                "suppressed_bucket_candidates": [],
-                "hook_recall_debug": {
-                    "mode": "fast_bucket",
-                    "skip_reason": query_planner_debug["skip_reason"],
-                    "candidate_count": 0,
-                },
-            }
-
         all_buckets = await self._list_gateway_buckets(include_archive=False)
-        domain_query = str(domain_sentinel_debug.get("query") or "").strip()
-        if self._domain_sentinel_should_skip_recall(domain_sentinel_debug, query):
-            domain_sentinel_debug["skip_applied"] = True
-            query_planner_debug["skip_reason"] = "domain_sentinel_skip"
-            return [], [], {
-                "query_preview": self._clip_text(query, 500),
-                "domain_sentinel_debug": domain_sentinel_debug,
-                "query_planner_debug": query_planner_debug,
-                "memory_sentinel_debug": memory_sentinel_debug,
-                "recalled_bucket_ids": [],
-                "recalled_bucket_debug": [],
-                "recalled_moment_ids": [],
-                "diffused_bucket_ids": [],
-                "diffused_moment_ids": [],
-                "recalled_moment_debug": [],
-                "diffused_moment_debug": [],
-                "suppressed_bucket_candidates": [],
-                "hook_recall_debug": {
-                    "mode": "fast_bucket",
-                    "skip_reason": "domain_sentinel_skip",
-                    "domain_query": domain_query,
-                    "candidate_count": 0,
-                },
-            }
-        search_query = self._dynamic_recall_search_query(domain_query or query, memory_sentinel_debug)
+        search_query = self._dynamic_recall_search_query(query)
         selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
             query,
             session_id,
             all_buckets,
             search_query=search_query,
+            query_embedding=query_embedding,
             include_query_planner_debug=True,
             allow_semantic=allow_semantic,
-            allow_query_planner=allow_query_planner,
             allow_semantic_session_dedupe=allow_semantic_session_dedupe,
             allow_rerank=allow_rerank,
         )
@@ -20336,9 +17268,7 @@ class GatewayService:
 
         debug_payload = {
             "query_preview": self._clip_text(query, 500),
-            "domain_sentinel_debug": domain_sentinel_debug,
             "query_planner_debug": query_planner_debug,
-            "memory_sentinel_debug": memory_sentinel_debug,
             "recalled_bucket_ids": recalled_ids,
             "recalled_bucket_debug": [
                 self._format_selected_bucket_debug(bucket, query=query)
@@ -20356,9 +17286,7 @@ class GatewayService:
             "hook_recall_debug": {
                 "mode": "fast_bucket",
                 "search_query": search_query,
-                "domain_query": domain_query,
                 "allow_semantic": allow_semantic,
-                "allow_query_planner": allow_query_planner,
                 "allow_semantic_session_dedupe": allow_semantic_session_dedupe,
                 "allow_rerank": allow_rerank,
                 "include_diffused_requested": include_diffused,

@@ -369,7 +369,6 @@ gateway:
   just_now_context_max_turns: 5
   just_now_context_budget: 420
   conversation_turns_max_entries: 500
-  memory_sentinel_enabled: true     # legacy comparison/debug; active semantic mode removes its veto
   semantic_recall_router:
     mode: "off"                     # off | shadow | active; active only skips high-confidence no-recall routes
     shadow_enabled: false           # legacy compatibility; used only when mode is omitted
@@ -378,13 +377,6 @@ gateway:
     min_score: 0.72
     min_margin: 0.04
     aggregation_top_k: 1
-  domain_sentinel_enabled: true      # coarse routing: message_type, primary domain, optional should_recall=false
-  domain_sentinel_model: ""          # empty = use dehydration.model; prefer cheap/fast models
-  domain_sentinel_base_url: ""       # empty = reuse dehydration.base_url
-  # domain_sentinel_api_key: ""      # empty = OMBRE_DOMAIN_SENTINEL_API_KEY or dehydration.api_key
-  domain_sentinel_enable_thinking: false   # forced false
-  domain_sentinel_max_tokens: 260
-  domain_sentinel_timeout_seconds: 4
   date_persona_trace_enabled: true   # date words like 昨天/昨晚 add small same-day persona/original-turn trace
   date_persona_trace_budget: 220
   date_persona_trace_max_events: 5
@@ -399,12 +391,6 @@ gateway:
   portrait_memory_budget: 360
   portrait_memory_max_sources: 8
   portrait_memory_include_anchors: false # true optionally adds ordinary anchors; never includes pinned/protected/self_anchor
-  query_planner_enabled: true  # extra LLM call: split long/low-confidence messages into short recall queries
-  query_planner_model: ""      # empty = use dehydration.model via dehydration API
-  query_planner_min_chars: 16  # also catches short emotional reason lookups like "今天为什么激动哭"
-  query_planner_max_queries: 3
-  query_planner_max_tokens: 360
-  query_planner_supplemental_semantic: false # planner short queries use keyword/exact by default; avoids repeated embedding calls
   semantic_rescue_enabled: false # optional last gate for semantic-only candidates; validates an exact evidence span
   semantic_rescue_candidate_limit: 3 # one batched cheap-model call, top 1-3 semantic candidates
   semantic_rescue_max_tokens: 220
@@ -426,55 +412,6 @@ gateway:
   word_map_hint_moment_boost: 0.25   # weak moment-search boost for hinted buckets in graph retrieval mode
   word_map_hint_neighbor_limit: 6
   word_map_hint_bucket_limit: 12
-  axis_lite:
-    # Technical-axis guardrail terms. If these keys exist, they replace the built-in defaults.
-    # Used only to reject off-domain memories after recall candidates already exist.
-    technical_axis_terms:
-      - esp32
-      - mpr121
-      - sqlite
-      - 模块
-      - 硬件
-      - 接口
-      - 端点
-      - api
-      - gateway
-      - bridge
-      - mcp
-      - embedding
-      - rerank
-      - 代码
-      - 开源项目
-    technical_database_terms:
-      - schema
-      - 端点
-      - 接口
-      - 代码
-      - 实现
-      - 导入
-      - 索引
-      - 查询
-      - 字段
-      - 表结构
-      - 迁移
-      - sqlite
-      - sql
-    technical_domain_terms:
-      - tech
-      - technical
-      - projectcode
-      - hardwareprotocol
-      - hardware
-      - code
-      - debug
-      - 技术
-      - 技术计划
-      - 工程
-      - 代码
-      - 硬件
-      - 协议
-      - 数据库
-      - 开发
   semantic_candidate_top_k: 50       # internal embedding candidate pool; visible injection stays gated
   moment_search_limit: 50            # internal moment candidate pool for graph retrieval
   recall_fusion_mode: dynamic        # dynamic | legacy; legacy uses the weights below as the main score
