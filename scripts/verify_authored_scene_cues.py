@@ -44,6 +44,7 @@ async def main() -> None:
         assert "也可以写下当时的情绪、欲望与犹豫" in description
         assert "摘要或说明" in description
     assert "cues 由你写 1～8 个“以后提到什么时希望它回来”的入口，不是摘要" in write_description
+    assert "字符串可用逗号、竖线或换行分隔" in write_description
     assert "每个 cue 是“以后提到什么时希望它回来”的入口，不是摘要" in close_description
     scene_voice_note = "[仅你可见]这是过去的你写下的经历，相关才提及，不要复述。"
     assert scene_voice_note in GatewayService._memory_reading_policy_context()
@@ -56,6 +57,10 @@ async def main() -> None:
     assert "CloseWindowSceneInput" not in close_schema.get("$defs", {})
     assert server._authored_scene_cues("") == []
     assert server._authored_scene_cues("提到 authored cues") == ["提到 authored cues"]
+    assert server._authored_scene_cues(
+        "共感娃娃,毛绒娃娃，BJD|ESP32-C3\nMPR121"
+    ) == ["共感娃娃", "毛绒娃娃", "BJD", "ESP32-C3", "MPR121"]
+    assert server._authored_scene_cues(["别走远，我会回来"]) == ["别走远，我会回来"]
 
     invalid_date = await server.close_window(
         "## 窗影\n我不会让没有日期的窗影落库。",

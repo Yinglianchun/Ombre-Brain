@@ -2770,6 +2770,11 @@ def _authored_scene_title(content: str, explicit_title: str = "") -> str:
 
 def _authored_scene_cues(explicit: object) -> list[str]:
     """Keep only cues deliberately supplied by the Scene's current author."""
+    if isinstance(explicit, str):
+        # MCP clients commonly serialize a short cue list as one comma-delimited
+        # string. Accept that shape at the authoring boundary while keeping an
+        # explicit list item intact (it may intentionally contain punctuation).
+        explicit = re.split(r"[\r\n|｜,，]+", explicit)
     return normalize_scene_cues(explicit)
 
 
@@ -9680,7 +9685,7 @@ async def hold(
     domain: str = "",
     cues: str = "",
 ) -> str:
-    """原样保存一件由当前 AI 写好的长期 Scene，不调用模型脱水、改写、命名或同步打标。普通 content 直接写一段完整原文经历，不要添加 `## Scene`、`### scene`、`### moment` 或 sibling section。Scene 对象本身就是类型和普通召回单位。多个场景分别调用 hold。cues 必须由当前作者亲自写 1～8 个未来可能自然出现的召回入口，回答“以后提到什么时希望这段记忆回来”；系统不从 title、引句或正文补造。它们只写入稀疏 sidecar 索引，不进入正文或 Scene 原文向量，也不会彼此扩散。若部署启用 Scene linker，写入返回后可异步生成待审关系边提案；提案必须引用两端 content 原句，不改正文、不自动写正式边。有来源的新理解用 comment_bucket/annotate 挂回来源。feel、whisper、daily impression 与 ProfileFact 默认拒绝新增；旧数据仍可读取。date/title/domain、valence/arousal 仅为旧客户端兼容。"""
+    """原样保存一件由当前 AI 写好的长期 Scene，不调用模型脱水、改写、命名或同步打标。普通 content 直接写一段完整原文经历，不要添加 `## Scene`、`### scene`、`### moment` 或 sibling section。Scene 对象本身就是类型和普通召回单位。多个场景分别调用 hold。cues 必须由当前作者亲自写 1～8 个未来可能自然出现的召回入口，回答“以后提到什么时希望这段记忆回来”；可传数组，字符串可用逗号、竖线或换行分隔；系统不从 title、引句或正文补造。它们只写入稀疏 sidecar 索引，不进入正文或 Scene 原文向量，也不会彼此扩散。若部署启用 Scene linker，写入返回后可异步生成待审关系边提案；提案必须引用两端 content 原句，不改正文、不自动写正式边。有来源的新理解用 comment_bucket/annotate 挂回来源。feel、whisper、daily impression 与 ProfileFact 默认拒绝新增；旧数据仍可读取。date/title/domain、valence/arousal 仅为旧客户端兼容。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -12320,7 +12325,7 @@ async def write_scene(
     date: str = "",
     domain: str = "",
 ) -> str:
-    """保存一条 Scene。content 用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要写成摘要或说明；cues 由你写 1～8 个“以后提到什么时希望它回来”的入口，不是摘要；title、date、domain 可选。"""
+    """保存一条 Scene。content 用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要写成摘要或说明；cues 由你写 1～8 个“以后提到什么时希望它回来”的入口，不是摘要，可传数组，字符串可用逗号、竖线或换行分隔；title、date、domain 可选。"""
     return await _write_scene_memory(
         content,
         title=title,
