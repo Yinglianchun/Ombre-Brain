@@ -12755,7 +12755,7 @@ async def publish_portrait(
     evidence: list[dict] | None = None,
     locked: bool = True,
 ) -> dict:
-    """发布 Portrait。scope 选 user 或 relationship；text 写正文；expected_revision 填 read_portrait 返回的 revision；evidence 可省略并使用最新候选来源；locked 控制锁定状态。"""
+    """发布 Portrait。scope 选 user 或 relationship；text 写正文；expected_revision 填 read_memory(memory_type="portrait") 返回的 revision；evidence 可省略并使用最新候选来源；locked 控制锁定状态。"""
     return await _publish_portrait_memory(
         scope=scope,
         text=text,

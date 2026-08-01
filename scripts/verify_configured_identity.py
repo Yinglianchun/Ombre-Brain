@@ -30,11 +30,21 @@ async def main() -> None:
         "Bridge 默认",
         "自动塞进",
     )
+    retired_tool_copy = (
+        "recall(",
+        "write_scene",
+        "edit_scene",
+        "set_scene_status",
+        "revise_window_shadow",
+        "read_portrait",
+    )
     for name, tool in tools.items():
         description = str(tool.description or "")
         assert description, name
         assert len(description) <= 420, (name, len(description))
         for fragment in forbidden_copy:
+            assert fragment not in description, (name, fragment)
+        for fragment in retired_tool_copy:
             assert fragment not in description, (name, fragment)
 
     root = Path(__file__).resolve().parents[1]
