@@ -646,7 +646,6 @@ dream:
   old_echo_min_age_hours: 72
   min_surface_age_hours: 3
   surface_threshold: 0.62
-  attempt_threshold: 0.45
   spontaneous_surface_prob: 0.02
 
 # Client URL hints:

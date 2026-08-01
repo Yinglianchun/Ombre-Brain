@@ -453,10 +453,8 @@ def load_config(config_path: str = None) -> dict:
             "identity_anchor_id": "c0b8ddb7423e",
             "min_surface_age_hours": 3,
             "surface_threshold": 0.62,
-            "attempt_threshold": 0.45,
             "alpha_subordinate": 0.25,
             "spontaneous_surface_prob": 0.02,
-            "max_surface_attempts": 4,
             "claim_ttl_minutes": 15,
         },
     }

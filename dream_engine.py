@@ -145,10 +145,8 @@ class DreamEngine:
         self.identity_anchor_id = str(cfg.get("identity_anchor_id") or "").strip()
         self.min_surface_age_hours = max(0.0, float(cfg.get("min_surface_age_hours", 3)))
         self.surface_threshold = float(cfg.get("surface_threshold", 0.62))
-        self.attempt_threshold = float(cfg.get("attempt_threshold", 0.45))
         self.alpha_subordinate = float(cfg.get("alpha_subordinate", 0.25))
         self.spontaneous_surface_prob = float(cfg.get("spontaneous_surface_prob", 0.02))
-        self.max_surface_attempts = max(1, int(cfg.get("max_surface_attempts", 4)))
         self.claim_ttl_minutes = max(1, int(cfg.get("claim_ttl_minutes", 15)))
         self.dreams_dir = Path(cfg.get("data_dir") or state_dir / "dreams").expanduser().resolve()
         self.logs_dir = self.dreams_dir / "logs"
@@ -829,7 +827,6 @@ class DreamEngine:
             "material_count": len(materials),
             "surfaced": False,
             "surfaced_at": None,
-            "surface_attempts": 0,
         }
         record = self._write_record(metadata, dream_text)
         self._log_event(
@@ -1002,12 +999,6 @@ class DreamEngine:
             score = max(affect, cue) + self.alpha_subordinate * min(affect, cue)
             evaluated.append({"record": record, "affect": affect, "cue": cue, "score": score, "top": max(affect, cue)})
 
-        for item in evaluated:
-            if item["top"] >= self.attempt_threshold:
-                record = item["record"]
-                attempts = int(record.metadata.get("surface_attempts", 0)) + 1
-                item["record"] = self._write_record({**record.metadata, "surface_attempts": attempts}, record.body)
-
         best = None
         for item in evaluated:
             if item["score"] >= self.surface_threshold and (best is None or item["score"] > best["score"]):
@@ -1073,9 +1064,6 @@ class DreamEngine:
                 except Exception:
                     pass
 
-        for record in self.list_records():
-            if not record.surfaced and int(record.metadata.get("surface_attempts", 0)) >= self.max_surface_attempts:
-                self._delete_record(record, f"unsurfaced_after_{self.max_surface_attempts}_attempts", embedding_engine)
         return {"status": "skipped", "reason": "no_resonance"}
 
     def dashboard_records(self, limit: int = 30) -> list[dict]:
