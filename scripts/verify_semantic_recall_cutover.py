@@ -139,7 +139,7 @@ assert "auto_too_vague" not in candidate.debug
 assert "legacy_auto_vague_would_suppress" not in candidate.debug
 
 
-async def verify_fast_hook_uses_the_same_semantic_entry() -> None:
+async def verify_hook_modes_use_the_same_semantic_entry() -> None:
     service = GatewayService.__new__(GatewayService)
     service._authorize = lambda authorization: None
     service.upstream_default_model = ""
@@ -152,6 +152,29 @@ async def verify_fast_hook_uses_the_same_semantic_entry() -> None:
     skipped_body = json.loads(skipped.body)
     assert skipped_body["cards"] == []
     assert skipped_body["debug"]["hook_recall_debug"]["skip_reason"] == "semantic_recall_skip"
+    assert skipped_body["debug"]["hook_recall_debug"]["mode"] == "fast_bucket"
+
+    async def full_recall(**kwargs):
+        raise AssertionError("full recall must not run after a semantic skip")
+
+    service._handle_hook_recall_full = full_recall
+    skipped_full = await service.handle_hook_recall(
+        RequestStub(
+            {
+                "query": "回来看看你",
+                "recall_mode": "full",
+                "include_debug": True,
+            }
+        )
+    )
+    skipped_full_body = json.loads(skipped_full.body)
+    assert skipped_full_body["cards"] == []
+    assert skipped_full_body["additional_context"] == ""
+    assert skipped_full_body["recalled_ids"] == []
+    assert skipped_full_body["debug"]["hook_recall_debug"] == {
+        "mode": "full_gateway",
+        "skip_reason": "semantic_recall_skip",
+    }
 
     captured: dict[str, object] = {}
 
@@ -171,6 +194,6 @@ async def verify_fast_hook_uses_the_same_semantic_entry() -> None:
     assert captured["allow_semantic"] is True
 
 
-asyncio.run(verify_fast_hook_uses_the_same_semantic_entry())
+asyncio.run(verify_hook_modes_use_the_same_semantic_entry())
 
 print("semantic recall cutover verification passed")

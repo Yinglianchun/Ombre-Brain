@@ -2050,21 +2050,6 @@ class GatewayService:
             ceiling=12000,
         )
 
-        if recall_mode == "full":
-            return await self._handle_hook_recall_full(
-                query=query,
-                session_id=session_id,
-                messages=messages,
-                model=model,
-                max_cards=max_cards,
-                max_chars=max_chars,
-                max_context_chars=max_context_chars,
-                include_diffused=include_diffused,
-                include_context_debug=include_context_debug,
-                include_debug=include_debug,
-                include_recent_context=include_recent_context,
-            )
-
         semantic_recall_debug, semantic_query_vector = (
             await self.semantic_recall_router.route_with_vector(query)
         )
@@ -2096,7 +2081,7 @@ class GatewayService:
                     "semantic_recall_debug": semantic_recall_debug,
                     "narrative_recall_debug": narrative_recall_debug,
                     "hook_recall_debug": {
-                        "mode": "fast_bucket",
+                        "mode": "full_gateway" if recall_mode == "full" else "fast_bucket",
                         "skip_reason": "semantic_recall_skip",
                     },
                 },
@@ -2107,6 +2092,21 @@ class GatewayService:
                     "candidate_count": 0,
                 }
             return JSONResponse(response)
+
+        if recall_mode == "full":
+            return await self._handle_hook_recall_full(
+                query=query,
+                session_id=session_id,
+                messages=messages,
+                model=model,
+                max_cards=max_cards,
+                max_chars=max_chars,
+                max_context_chars=max_context_chars,
+                include_diffused=include_diffused,
+                include_context_debug=include_context_debug,
+                include_debug=include_debug,
+                include_recent_context=include_recent_context,
+            )
 
         try:
             cards, recalled_ids, debug_payload = await self._hook_recall_fast_cards(
