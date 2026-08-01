@@ -21,7 +21,31 @@ async def main() -> None:
     assert "date 必须填写 `YYYY-MM-DD`" in description
     assert "`## 窗影`" in description
     assert "`关于你，关于我们`" in description
-    assert "`### scene | 标题 | cue：一个召回入口 | cue：另一个召回入口`" in description
+    assert (
+        "`### scene | 作者写的真实标题 | cue：一个召回入口 | cue：另一个召回入口`"
+        in description
+    )
+    assert "标题不能省略，标题后的每一项都必须以 `cue：` 开头" in description
+
+    documented_example = """
+## 窗影
+这一窗我终于把关门格式说清楚了。
+
+## 想留下的记忆
+### scene | 我们把关窗格式说清楚了 | cue：提到 close_window 怎么写 | cue：再次遇到 Scene 标记校验
+我和你一起确认了完整的 Scene 标记，让下一次关窗不再被格式绊住。
+""".strip()
+    assert documented_example in description
+    documented_sections, documented_errors = validate_window_shadow(documented_example)
+    documented_scenes = extract_window_shadow_scenes(documented_example)
+    assert documented_errors == []
+    assert documented_sections["self"] == "这一窗我终于把关门格式说清楚了。"
+    assert len(documented_scenes) == 1
+    assert documented_scenes[0]["title"] == "我们把关窗格式说清楚了"
+    assert documented_scenes[0]["cues"] == [
+        "提到 close_window 怎么写",
+        "再次遇到 Scene 标记校验",
+    ]
 
     diary_shadow = """
 ## 窗影
