@@ -66,7 +66,7 @@ def _token(bucket: dict) -> str:
 
 async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
-    assert len(tools) == 17
+    assert len(tools) == 18
     assert "narrative_revision_inbox" in tools
     assert "review_narrative_revision" in tools
     assert "set_scene_status" in tools

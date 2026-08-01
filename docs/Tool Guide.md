@@ -1,6 +1,6 @@
 # External Platform Tool Guide
 
-这份文档用于把 Ombre-Brain 接给聊天平台。MCP 只注册十五个日常动作；不要猜测或调用历史工具名。
+这份文档用于把 Ombre-Brain 接给聊天平台。MCP 只注册十八个日常动作；不要猜测或调用历史工具名。
 
 ## 当前 MCP 工具
 
@@ -11,6 +11,9 @@
 - `set_scene_status`：带版本检查地归档或恢复一条 authored Scene。
 - `annotate`：给已有来源追加带时间的理解、修正或感受。
 - `close_window`：原子保存一篇 Window Shadow 与 0～N 个 Scene。
+- `revise_window_shadow`：修订当前最新窗影，旧版与 Scene 层保持可追溯。
+- `narrative_revision_inbox`：读取待审核的叙事卷修订线索。
+- `review_narrative_revision`：保存、忽略或重开一条叙事修订线索。
 - `publish_narrative`：发布或修订有 Scene 来源账的 Narrative Roll。
 - `read_portrait`：显式读取已审阅或待审的 User / Relationship Portrait。
 - `publish_portrait`：带 optimistic revision 与可验证 evidence 发布 Portrait。
@@ -64,6 +67,7 @@
 - 推荐在 `# Window Shadow` 下依次写 `## 这一窗之后，什么留在了我身上`、`## 还在想的事`、`## 给下个窗口的我`；想继续分段时可选 `我在想什么`、`关于你，关于我们`、`最近发生的事`、`还需要关心的事`。简单窗影仍可直接写在 `## 窗影` 下，其他小标题也会原样保留。
 - 需要普通召回的经历放进 `## 想留下的记忆`，写成 `### scene | 作者标题 | cue：一个召回入口 | cue：另一个召回入口`；Scene 正文继续用你的第一人称写成能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不写成摘要或说明；没有就不写 Scene。
 - 同一次关窗和所有重试复用同一个 idempotency_key；失败时按返回的 rejected_draft 与 fix_scope 局部修正。
+- 成功落库后只允许用 revise_window_shadow 修订当前最新窗影：先 read_memory 取得原文与 source_hash，再提交完整新稿和新的 idempotency_key。旧版保留；`想留下的记忆` 必须逐字不变，Scene 改动走 edit_scene。
 - invalid/error 响应中的 rejected_draft.shadow 是逐字失败稿，不是成功 Shadow，也不会进入 handoff 或召回。只修参数时原样重传；修正文时同时传 rejected_draft_source_hash。响应丢失可用 read_rejected_draft=true 与原 key 取回。
 - 任一 Scene 写失败时，本次 Shadow 与新 Scene 整组撤回。
 - Shadow 全文不进入普通候选、gate 或扩散；handoff 只读取最新窗影连续性。

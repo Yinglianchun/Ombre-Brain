@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -11,8 +12,14 @@ from typing import Any
 from identity import identity_names
 
 
-WINDOW_SHADOW_VERSION = "window-shadow-v4"
+WINDOW_SHADOW_VERSION = "window-shadow-v5"
 WINDOW_SHADOW_REJECTED_DRAFT_VERSION = "window-shadow-rejected-draft-v1"
+
+
+class WindowShadowRevisionError(ValueError):
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = str(reason or "revision_failed")
 
 
 _HEADING_RE = re.compile(r"(?m)^(#{2,6})\s+(.+?)\s*$")
@@ -639,6 +646,9 @@ class WindowShadowStore:
                 session_id TEXT NOT NULL DEFAULT '',
                 profile_id TEXT NOT NULL DEFAULT '',
                 parent_shadow_id TEXT NOT NULL DEFAULT '',
+                supersedes_window_id TEXT NOT NULL DEFAULT '',
+                revision_root_id TEXT NOT NULL DEFAULT '',
+                revision_number INTEGER NOT NULL DEFAULT 1,
                 idempotency_key TEXT NOT NULL DEFAULT '',
                 source_date TEXT NOT NULL DEFAULT '',
                 version TEXT NOT NULL,
@@ -668,10 +678,23 @@ class WindowShadowStore:
             conn.execute("ALTER TABLE window_shadows ADD COLUMN parent_shadow_id TEXT NOT NULL DEFAULT ''")
         if "idempotency_key" not in columns:
             conn.execute("ALTER TABLE window_shadows ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''")
+        if "supersedes_window_id" not in columns:
+            conn.execute("ALTER TABLE window_shadows ADD COLUMN supersedes_window_id TEXT NOT NULL DEFAULT ''")
+        if "revision_root_id" not in columns:
+            conn.execute("ALTER TABLE window_shadows ADD COLUMN revision_root_id TEXT NOT NULL DEFAULT ''")
+        if "revision_number" not in columns:
+            conn.execute("ALTER TABLE window_shadows ADD COLUMN revision_number INTEGER NOT NULL DEFAULT 1")
+        conn.execute(
+            "UPDATE window_shadows SET revision_root_id = window_id WHERE revision_root_id = ''"
+        )
         if "continue_scene_id" not in columns:
             conn.execute("ALTER TABLE window_shadows ADD COLUMN continue_scene_id TEXT NOT NULL DEFAULT ''")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_window_shadows_parent ON window_shadows(parent_shadow_id)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_window_shadows_single_revision "
+            "ON window_shadows(supersedes_window_id) WHERE supersedes_window_id != ''"
         )
         conn.execute(
             """
@@ -741,6 +764,9 @@ class WindowShadowStore:
         idempotency_key: str = "",
         source_date: str = "",
         sections: dict[str, str] | None = None,
+        supersedes_window_id: str = "",
+        revision_root_id: str = "",
+        revision_number: int = 1,
     ) -> tuple[dict, bool]:
         # The full window shadow is an authored artifact. Preserve it byte-for-byte
         # instead of applying the normal memory-content cleanup path.
@@ -762,16 +788,20 @@ class WindowShadowStore:
         conn.execute(
             """
             INSERT INTO window_shadows (
-                window_id, session_id, profile_id, parent_shadow_id, idempotency_key,
+                window_id, session_id, profile_id, parent_shadow_id,
+                supersedes_window_id, revision_root_id, revision_number, idempotency_key,
                 source_date, version, source_hash,
                 content, sections_json, moment_bucket_ids_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
             """,
             (
                 window_id,
                 session_key,
                 str(profile_id or "").strip(),
                 str(parent_shadow_id or "").strip(),
+                str(supersedes_window_id or "").strip(),
+                str(revision_root_id or "").strip() or window_id,
+                max(1, int(revision_number or 1)),
                 planned["idempotency_key"],
                 str(source_date or "").strip(),
                 WINDOW_SHADOW_VERSION,
@@ -785,6 +815,132 @@ class WindowShadowStore:
         conn.commit()
         conn.close()
         return self.get(window_id) or {}, True
+
+    def revise(
+        self,
+        window_id: str,
+        content: str,
+        *,
+        expected_source_hash: str,
+        idempotency_key: str,
+        sections: dict[str, str],
+    ) -> tuple[dict, bool]:
+        """Append one immutable revision of the current active Shadow head."""
+        target_id = str(window_id or "").strip()
+        text = str(content or "")
+        expected_hash = str(expected_source_hash or "").strip().lower()
+        request_key = str(idempotency_key or "").strip()
+        planned = self.plan(text, idempotency_key=request_key)
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            replay = conn.execute(
+                "SELECT * FROM window_shadows WHERE idempotency_key = ? LIMIT 1",
+                (request_key,),
+            ).fetchone()
+            if replay is not None:
+                replay_item = self._row(replay) or {}
+                if (
+                    str(replay_item.get("supersedes_window_id") or "") == target_id
+                    and str(replay_item.get("source_hash") or "") == planned["source_hash"]
+                ):
+                    conn.commit()
+                    return replay_item, False
+                raise WindowShadowRevisionError(
+                    "idempotency_conflict",
+                    "这个 idempotency_key 已用于另一份窗影请求。",
+                )
+            target_row = conn.execute(
+                "SELECT * FROM window_shadows WHERE window_id = ?",
+                (target_id,),
+            ).fetchone()
+            if target_row is None:
+                raise WindowShadowRevisionError("window_not_found", "找不到要修订的窗影。")
+            target = self._row(target_row) or {}
+            if not hmac.compare_digest(
+                str(target.get("source_hash") or "").lower(),
+                expected_hash,
+            ):
+                raise WindowShadowRevisionError(
+                    "source_hash_mismatch",
+                    "窗影基线已经变化；请重新读取最新窗影及 source_hash。",
+                )
+            child = conn.execute(
+                "SELECT window_id FROM window_shadows WHERE supersedes_window_id = ? LIMIT 1",
+                (target_id,),
+            ).fetchone()
+            if child is not None:
+                raise WindowShadowRevisionError(
+                    "window_already_superseded",
+                    f"这篇窗影已有修订版：{child['window_id']}。",
+                )
+            latest_row = conn.execute(
+                """
+                SELECT current.window_id
+                FROM window_shadows AS current
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM window_shadows AS newer
+                    WHERE newer.supersedes_window_id = current.window_id
+                )
+                ORDER BY current.created_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if latest_row is None or str(latest_row["window_id"] or "") != target_id:
+                raise WindowShadowRevisionError(
+                    "revision_target_not_latest",
+                    "只能修订当前最新窗影；历史窗影请保留原文并另写补录。",
+                )
+            old_sections = target.get("sections") if isinstance(target.get("sections"), dict) else {}
+            if str(old_sections.get("moments") or "") != str(sections.get("moments") or ""):
+                raise WindowShadowRevisionError(
+                    "scene_layer_changed",
+                    "修订窗影不能改 `## 想留下的记忆`；Scene 请使用 edit_scene。",
+                )
+            if hmac.compare_digest(
+                str(target.get("source_hash") or "").lower(),
+                planned["source_hash"].lower(),
+            ):
+                raise WindowShadowRevisionError("unchanged_shadow", "修订稿与当前窗影完全相同。")
+            now = _now_utc()
+            revision_root_id = str(target.get("revision_root_id") or "").strip() or target_id
+            revision_number = max(1, int(target.get("revision_number") or 1)) + 1
+            conn.execute(
+                """
+                INSERT INTO window_shadows (
+                    window_id, session_id, profile_id, parent_shadow_id,
+                    supersedes_window_id, revision_root_id, revision_number, idempotency_key,
+                    source_date, version, source_hash, content, sections_json,
+                    moment_bucket_ids_json, continue_scene_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    planned["window_id"],
+                    str(target.get("session_id") or ""),
+                    str(target.get("profile_id") or ""),
+                    str(target.get("parent_shadow_id") or ""),
+                    target_id,
+                    revision_root_id,
+                    revision_number,
+                    request_key,
+                    str(target.get("source_date") or ""),
+                    WINDOW_SHADOW_VERSION,
+                    planned["source_hash"],
+                    text,
+                    json.dumps(sections, ensure_ascii=False),
+                    json.dumps(target.get("scene_bucket_ids") or [], ensure_ascii=False),
+                    str(target.get("continue_scene_id") or ""),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            return self.get(planned["window_id"]) or {}, True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def get_by_idempotency_key(self, idempotency_key: str) -> dict | None:
         key = str(idempotency_key or "").strip()
@@ -859,15 +1015,41 @@ class WindowShadowStore:
 
     def latest(self, *, exclude_session_id: str = "") -> dict | None:
         conn = self._connect()
+        active_clause = (
+            "NOT EXISTS (SELECT 1 FROM window_shadows AS newer "
+            "WHERE newer.supersedes_window_id = current.window_id)"
+        )
         if str(exclude_session_id or "").strip():
             row = conn.execute(
-                "SELECT * FROM window_shadows WHERE session_id != ? ORDER BY created_at DESC LIMIT 1",
+                f"SELECT current.* FROM window_shadows AS current "
+                f"WHERE current.session_id != ? AND {active_clause} "
+                "ORDER BY current.created_at DESC LIMIT 1",
                 (str(exclude_session_id).strip(),),
             ).fetchone()
         else:
-            row = conn.execute("SELECT * FROM window_shadows ORDER BY created_at DESC LIMIT 1").fetchone()
+            row = conn.execute(
+                f"SELECT current.* FROM window_shadows AS current WHERE {active_clause} "
+                "ORDER BY current.created_at DESC LIMIT 1"
+            ).fetchone()
         conn.close()
         return self._row(row)
+
+    def revision_head(self, window_id: str) -> dict | None:
+        current = self.get(window_id)
+        seen = set()
+        while current and str(current.get("window_id") or "") not in seen:
+            current_id = str(current.get("window_id") or "")
+            seen.add(current_id)
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT * FROM window_shadows WHERE supersedes_window_id = ? LIMIT 1",
+                (current_id,),
+            ).fetchone()
+            conn.close()
+            if row is None:
+                return current
+            current = self._row(row)
+        return current
 
     def latest_handoff_projection(self, *, exclude_session_id: str = "") -> dict | None:
         """Return the latest Shadow's authored self/relationship layers, never its moments."""
@@ -890,7 +1072,7 @@ class WindowShadowStore:
 
     def handoff_projection(self, window_id: str) -> dict | None:
         """Return one exact parent Shadow projection; never guess by recency."""
-        row = self.get(window_id)
+        row = self.revision_head(window_id)
         if not row:
             return None
         projection = project_window_shadow_handoff(
@@ -899,6 +1081,7 @@ class WindowShadowStore:
         )
         return {
             "window_id": str(row.get("window_id") or ""),
+            "requested_window_id": str(window_id or "").strip(),
             "session_id": str(row.get("session_id") or ""),
             "profile_id": str(row.get("profile_id") or ""),
             "parent_shadow_id": str(row.get("parent_shadow_id") or ""),
@@ -909,22 +1092,36 @@ class WindowShadowStore:
             **projection,
         }
 
-    def list(self, limit: int = 20, *, include_content: bool = True) -> list[dict]:
+    def list(
+        self,
+        limit: int = 20,
+        *,
+        include_content: bool = True,
+        active_only: bool = False,
+    ) -> list[dict]:
         limit = max(1, min(int(limit or 20), 200))
         fields = "*" if include_content else (
-            "window_id, session_id, profile_id, parent_shadow_id, source_date, version, source_hash, '' AS content, "
+            "window_id, session_id, profile_id, parent_shadow_id, supersedes_window_id, "
+            "revision_root_id, revision_number, source_date, version, source_hash, '' AS content, "
             "sections_json, moment_bucket_ids_json, continue_scene_id, created_at, updated_at"
         )
         conn = self._connect()
+        where = (
+            "WHERE NOT EXISTS (SELECT 1 FROM window_shadows AS newer "
+            "WHERE newer.supersedes_window_id = current.window_id)"
+            if active_only
+            else ""
+        )
         rows = conn.execute(
-            f"SELECT {fields} FROM window_shadows ORDER BY created_at DESC LIMIT ?",
+            f"SELECT {fields} FROM window_shadows AS current {where} "
+            "ORDER BY current.created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
         conn.close()
         return [self._row(row) or {} for row in rows]
 
     def portrait_materials(self, limit: int = 4, *, per_item_chars: int = 2400) -> list[dict]:
-        rows = self.list(limit=limit, include_content=True)
+        rows = self.list(limit=limit, include_content=True, active_only=True)
         output = []
         for row in reversed(rows):
             sections = row.get("sections", {}) if isinstance(row.get("sections"), dict) else {}
@@ -966,11 +1163,11 @@ class WindowShadowStore:
     def stats(self) -> dict:
         conn = self._connect()
         count = int(conn.execute("SELECT COUNT(*) FROM window_shadows").fetchone()[0])
-        latest = conn.execute("SELECT window_id, created_at FROM window_shadows ORDER BY created_at DESC LIMIT 1").fetchone()
         conn.close()
+        latest = self.latest()
         return {
             "count": count,
-            "latest_window_id": str(latest["window_id"] if latest else ""),
-            "latest_created_at": str(latest["created_at"] if latest else ""),
+            "latest_window_id": str(latest.get("window_id") if latest else ""),
+            "latest_created_at": str(latest.get("created_at") if latest else ""),
             "db_path": self.db_path,
         }

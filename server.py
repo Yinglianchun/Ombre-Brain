@@ -142,6 +142,7 @@ from mcp_surface import OmbreFastMCP
 from recall_policy import RecallPolicy, diffusion_seed_topic_term_has_specific_residue
 from window_shadows import (
     WindowShadowRejectedDraftStore,
+    WindowShadowRevisionError,
     WindowShadowStore,
     extract_window_shadow_moments,
     extract_window_shadow_scenes,
@@ -10707,6 +10708,70 @@ Scene 标题不能省略，标题后的每一项都必须以 `cue：` 开头。�
     )
 
 
+@mcp.tool()
+async def revise_window_shadow(
+    window_id: str,
+    shadow: str,
+    expected_source_hash: str,
+    idempotency_key: str,
+) -> dict:
+    """修订当前最新窗影，旧版原样保留。先用 read_memory(memory_type="shadow") 读取 window_id、正文与 source_hash；提交完整新 shadow，并逐字保留 `## 想留下的记忆`，Scene 要改请用 edit_scene。expected_source_hash 防止盖错版本；idempotency_key 用于安全重试。成功后 handoff 自动读取新版本。"""
+    target_id = str(window_id or "").strip()
+    text = str(shadow or "")
+    expected_hash = str(expected_source_hash or "").strip().lower()
+    request_key = str(idempotency_key or "").strip()
+    if not target_id or not MEMORY_ID_RE.fullmatch(target_id) or not target_id.startswith("window_"):
+        return {
+            "status": "invalid",
+            "reason": "invalid_window_id",
+            "error": "window_id 必须是要修订的 window_ ID。",
+        }
+    if not text.strip():
+        return {"status": "invalid", "reason": "empty_shadow", "error": "修订稿不能为空。"}
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        return {
+            "status": "invalid",
+            "reason": "invalid_expected_source_hash",
+            "error": "expected_source_hash 必须是 read_memory 返回的 64 位 SHA-256。",
+        }
+    if not request_key or len(request_key) > 200:
+        return {
+            "status": "invalid",
+            "reason": "invalid_idempotency_key",
+            "error": "idempotency_key 必填且不能超过 200 个字符。",
+        }
+    sections, validation_errors = validate_window_shadow(text)
+    if validation_errors:
+        return {
+            "status": "invalid",
+            "reason": "invalid_window_shadow",
+            "error": "窗影格式不完整，未修订：" + ", ".join(validation_errors),
+        }
+    try:
+        revised, created = window_shadow_store.revise(
+            target_id,
+            text,
+            expected_source_hash=expected_hash,
+            idempotency_key=request_key,
+            sections=sections,
+        )
+    except WindowShadowRevisionError as exc:
+        return {"status": "invalid", "reason": exc.reason, "error": str(exc)}
+    return {
+        "status": "revised" if created else "existing",
+        "window_id": str(revised.get("window_id") or ""),
+        "supersedes_window_id": str(revised.get("supersedes_window_id") or ""),
+        "revision_root_id": str(revised.get("revision_root_id") or ""),
+        "revision_number": int(revised.get("revision_number") or 1),
+        "source_hash": str(revised.get("source_hash") or ""),
+        "scene_bucket_ids": list(revised.get("scene_bucket_ids") or []),
+        "continue_scene_id": str(revised.get("continue_scene_id") or ""),
+        "idempotency_key": request_key,
+        "idempotent_replay": not created,
+        "ordinary_recall": False,
+    }
+
+
 async def grow(
     content: str,
     auto: bool = False,
@@ -10760,10 +10825,18 @@ async def _read_window_shadow_memory(
         if not MEMORY_ID_RE.fullmatch(window_id):
             return {"status": "invalid", "reason": "invalid_window_id", "window_id": window_id}
         item = window_shadow_store.get(window_id)
+        revision_head = window_shadow_store.revision_head(window_id) if item else None
         return {
             "status": "ok" if item else "not_found",
             "mode": "window_shadow",
             "window": item,
+            "revision_head_id": str(revision_head.get("window_id") or "") if revision_head else "",
+            "is_revision_head": bool(
+                item
+                and revision_head
+                and str(item.get("window_id") or "")
+                == str(revision_head.get("window_id") or "")
+            ),
             "ordinary_recall": False,
         }
     return {

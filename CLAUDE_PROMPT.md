@@ -15,6 +15,9 @@
 | `set_scene_status` | 带版本检查地归档或恢复一条 authored Scene |
 | `annotate` | 给已有来源追加带时间的新理解、修正或感受 |
 | `close_window` | 原子保存完整第一人称 Window Shadow 与 0～N 个 Scene |
+| `revise_window_shadow` | 修订当前最新窗影，保留旧版与 Scene 层 |
+| `narrative_revision_inbox` | 读取待审核的叙事卷修订线索 |
+| `review_narrative_revision` | 保存、忽略或重开一条叙事修订线索 |
 | `publish_narrative` | 发布或修订有 Scene 来源账的 Narrative Roll |
 | `read_portrait` | 显式读取已审阅或待审的 User / Relationship Portrait |
 | `publish_portrait` | 带 revision 与可验证 evidence 发布 Portrait |
@@ -24,7 +27,7 @@
 | `delete_diary` | 软删除精确 ID 的日记 |
 | `comment_diary` | 给日记追加你的评论 |
 
-MCP 只注册以上十五个动作。旧桶、旧字段和旧读取投影继续兼容，但历史 MCP 工具名与旧 Diary MCP 的 `get/search/update/add_user_comment` 已经退役。
+MCP 只注册以上十八个动作。旧桶、旧字段和旧读取投影继续兼容，但历史 MCP 工具名与旧 Diary MCP 的 `get/search/update/add_user_comment` 已经退役。
 
 ## 什么时候读取
 
@@ -72,6 +75,7 @@ MCP 只注册以上十五个动作。旧桶、旧字段和旧读取投影继续�
 - 推荐在 `# Window Shadow` 下依次写 `## 这一窗之后，什么留在了我身上`、`## 还在想的事`、`## 给下个窗口的我`；想继续分段时按真实内容选写 `## 我在想什么`、`## 关于你，关于我们`、`## 最近发生的事`、`## 还需要关心的事`。简单窗影仍可直接写在 `## 窗影` 下，其他日记小标题也会原样保留。
 - 需要普通召回的经历放在 `## 想留下的记忆` 下，写成 `### scene | 作者标题 | cue：一个召回入口 | cue：另一个召回入口`；Scene 正文继续用你的第一人称写成能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不写成摘要或说明；没有就不写 Scene。
 - 一次关窗和所有重试复用同一个 `idempotency_key`。失败时逐字复用响应里的 `rejected_draft.shadow`，只修 `fix_scope` 指出的段落或参数。
+- 成功落库后若发现最新窗影写错，先用 `read_memory(memory_type="shadow")` 读回原文与 `source_hash`，再调用 `revise_window_shadow` 提交完整修订稿。旧版保留；`## 想留下的记忆` 必须逐字不变，Scene 修订走 `edit_scene`。
 - Window Shadow 不进入普通 recall；Scene 才进入。
 
 ## Narrative Roll

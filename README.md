@@ -463,6 +463,9 @@ Codex 接线时注意：
 | `set_scene_status` | 带版本检查地归档或恢复一条 authored Scene |
 | `annotate` | 给已有来源追加带时间的 Annotation |
 | `close_window` | 原子保存一篇 Window Shadow 与 0～N 个 Scene |
+| `revise_window_shadow` | 修订当前最新窗影，保留旧版与 Scene 层 |
+| `narrative_revision_inbox` | 读取待审核的叙事卷修订线索 |
+| `review_narrative_revision` | 保存、忽略或重开一条叙事修订线索 |
 | `publish_narrative` | 发布或修订有 Scene 来源账的 Narrative Roll |
 | `read_portrait` | 显式读取已审阅 Portrait 与证据 |
 | `publish_portrait` | 带 revision 与证据发布 Portrait |
@@ -472,7 +475,7 @@ Codex 接线时注意：
 | `delete_diary` | 确认后软删除一篇日记 |
 | `comment_diary` | 追加你的日记评论 |
 
-MCP 只注册以上十五个动作。旧桶格式、读取投影和 Dashboard/internal HTTP 兼容继续保留，但旧 MCP 工具名与旧 Diary MCP 工具不再公布或接受调用。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
+MCP 只注册以上十八个动作。旧桶格式、读取投影和 Dashboard/internal HTTP 兼容继续保留，但旧 MCP 工具名与旧 Diary MCP 工具不再公布或接受调用。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
 
 ## 运维与验证
 
