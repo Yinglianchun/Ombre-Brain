@@ -16,7 +16,7 @@ from narrative_rolls import NarrativeRollStore
 
 async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
-    assert len(tools) == 18
+    assert len(tools) == 14
     assert "narrative_revision_inbox" in tools
     assert "review_narrative_revision" in tools
 
@@ -54,8 +54,24 @@ async def main() -> None:
     gateway = (root / "gateway.py").read_text(encoding="utf-8")
     assert "Recent Haven Bridge" not in gateway
 
-    recall_schema = tools["recall"].inputSchema
-    assert recall_schema["properties"]["mode"]["enum"] == ["memory", "handoff"]
+    read_schema = tools["read_memory"].inputSchema
+    assert read_schema["properties"]["memory_type"]["enum"] == [
+        "",
+        "scene",
+        "shadow",
+        "narrative",
+        "portrait",
+    ]
+    assert read_schema["properties"]["latest"]["default"] is True
+    for retired_name in (
+        "recall",
+        "write_scene",
+        "edit_scene",
+        "set_scene_status",
+        "revise_window_shadow",
+        "read_portrait",
+    ):
+        assert retired_name not in tools
 
     custom_config = {
         "identity": {

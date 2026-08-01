@@ -30,19 +30,22 @@ class _CaptureBucketManager:
 
 async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
-    write_schema = tools["write_scene"].inputSchema
+    write_schema = tools["write_memory"].inputSchema
     close_schema = tools["close_window"].inputSchema
     close_properties = close_schema["properties"]
-    write_description = str(tools["write_scene"].description or "")
-    edit_description = str(tools["edit_scene"].description or "")
+    write_description = str(tools["write_memory"].description or "")
+    edit_description = str(tools["edit_memory"].description or "")
     close_description = str(tools["close_window"].description or "")
 
     assert "cues" in write_schema["required"]
-    for description in (write_description, edit_description, close_description):
+    for description in (write_description, close_description):
         assert "能独立理解的具体场景" in description
         assert "实际发生的细节" in description
         assert "也可以写下当时的情绪、欲望与犹豫" in description
         assert "摘要或说明" in description
+    assert "能独立理解的具体场景" in edit_description
+    assert "实际发生的细节" in edit_description
+    assert "摘要或说明" in edit_description
     assert "cues 由你写 1～8 个“以后提到什么时希望它回来”的入口，不是摘要" in write_description
     assert "字符串可用逗号、竖线或换行分隔" in write_description
     assert "每个 cue 是“以后提到什么时希望它回来”的入口，不是摘要" in close_description

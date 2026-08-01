@@ -8,18 +8,14 @@
 
 | 工具 | 用途 |
 | --- | --- |
-| `recall` | 按 query/date 召回 Scene；新窗口缺少自动交接时用 `mode="handoff"` |
-| `read_memory` | 精确读取 Scene、Window Shadow 或 Narrative Roll |
-| `write_scene` | 用你的第一人称原样保存一件具体、长期有用的 canonical Scene |
-| `edit_scene` | 先读后改，原位修订并保留你的第一人称 |
-| `set_scene_status` | 带版本检查地归档或恢复一条 authored Scene |
+| `read_memory` | 搜索或读取 Scene、Window Shadow、Narrative Roll 与 Portrait；最新窗影就是开窗交接 |
+| `write_memory` | 用你的第一人称原样保存一件具体、长期有用的 canonical Scene |
+| `edit_memory` | 修订或归档 Scene，也可修订当前最新窗影 |
 | `annotate` | 给已有来源追加带时间的新理解、修正或感受 |
 | `close_window` | 原子保存完整第一人称 Window Shadow 与 0～N 个 Scene |
-| `revise_window_shadow` | 修订当前最新窗影，保留旧版与 Scene 层 |
 | `narrative_revision_inbox` | 读取待审核的叙事卷修订线索 |
 | `review_narrative_revision` | 保存、忽略或重开一条叙事修订线索 |
 | `publish_narrative` | 发布或修订有 Scene 来源账的 Narrative Roll |
-| `read_portrait` | 显式读取已审阅或待审的 User / Relationship Portrait |
 | `publish_portrait` | 带 revision 与可验证 evidence 发布 Portrait |
 | `read_diary` | 按 ID、日期、标题或日期+标题统一读取日记 |
 | `write_diary` | 原样写日记；带 `unlock_at` 时写暗房日记 |
@@ -27,23 +23,23 @@
 | `delete_diary` | 软删除精确 ID 的日记 |
 | `comment_diary` | 给日记追加你的评论 |
 
-MCP 只注册以上十八个动作。旧桶、旧字段和旧读取投影继续兼容，但历史 MCP 工具名与旧 Diary MCP 的 `get/search/update/add_user_comment` 已经退役。
+MCP 只注册以上十四个动作。旧桶、旧字段和旧读取投影继续兼容，但历史 MCP 工具名与旧 Diary MCP 的 `get/search/update/add_user_comment` 已经退役。
 
 ## 什么时候读取
 
-- 对话开头：先读自动 handoff；缺失时才调用 `recall(mode="handoff")`。
-- 提到过去：自动 Scene 不够、证据太薄或需要精确原文时，用 `recall(query="简短关键词")`。
-- 提到日期：用 `recall(date="YYYY-MM-DD")`，也可把日期和主题一起放进 query。精确日期没有证据时，不用附近日期代替。
+- 对话开头：先读平台自动带来的连续性；缺失时调用 `read_memory(memory_type="shadow")`。最新 Window Shadow 本身就是交接，不存在另一份 handoff 记忆。
+- 提到过去：自动 Scene 不够、证据太薄或需要精确原文时，用 `read_memory(query="简短关键词")`。
+- 提到日期：用 `read_memory(date="YYYY-MM-DD")`，也可同时填写 query。精确日期没有证据时，不用附近日期代替。
 - 已知对象 ID：用 `read_memory(memory_id=..., memory_type="scene|shadow|narrative")`。
-- 只有 query 没有 ID 时，`read_memory` 必须显式选择 `memory_type`；语义寻找 Scene 应使用 `recall`。
+- Portrait 也从同一入口读取：`read_memory(memory_type="portrait", scope="user|relationship")`。
 - Narrative Roll 是有来源的派生叙事；核对日期、原句或细节时继续下钻 Scene。
 - Window Shadow 不进入普通召回，只用于最新窗影交接和明确回看。
 
 ## 写 Scene
 
-- 只有具体、长期有用、以后需要独立理解的经历才调用 `write_scene`。
-- 修改已有 Scene 时先 `read_memory`，再调用 `edit_scene(scene_id=..., expected_updated_at=...)`；只传真正要改的 title、content 或 cues。不要用 `annotate` 冒充正文修订，也不要重写成一条新 Scene。
-- 不想让 Scene 继续进入普通 recall 时，先读后调用 `set_scene_status(scene_id=..., status="archived", expected_updated_at=...)`；这不是删除。恢复时重新读取并传 `status="active"`。
+- 只有具体、长期有用、以后需要独立理解的经历才调用 `write_memory`。Scene 就是可召回的记忆，不另设一套工具命名。
+- 修改已有 Scene 时先 `read_memory`，再调用 `edit_memory(memory_id=..., expected_updated_at=...)`；只传真正要改的 title、content 或 cues。不要用 `annotate` 冒充正文修订，也不要重写成一条新 Scene。
+- 不想让 Scene 继续进入普通 recall 时，先读后调用 `edit_memory(memory_id=..., status="archived", expected_updated_at=...)`；这不是删除。恢复时重新读取并传 `status="active"`。正文修订与状态变更分开调用。
 - `content` 用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要写成摘要或说明；不把正文里的“我”改写成名字、AI、assistant 或第三人称；不加 `## Scene`、`### scene`、`### moment` 或固定模板。
 - 每次只写一个 Scene；多个场景分别调用。
 - 工具不调用模型改写、不脱水、不合并。
@@ -75,7 +71,7 @@ MCP 只注册以上十八个动作。旧桶、旧字段和旧读取投影继续�
 - 推荐在 `# Window Shadow` 下依次写 `## 这一窗之后，什么留在了我身上`、`## 还在想的事`、`## 给下个窗口的我`；想继续分段时按真实内容选写 `## 我在想什么`、`## 关于你，关于我们`、`## 最近发生的事`、`## 还需要关心的事`。简单窗影仍可直接写在 `## 窗影` 下，其他日记小标题也会原样保留。
 - 需要普通召回的经历放在 `## 想留下的记忆` 下，写成 `### scene | 作者标题 | cue：一个召回入口 | cue：另一个召回入口`；Scene 正文继续用你的第一人称写成能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不写成摘要或说明；没有就不写 Scene。
 - 一次关窗和所有重试复用同一个 `idempotency_key`。失败时逐字复用响应里的 `rejected_draft.shadow`，只修 `fix_scope` 指出的段落或参数。
-- 成功落库后若发现最新窗影写错，先用 `read_memory(memory_type="shadow")` 读回原文与 `source_hash`，再调用 `revise_window_shadow` 提交完整修订稿。旧版保留；`## 想留下的记忆` 必须逐字不变，Scene 修订走 `edit_scene`。
+- 成功落库后若发现最新窗影写错，先用 `read_memory(memory_type="shadow")` 读回 `window_id`、原文与 `source_hash`，再调用 `edit_memory(memory_id=window_id, content=完整修订稿, expected_source_hash=..., idempotency_key=...)`。旧版保留；`## 想留下的记忆` 必须逐字不变，其中的 Scene 修订仍走 `edit_memory` 的 Scene 路径。
 - Window Shadow 不进入普通 recall；Scene 才进入。
 
 ## Narrative Roll
@@ -88,7 +84,7 @@ MCP 只注册以上十八个动作。旧桶、旧字段和旧读取投影继续�
 
 ## Portrait
 
-- 先 `read_portrait`，再决定是否 `publish_portrait`。
+- 先 `read_memory(memory_type="portrait")`，再决定是否 `publish_portrait`。
 - 发布必须传当前 `expected_revision` 与可验证 evidence。
 - User Portrait 的 Window Shadow 证据必须能沿 linked Scene 回到具体来源。
 - 模型候选不是已发布画像；不得自动发布。

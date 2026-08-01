@@ -32,8 +32,8 @@
 #         deletion, time-lock, and comment boundaries.
 #         读写日记与暗房，遵守版本、软删除、时间锁和评论边界。
 #   - Keep Bridge wake-up context separate from authored Window Shadows.
-#     Other clients opt into adjacent continuity with recall(mode="handoff").
-#     Bridge 负责醒来，窗影负责沉淀；其他客户端用 recall(mode="handoff") 显式交接。
+#     Other clients open a window by reading the latest Window Shadow.
+#     Bridge 负责醒来，窗影负责沉淀；其他客户端读取最新窗影接住上一窗。
 #   - Keep retired bucket-era tools out of the daily MCP surface while
 #     preserving read/migration compatibility for historical data.
 #     旧记忆桶工具不再暴露到日常 MCP，历史数据只保留读取与迁移兼容。
@@ -12333,35 +12333,20 @@ async def _set_scene_status_memory(
 # 日常 MCP façade —— 记忆连续性与作者日记动作
 # =============================================================
 @mcp.tool()
-async def recall(
-    query: str = "",
-    mode: Literal["memory", "handoff"] = "memory",
-    date: str = "",
-    max_results: int = 2,
-    max_tokens: int = 3000,
-) -> str:
-    """查找 Scene 或读取最新窗影交接。query/date 填记忆线索；mode 选 memory 或 handoff；max_results/max_tokens 控制结果。"""
-    safe_mode = str(mode or "memory").strip().lower()
-    if safe_mode not in {"memory", "handoff"}:
-        return "mode 只能是 memory 或 handoff。"
-    return await _recall_memory(
-        query=query,
-        date=date,
-        max_results=_int_between(max_results, 2, 1, 20),
-        max_tokens=_int_between(max_tokens, 3000, 0, 20000),
-        mode="handoff" if safe_mode == "handoff" else "",
-    )
-
-
-@mcp.tool()
 async def read_memory(
     memory_id: str = "",
-    memory_type: Literal["", "scene", "shadow", "narrative"] = "",
+    memory_type: Literal["", "scene", "shadow", "narrative", "portrait"] = "",
     query: str = "",
+    date: str = "",
+    scope: Literal["", "user", "relationship"] = "",
     limit: int = 20,
+    max_results: int = 2,
+    max_tokens: int = 3000,
+    latest: bool = True,
     include_content: bool = True,
-) -> dict:
-    """精确读取记忆对象。memory_id 填对象 ID；memory_type 选 scene、shadow 或 narrative；按叙事卷名称读取时用 query；limit 控制列表数量，include_content 控制是否返回正文。"""
+    include_evidence_text: bool = True,
+) -> dict | str:
+    """读取记忆。Scene：传 memory_id 精确读，传 query/date 搜索；开窗：memory_type="shadow" 读取最新窗影，latest=false 时列出最近窗影；叙事卷用 narrative；画像用 portrait，并可传 scope。max_results/max_tokens 控制 Scene 搜索，limit 控制列表，include_content/include_evidence_text 控制正文。"""
     safe_id = _coerce_memory_id(memory_id)
     safe_type = str(memory_type or "").strip().lower()
     if safe_type in {"scene", "memory", "bucket"}:
@@ -12370,36 +12355,52 @@ async def read_memory(
         safe_type = "shadow"
     elif safe_type in {"narrative", "roll", "narrative_roll", "arc"}:
         safe_type = "narrative"
+    elif safe_type in {"portrait", "profile"}:
+        safe_type = "portrait"
     elif safe_type:
         return {"status": "invalid", "reason": "unknown_memory_type", "memory_type": safe_type}
     elif safe_id.startswith("window_"):
         safe_type = "shadow"
     elif safe_id.startswith("narrative_"):
         safe_type = "narrative"
-    elif not safe_id and str(query or "").strip():
-        return {
-            "status": "needs_memory_type",
-            "reason": "query_only_read_must_choose_memory_type",
-            "query": str(query or "").strip(),
-            "allowed_memory_types": ["scene", "shadow", "narrative"],
-        }
     else:
         safe_type = "scene"
 
+    if safe_type == "portrait":
+        return await read_portrait(
+            scope=scope,
+            include_evidence_text=include_evidence_text,
+        )
     if safe_type == "narrative":
         if safe_id:
             return await _read_narrative_memory(safe_id)
         return narrative_roll_store.resolve_read_query(query=query, limit=limit)
     if safe_type == "shadow":
+        if not safe_id and bool(latest):
+            window = window_shadow_store.latest()
+            return {
+                "status": "ok" if window else "not_found",
+                "mode": "window_shadow",
+                "window": window,
+                "ordinary_recall": False,
+            }
         return await _read_window_shadow_memory(
             window_id=safe_id,
             limit=limit,
             include_content=include_content,
         )
+    if not safe_id and (str(query or "").strip() or str(date or "").strip()):
+        return await _recall_memory(
+            query=query,
+            date=date,
+            max_results=_int_between(max_results, 2, 1, 20),
+            max_tokens=_int_between(max_tokens, 3000, 0, 20000),
+            mode="",
+        )
     if not safe_id:
         return {
             "status": "invalid",
-            "reason": "scene_id_required_use_recall_for_search",
+            "reason": "scene_id_or_query_required",
             "memory_type": "scene",
         }
     return await _read_scene_memory(safe_id)
@@ -12452,6 +12453,78 @@ async def set_scene_status(
         scene_id,
         status=status,
         expected_updated_at=expected_updated_at,
+    )
+
+
+@mcp.tool()
+async def write_memory(
+    content: str,
+    cues: str | list[str],
+    title: str = "",
+    date: str = "",
+    domain: str = "",
+) -> str:
+    """写一条可召回的记忆（Scene）。content 用你的第一人称写成能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不写成摘要或说明；cues 由你写 1～8 个“以后提到什么时希望它回来”的入口，不是摘要，可传数组，字符串可用逗号、竖线或换行分隔；title、date、domain 可选。"""
+    return await write_scene(
+        content=content,
+        cues=cues,
+        title=title,
+        date=date,
+        domain=domain,
+    )
+
+
+@mcp.tool()
+async def edit_memory(
+    memory_id: str,
+    expected_updated_at: str = "",
+    expected_source_hash: str = "",
+    idempotency_key: str = "",
+    title: str | None = None,
+    content: str | None = None,
+    cues: str | list[str] | None = None,
+    status: Literal["", "active", "archived"] = "",
+) -> dict:
+    """修订记忆。Scene 先 read_memory，传 expected_updated_at，再修改 title/content/cues，或单独传 status 归档/恢复；修改 content 时仍用你的第一人称写成能独立理解的具体场景，保留实际发生的细节，不写成摘要或说明。窗影传 window_ ID、完整 content、expected_source_hash 与 idempotency_key；旧版本保留，窗影中的 Scene 层不能借此改写。"""
+    target_id = str(memory_id or "").strip()
+    if target_id.startswith("window_"):
+        if title is not None or cues is not None or status or expected_updated_at:
+            return {
+                "status": "invalid",
+                "reason": "window_shadow_fields_mixed",
+                "error": "窗影修订只传 memory_id、完整 content、expected_source_hash 与 idempotency_key。",
+            }
+        return await revise_window_shadow(
+            window_id=target_id,
+            shadow="" if content is None else content,
+            expected_source_hash=expected_source_hash,
+            idempotency_key=idempotency_key,
+        )
+
+    if expected_source_hash or idempotency_key:
+        return {
+            "status": "invalid",
+            "reason": "scene_fields_mixed",
+            "error": "Scene 修订使用 expected_updated_at，不传窗影的 source_hash 或 idempotency_key。",
+        }
+    if status and any(value is not None for value in (title, content, cues)):
+        return {
+            "status": "invalid",
+            "reason": "scene_actions_mixed",
+            "error": "Scene 正文修订与归档/恢复请分开调用。",
+        }
+    if status:
+        return await set_scene_status(
+            scene_id=target_id,
+            status=status,
+            expected_updated_at=expected_updated_at,
+        )
+    return await edit_scene(
+        scene_id=target_id,
+        expected_updated_at=expected_updated_at,
+        title=title,
+        content=content,
+        cues=cues,
     )
 
 

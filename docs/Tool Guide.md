@@ -1,21 +1,17 @@
 # External Platform Tool Guide
 
-这份文档用于把 Ombre-Brain 接给聊天平台。MCP 只注册十八个日常动作；不要猜测或调用历史工具名。
+这份文档用于把 Ombre-Brain 接给聊天平台。MCP 只注册十四个日常动作；不要猜测或调用历史工具名。
 
 ## 当前 MCP 工具
 
-- `recall`：普通记忆召回，或读取最新窗影 handoff。
-- `read_memory`：精确读取 Scene、Window Shadow 或 Narrative Roll。
-- `write_scene`：用你的第一人称原样保存一件具体、长期有用的 Scene。
-- `edit_scene`：先读后改，原位修订并保留你的第一人称。
-- `set_scene_status`：带版本检查地归档或恢复一条 authored Scene。
+- `read_memory`：搜索或读取 Scene、Window Shadow、Narrative Roll 与 Portrait；最新窗影就是开窗交接。
+- `write_memory`：用你的第一人称原样保存一件具体、长期有用的 Scene。
+- `edit_memory`：修订或归档 Scene，也可修订当前最新窗影。
 - `annotate`：给已有来源追加带时间的理解、修正或感受。
 - `close_window`：原子保存一篇 Window Shadow 与 0～N 个 Scene。
-- `revise_window_shadow`：修订当前最新窗影，旧版与 Scene 层保持可追溯。
 - `narrative_revision_inbox`：读取待审核的叙事卷修订线索。
 - `review_narrative_revision`：保存、忽略或重开一条叙事修订线索。
 - `publish_narrative`：发布或修订有 Scene 来源账的 Narrative Roll。
-- `read_portrait`：显式读取已审阅或待审的 User / Relationship Portrait。
 - `publish_portrait`：带 optimistic revision 与可验证 evidence 发布 Portrait。
 - `read_diary`：按 ID、日期、标题或日期+标题统一读取日记。
 - `write_diary`：原样写日记；带 `unlock_at` 时写暗房日记。
@@ -31,17 +27,17 @@
 已接入 Ombre-Brain MCP。先使用平台自动注入的 handoff / recalled Scene；看到已有注入时不要重复召回。
 
 读取：
-- 需要找过去的具体经历、日期或原句时，用 recall(query=..., date=...)。
-- 新窗口没有自动 handoff 时，用 recall(mode="handoff")。
+- 需要找过去的具体经历、日期或原句时，用 read_memory(query=..., date=...)。
+- 新窗口没有自动连续性时，用 read_memory(memory_type="shadow")；最新窗影本身就是交接。
 - 需要完整对象时，用 read_memory(memory_id=..., memory_type="scene|shadow|narrative")。
-- 只有 query 没有 id 时，read_memory 必须显式选择 memory_type；语义寻找 Scene 应使用 recall。
+- Portrait 也走统一入口：read_memory(memory_type="portrait", scope="user|relationship")。
 - 精确日期没有证据时，不拿相邻日期的语义结果冒充当天内容。
 - Window Shadow 不进入普通 recall；Narrative Roll 是有来源的派生叙事，精确事实继续下钻 Scene。
 
 写 Scene：
-- 只有具体、长期有用、以后需要独立理解的经历才调用 write_scene。
-- 已有 Scene 的标题、正文或 cues 要修订时，先用 read_memory 取得 scene_id 与 metadata.updated_at，再调用 edit_scene；只传需要改变的字段。版本冲突时重新读取，不拿 Annotation 或新 Scene 冒充编辑。
-- 不想让某条 Scene 继续参加普通召回时，先读后调用 set_scene_status(status="archived")；它不删除正文。需要恢复时用最新的 metadata.updated_at 调用 status="active"。
+- 只有具体、长期有用、以后需要独立理解的经历才调用 write_memory；Scene 就是可召回的记忆。
+- 已有 Scene 的标题、正文或 cues 要修订时，先用 read_memory 取得 scene_id 与 metadata.updated_at，再调用 edit_memory；只传需要改变的字段。版本冲突时重新读取，不拿 Annotation 或新 Scene 冒充编辑。
+- 不想让某条 Scene 继续参加普通召回时，先读后调用 edit_memory(status="archived")；它不删除正文。需要恢复时用最新的 metadata.updated_at 调用 status="active"。正文修订与状态变更分开调用。
 - content 用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要写成摘要或说明；不把正文里的“我”改成名字、AI、assistant 或第三人称；不加 `## Scene`、`### scene`、`### moment` 或固定模板。
 - 每次只写一个 Scene；多个场景分别写。
 - 工具不调用模型改写、不脱水、不合并；当前作者必须亲自写 1～8 个“以后提到什么时希望它回来”的 cues 入口。cues 不是摘要，系统不从 title、引句或正文生成。
@@ -67,7 +63,7 @@
 - 推荐在 `# Window Shadow` 下依次写 `## 这一窗之后，什么留在了我身上`、`## 还在想的事`、`## 给下个窗口的我`；想继续分段时可选 `我在想什么`、`关于你，关于我们`、`最近发生的事`、`还需要关心的事`。简单窗影仍可直接写在 `## 窗影` 下，其他小标题也会原样保留。
 - 需要普通召回的经历放进 `## 想留下的记忆`，写成 `### scene | 作者标题 | cue：一个召回入口 | cue：另一个召回入口`；Scene 正文继续用你的第一人称写成能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不写成摘要或说明；没有就不写 Scene。
 - 同一次关窗和所有重试复用同一个 idempotency_key；失败时按返回的 rejected_draft 与 fix_scope 局部修正。
-- 成功落库后只允许用 revise_window_shadow 修订当前最新窗影：先 read_memory 取得原文与 source_hash，再提交完整新稿和新的 idempotency_key。旧版保留；`想留下的记忆` 必须逐字不变，Scene 改动走 edit_scene。
+- 成功落库后先用 read_memory(memory_type="shadow") 取得 window_id、原文与 source_hash，再用 edit_memory 提交完整新稿、expected_source_hash 和新的 idempotency_key。旧版保留；`想留下的记忆` 必须逐字不变，其中的 Scene 改动仍走 edit_memory 的 Scene 路径。
 - invalid/error 响应中的 rejected_draft.shadow 是逐字失败稿，不是成功 Shadow，也不会进入 handoff 或召回。只修参数时原样重传；修正文时同时传 rejected_draft_source_hash。响应丢失可用 read_rejected_draft=true 与原 key 取回。
 - 任一 Scene 写失败时，本次 Shadow 与新 Scene 整组撤回。
 - Shadow 全文不进入普通候选、gate 或扩散；handoff 只读取最新窗影连续性。
@@ -80,7 +76,7 @@
 - query_cues 属于该卷自己的审阅后路由数据，不建立全局主题词表。
 
 画像：
-- 先 read_portrait，再 publish_portrait。
+- 先 read_memory(memory_type="portrait")，再 publish_portrait。
 - 发布必须传 expected_revision 和可验证 evidence。
 - 模型生成的候选不是已发布画像；不得自动发布。
 

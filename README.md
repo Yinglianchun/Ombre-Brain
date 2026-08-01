@@ -52,7 +52,7 @@ flowchart LR
 忠实写下这件经历本身，使它以后仍能被独立理解。保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫；不同 Scene 可以有不同写法。
 ```
 
-`Scene` 已经是对象类型，`write_scene` 不把 `## Scene`、`### scene` 或 `### moment` 套进 content。当前 AI 写好的那段正文就是场景真源，不是脱水摘要。旧 body / `moment` / `original` / `reflection` 仍兼容读取，但不再作为新写入 section；旧 `affect_anchor` 也只兼容读取。
+`Scene` 已经是可召回的记忆对象，`write_memory` 不把 `## Scene`、`### scene` 或 `### moment` 套进 content。当前 AI 写好的那段正文就是场景真源，不是脱水摘要。旧 body / `moment` / `original` / `reflection` 仍兼容读取，但不再作为新写入 section；旧 `affect_anchor` 也只兼容读取。
 
 并非每轮聊天都应该写桶。重要事件、承诺进展和会影响未来的短期状态才值得写成场景；稳定偏好/边界应从证据场景进入人工审阅的 Portrait，普通闲聊可以只留在原文或窗影里。
 
@@ -84,17 +84,17 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 ### 手动写入
 
-`write_scene` 只原样保存一件由当前 AI 写好的长期 Scene：content 用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要写成摘要或说明；不把正文里的“我”改写成名字、AI、assistant 或第三人称，正文不带 Markdown section 标题，也不套固定段落或字段。工具不调用脱水/标签模型，也不合并旧桶。当前作者必须在同一次调用中亲自写 1～8 个“以后提到什么时希望它回来”的 `cues` 入口；cues 不是摘要，系统不从 title、引句或正文补造。cues 只进 sidecar 稀疏索引，Scene 向量仍只 embed content 原文。
+`write_memory` 只原样保存一件由当前 AI 写好的长期 Scene：Scene 就是可召回的记忆，不另设一套日常工具命名。content 用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要写成摘要或说明；不把正文里的“我”改写成名字、AI、assistant 或第三人称，正文不带 Markdown section 标题，也不套固定段落或字段。工具不调用脱水/标签模型，也不合并旧桶。当前作者必须在同一次调用中亲自写 1～8 个“以后提到什么时希望它回来”的 `cues` 入口；cues 不是摘要，系统不从 title、引句或正文补造。cues 只进 sidecar 稀疏索引，Scene 向量仍只 embed content 原文。
 
-`edit_scene` 原位修订一条 authored Scene。调用者必须先 `read_memory`，再把读到的 `metadata.updated_at` 原样作为 `expected_updated_at`；版本不一致时返回 conflict，绝不覆盖较新的修改。只修改显式传入的 title、content、cues，旧版本全文保存在 Scene 自己的 revision history 中；Scene ID、created、source、source refs、窗影关联和 comments 都不变。窗影抽取 Scene 的 `scene_source_hash` 永远指向 revision 1；正文修订后，handoff 会沿 revision history 验回原窗影证据，而不让新正文冒充原始摘录。标题、正文或 cues 变化后刷新 embedding、moment 与 entity 索引，并重新排队 Scene link proposal。它不接受 Window Shadow、Narrative Roll、旧 bucket 或 immutable source record。
+`edit_memory` 的 Scene 路径原位修订一条 authored Scene。调用者必须先 `read_memory`，再把读到的 `metadata.updated_at` 原样作为 `expected_updated_at`；版本不一致时返回 conflict，绝不覆盖较新的修改。只修改显式传入的 title、content、cues，旧版本全文保存在 Scene 自己的 revision history 中；Scene ID、created、source、source refs、窗影关联和 comments 都不变。窗影抽取 Scene 的 `scene_source_hash` 永远指向 revision 1；正文修订后，连续性读取会沿 revision history 验回原窗影证据，而不让新正文冒充原始摘录。标题、正文或 cues 变化后刷新 embedding、moment 与 entity 索引，并重新排队 Scene link proposal。
 
-`set_scene_status` 带版本检查地归档或恢复一条 authored Scene。调用者同样必须先 `read_memory`，把最新 `metadata.updated_at` 原样传入，再把 status 设为 `archived` 或 `active`。归档不删除或重写正文、Scene ID、created、source refs、revision history、comments、窗影关联或已审阅 Scene edges；它只把 Scene 移出普通 recall，并清理可重建的向量、moment、entity 与 node 索引。归档 Scene 仍可由 `read_memory(scene_id)` 精确读回；恢复后重建派生索引并回到归档前的 dynamic/permanent 存储层。重复设置当前状态是无副作用的 unchanged。它不接受 Window Shadow、Narrative Roll、旧 bucket 或 immutable source record。
+`edit_memory` 的 status 路径带版本检查地归档或恢复一条 authored Scene。调用者同样必须先 `read_memory`，把最新 `metadata.updated_at` 原样传入，再把 status 设为 `archived` 或 `active`。归档不删除或重写正文、Scene ID、created、source refs、revision history、comments、窗影关联或已审阅 Scene edges；它只把 Scene 移出普通 recall，并清理可重建的向量、moment、entity 与 node 索引。正文修订与状态变更分开调用；归档 Scene 仍可精确读回，恢复后重建派生索引。
 
 `close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”。Bridge 负责新窗口醒来，窗影只沉淀这一窗的变化：新稿不再要求 `## 给下个窗口的我`，也没有 250～400 字限制。正文可以直接放在 `## 窗影` 下像日记一样自然书写；想分段时可选 `## 这一窗留给我的`、`## 我在想什么`、`## 关于你，关于我们`、`## 最近发生的事`（建议 `- YYYY-MM-DD｜事件`）与 `## 还需要关心的事`，其他小标题会原样保留在窗影正文里。它只从 Shadow 的“想留下的记忆”中抽取 0～N 个独立 Scene，没有平行 `scenes[]` 写入口。每条 Scene 使用 `### scene | 作者标题 | cue：自然召回入口`，可继续追加 1～8 个 `| cue：…`；Scene 正文继续用你的第一人称写成能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不写成摘要或说明。标题与 cues 都由当前作者亲自写，只进入 metadata；heading 不进入 Scene 正文。旧的 `标题：作者标题` 仍可读取；裸 `### scene`、没有作者标题或 cue 的格式都会被拒绝。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。旧 `### moment` 只保留读取兼容，不会自动升格成 Scene。
 
 `close_window` 的失败稿与成功 Shadow 分库：带 `idempotency_key` 的 `invalid` / `error` 请求会把原 Shadow 逐字写入 `window_shadow_rejected_drafts.sqlite`，响应返回 `rejected_draft.shadow`、`source_hash`、原请求参数与 `fix_scope`。失败稿不进入 `window_shadows.sqlite`、handoff、普通召回、bucket 或 embedding。重试同 key 时，参数-only 修复必须保持 Shadow 逐字不变；文本修复必须传上一稿的 `rejected_draft_source_hash`，而且只能改变 `fix_scope` 指定的 section。`read_rejected_draft=true` 可显式取回未完成失败稿。成功后草稿删除；之后同 key 永远返回第一次成功写入，不接受覆盖。
 
-Bridge 的换窗路径不调用 Ombre handoff。其他客户端需要交接时显式调用 `recall(mode="handoff")`：优先读取最新窗影亲写的最近事件，可附带还需要关心的事；旧窗影的 handoff note 只作兼容。最新窗影没有事件层时，才读取 72 小时内的后台 Recent Continuity，并明确标成 generated fallback；再失败才返回少量 raw_events 原文。生成 fallback 不写回 canonical Shadow、Scene 或普通召回。handoff 调用本身不现场请求模型，显式 Scene 也不会重复塞进交接包；只有裸“继续吧”会按 `continue_scene_id` 精确读取一条 Scene。
+Bridge 的换窗路径会自行带来连续性。其他客户端开新窗口时调用 `read_memory(memory_type="shadow")` 读取最新 Window Shadow；窗影本身就是交接，不再暴露另一种 handoff 记忆或工具模式。完整窗影不进入普通 Scene 召回，内含的显式 Scene 仍可按各自 ID 精确读取。
 
 旧窗影 Markdown 导入只保留在内部兼容路径，不属于日常 `close_window` 工具。
 
@@ -137,13 +137,13 @@ Favorite Memory 表示一段对 AI 留下明显主观影响、并能说明原因
 
 ## Handoff、画像与自我入口
 
-新窗口应调用：
+没有平台自动连续性时，新窗口应调用：
 
 ```text
-recall(mode="handoff")
+read_memory(memory_type="shadow")
 ```
 
-handoff 是一次性的紧凑恢复，不是每轮注入。当前内容按预算组合为：
+Window Shadow 是相邻窗口的一次性连续性来源，不是每轮注入，也不是另一个对象类型。内部投影仍可按预算组合为：
 
 1. **自我**：只读的第一人称 self anchor 核心。
 2. **Flowing Self**：最近窗影第一、二层的原文投影，不经二次生成。
@@ -456,18 +456,14 @@ Codex 接线时注意：
 
 | 工具 | 用途 |
 | --- | --- |
-| `recall` | 按 query/date 召回，或读取最新窗影 handoff |
-| `read_memory` | 精确读取 Scene、Window Shadow 或 Narrative Roll |
-| `write_scene` | 原样保存一件 canonical Scene |
-| `edit_scene` | 带版本检查地原位修订一条 authored Scene |
-| `set_scene_status` | 带版本检查地归档或恢复一条 authored Scene |
+| `read_memory` | 搜索或读取 Scene、Window Shadow、Narrative Roll 与 Portrait；最新窗影就是交接 |
+| `write_memory` | 原样保存一件 canonical Scene |
+| `edit_memory` | 修订或归档 Scene，也可修订当前最新窗影 |
 | `annotate` | 给已有来源追加带时间的 Annotation |
 | `close_window` | 原子保存一篇 Window Shadow 与 0～N 个 Scene |
-| `revise_window_shadow` | 修订当前最新窗影，保留旧版与 Scene 层 |
 | `narrative_revision_inbox` | 读取待审核的叙事卷修订线索 |
 | `review_narrative_revision` | 保存、忽略或重开一条叙事修订线索 |
 | `publish_narrative` | 发布或修订有 Scene 来源账的 Narrative Roll |
-| `read_portrait` | 显式读取已审阅 Portrait 与证据 |
 | `publish_portrait` | 带 revision 与证据发布 Portrait |
 | `read_diary` | 按 ID、日期、标题或日期+标题读取日记 |
 | `write_diary` | 原样写日记；带 `unlock_at` 时写暗房日记 |
@@ -475,7 +471,7 @@ Codex 接线时注意：
 | `delete_diary` | 确认后软删除一篇日记 |
 | `comment_diary` | 追加你的日记评论 |
 
-MCP 只注册以上十八个动作。旧桶格式、读取投影和 Dashboard/internal HTTP 兼容继续保留，但旧 MCP 工具名与旧 Diary MCP 工具不再公布或接受调用。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
+MCP 只注册以上十四个动作。旧桶格式、读取投影和 Dashboard/internal HTTP 兼容继续保留，但旧 MCP 工具名与旧 Diary MCP 工具不再公布或接受调用。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
 
 ## 运维与验证
 

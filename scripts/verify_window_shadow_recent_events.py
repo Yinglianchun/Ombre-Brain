@@ -38,11 +38,14 @@ class _PortraitFallback:
 async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
     assert "handoff" not in tools
-    assert "recall" in tools
-    assert "mode" in tools["recall"].inputSchema["properties"]
-    assert "session_id" not in tools["recall"].inputSchema["properties"]
-    assert "previous_session_id" not in tools["recall"].inputSchema["properties"]
-    assert "parent_shadow_id" not in tools["recall"].inputSchema["properties"]
+    assert "recall" not in tools
+    assert "read_memory" in tools
+    read_schema = tools["read_memory"].inputSchema["properties"]
+    assert "shadow" in read_schema["memory_type"]["enum"]
+    assert read_schema["latest"]["default"] is True
+    assert "session_id" not in read_schema
+    assert "previous_session_id" not in read_schema
+    assert "parent_shadow_id" not in read_schema
     assert "close_window" in tools
     assert "还在想的事" in str(tools["close_window"].description or "")
     assert "session_id" not in tools["close_window"].inputSchema["properties"]
