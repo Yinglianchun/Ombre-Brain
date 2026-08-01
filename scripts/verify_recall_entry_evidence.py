@@ -171,6 +171,9 @@ def verify_body_keyword_cannot_become_recall_evidence() -> None:
     assert service._bucket_exact_anchor_score(body_only_bucket, "领域锚点") == (0.0, "")
     assert service._extract_exact_anchor_terms("但是爱很伟大") == []
     assert service._extract_exact_anchor_terms("“但是爱很伟大”") == ["但是爱很伟大"]
+    assert service._extract_exact_anchor_terms("记忆库有18个工具") == []
+    assert service._extract_exact_anchor_terms("编号89757") == []
+    assert service._extract_exact_anchor_terms("scene18") == ["scene18"]
     assert service._bucket_authored_cue_terms("但是爱很伟大", body_only_bucket) == []
     assert service._explicit_lexical_score_basis({}, {}) == {}
 

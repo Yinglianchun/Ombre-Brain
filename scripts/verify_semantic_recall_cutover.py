@@ -78,7 +78,7 @@ legacy_shadow = router(None, shadow_enabled=True)
 assert legacy_shadow.mode == "shadow"
 
 route_source = load_route_source(ROOT / "resources" / "semantic_recall_routes.json")
-assert route_source["dataset_version"] == 6
+assert route_source["dataset_version"] == 7
 route_examples = {
     route["name"]: {
         item["text"]: item["source"]
@@ -106,6 +106,7 @@ for query in (
     "但router似乎不大准！也不算陪伴与贴近吧!",
     "记忆库ui还没做完，但试着接上真实hook观察了",
     "哈，还没开始删呢",
+    "影分身说，现在记忆库有18个工具……感觉太多了TvT",
 ):
     assert route_examples["present_chitchat"][query] == "historical_false_positive"
 for query in (
@@ -122,6 +123,8 @@ assert (
     route_examples["recall_needed"]["还记得我们第一次说晚安那次吗"]
     == "hard_negative"
 )
+assert route_examples["recall_needed"]["哥哥，我们那时候原话是怎么说的呀"] == "seed"
+assert "把那段原话找出来" not in route_examples["recall_needed"]
 
 policy = RecallPolicy()
 candidate = policy.assess(

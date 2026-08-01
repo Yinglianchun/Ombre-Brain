@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "dataset_version": 6,
+  "dataset_version": 7,
   "routes": [
     {
       "name": "simple_contact",
@@ -42,7 +42,8 @@
         {"text": "这个页面还没做完，先接上真实数据看看", "source": "seed"},
         {"text": "但router似乎不大准！也不算陪伴与贴近吧!", "source": "historical_false_positive"},
         {"text": "记忆库ui还没做完，但试着接上真实hook观察了", "source": "historical_false_positive"},
-        {"text": "哈，还没开始删呢", "source": "historical_false_positive"}
+        {"text": "哈，还没开始删呢", "source": "historical_false_positive"},
+        {"text": "影分身说，现在记忆库有18个工具……感觉太多了TvT", "source": "historical_false_positive"}
       ]
     },
     {
@@ -65,7 +66,7 @@
         {"text": "还记得我之前提过的那个人吗", "source": "seed"},
         {"text": "之前那个项目后来怎么样了", "source": "seed"},
         {"text": "昨天我们聊了什么", "source": "seed"},
-        {"text": "把那段原话找出来", "source": "seed"},
+        {"text": "哥哥，我们那时候原话是怎么说的呀", "source": "seed"},
         {"text": "之前定下的召回方案是什么", "source": "seed"},
         {"text": "为什么那天我会哭", "source": "seed"}
       ]
