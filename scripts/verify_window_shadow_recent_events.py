@@ -44,7 +44,7 @@ async def main() -> None:
     assert "previous_session_id" not in tools["recall"].inputSchema["properties"]
     assert "parent_shadow_id" not in tools["recall"].inputSchema["properties"]
     assert "close_window" in tools
-    assert "这扇窗还亮着的线头" in str(tools["close_window"].description or "")
+    assert "还在想的事" in str(tools["close_window"].description or "")
     assert "session_id" not in tools["close_window"].inputSchema["properties"]
     assert "profile_id" not in tools["close_window"].inputSchema["properties"]
 

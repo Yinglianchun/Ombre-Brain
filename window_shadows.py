@@ -81,7 +81,7 @@ def _section_key(heading: str) -> str:
         or key in {"recentevents", "recentwindowevents"}
     ):
         return "recent_events"
-    if "仍在发生" in key or "仍悬着" in key or "值得带走" in key:
+    if "还在想的事" in key or "仍在发生" in key or "仍悬着" in key or "值得带走" in key:
         return "care_items"
     if "线头" in key and ("亮着" in key or "还在" in key or "未完" in key):
         return "care_items"
