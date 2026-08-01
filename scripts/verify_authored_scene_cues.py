@@ -30,11 +30,11 @@ class _CaptureBucketManager:
 
 async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
-    write_schema = tools["write_memory"].inputSchema
+    write_schema = tools["write_scene"].inputSchema
     close_schema = tools["close_window"].inputSchema
     close_properties = close_schema["properties"]
-    write_description = str(tools["write_memory"].description or "")
-    edit_description = str(tools["edit_memory"].description or "")
+    write_description = str(tools["write_scene"].description or "")
+    edit_description = str(tools["edit_scene"].description or "")
     close_description = str(tools["close_window"].description or "")
 
     assert "cues" in write_schema["required"]

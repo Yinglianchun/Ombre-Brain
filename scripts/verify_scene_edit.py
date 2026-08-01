@@ -71,10 +71,9 @@ class _CaptureMoments:
 
 async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
-    assert "edit_memory" in tools
-    schema = tools["edit_memory"].inputSchema
-    assert set(schema["required"]) == {"memory_id"}
-    assert "expected_updated_at" in schema["properties"]
+    assert "edit_scene" in tools
+    schema = tools["edit_scene"].inputSchema
+    assert set(schema["required"]) == {"scene_id", "expected_updated_at"}
     assert {"title", "content", "cues"} <= set(schema["properties"])
 
     manager = _EditableBucketManager()

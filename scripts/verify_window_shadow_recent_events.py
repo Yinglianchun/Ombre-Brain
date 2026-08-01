@@ -39,10 +39,17 @@ async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
     assert "handoff" not in tools
     assert "recall" not in tools
+    assert "recall_memory" in tools
     assert "read_memory" in tools
     read_schema = tools["read_memory"].inputSchema["properties"]
     assert "shadow" in read_schema["memory_type"]["enum"]
-    assert read_schema["latest"]["default"] is True
+    assert set(tools["read_memory"].inputSchema["required"]) == {
+        "memory_type",
+        "memory_id",
+    }
+    recall_schema = tools["recall_memory"].inputSchema["properties"]
+    assert "scene_id" in recall_schema
+    assert recall_schema["include_related"]["default"] is True
     assert "session_id" not in read_schema
     assert "previous_session_id" not in read_schema
     assert "parent_shadow_id" not in read_schema

@@ -7,11 +7,14 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 
 DAILY_TOOL_NAMES: tuple[str, ...] = (
+    "recall_memory",
     "read_memory",
-    "write_memory",
-    "edit_memory",
+    "write_scene",
+    "edit_scene",
+    "set_scene_status",
     "annotate",
     "close_window",
+    "revise_window_shadow",
     "narrative_revision_inbox",
     "review_narrative_revision",
     "publish_narrative",

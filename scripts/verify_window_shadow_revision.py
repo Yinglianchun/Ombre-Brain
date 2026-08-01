@@ -87,15 +87,14 @@ def verify_schema_migration() -> None:
 async def main() -> None:
     verify_schema_migration()
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
-    assert "revise_window_shadow" not in tools
-    assert "edit_memory" in tools
-    schema = tools["edit_memory"].inputSchema
-    assert set(schema["required"]) == {"memory_id"}
-    assert {
-        "content",
+    assert "revise_window_shadow" in tools
+    schema = tools["revise_window_shadow"].inputSchema
+    assert set(schema["required"]) == {
+        "window_id",
+        "shadow",
         "expected_source_hash",
         "idempotency_key",
-    } <= set(schema["properties"])
+    }
 
     with tempfile.TemporaryDirectory(prefix="ombre-shadow-revision-") as tmp:
         store = WindowShadowStore(
@@ -121,20 +120,20 @@ async def main() -> None:
         )
         server.window_shadow_store = store
 
-        wrong_hash = await server.edit_memory(
-            memory_id=original["window_id"],
-            content=REVISED,
-            expected_source_hash="0" * 64,
-            idempotency_key="revise:test-window",
+        wrong_hash = await server.revise_window_shadow(
+            original["window_id"],
+            REVISED,
+            "0" * 64,
+            "revise:test-window",
         )
         assert wrong_hash["reason"] == "source_hash_mismatch"
         assert store.stats()["count"] == 1
 
-        revised = await server.edit_memory(
-            memory_id=original["window_id"],
-            content=REVISED,
-            expected_source_hash=original["source_hash"],
-            idempotency_key="revise:test-window",
+        revised = await server.revise_window_shadow(
+            original["window_id"],
+            REVISED,
+            original["source_hash"],
+            "revise:test-window",
         )
         assert revised["status"] == "revised"
         assert revised["supersedes_window_id"] == original["window_id"]
@@ -148,11 +147,11 @@ async def main() -> None:
         assert store.handoff_projection(original["window_id"])["window_id"] == revised["window_id"]
         assert store.portrait_materials()[0]["window_id"] == revised["window_id"]
 
-        replay = await server.edit_memory(
-            memory_id=original["window_id"],
-            content=REVISED,
-            expected_source_hash=original["source_hash"],
-            idempotency_key="revise:test-window",
+        replay = await server.revise_window_shadow(
+            original["window_id"],
+            REVISED,
+            original["source_hash"],
+            "revise:test-window",
         )
         assert replay["status"] == "existing"
         assert replay["window_id"] == revised["window_id"]
@@ -162,20 +161,20 @@ async def main() -> None:
             "窗影修订不能偷偷改掉已经落库的 Scene",
             "这句话试图改写已经落库的 Scene",
         )
-        scene_rewrite = await server.edit_memory(
-            memory_id=revised["window_id"],
-            content=changed_scene,
-            expected_source_hash=revised["source_hash"],
-            idempotency_key="revise:changed-scene",
+        scene_rewrite = await server.revise_window_shadow(
+            revised["window_id"],
+            changed_scene,
+            revised["source_hash"],
+            "revise:changed-scene",
         )
         assert scene_rewrite["reason"] == "scene_layer_changed"
 
         third_text = REVISED.replace("醒来先读修订后的版本。", "醒来先读第三版。")
-        third = await server.edit_memory(
-            memory_id=revised["window_id"],
-            content=third_text,
-            expected_source_hash=revised["source_hash"],
-            idempotency_key="revise:third-version",
+        third = await server.revise_window_shadow(
+            revised["window_id"],
+            third_text,
+            revised["source_hash"],
+            "revise:third-version",
         )
         assert third["status"] == "revised"
         assert third["revision_root_id"] == original["window_id"]
@@ -189,11 +188,11 @@ async def main() -> None:
         assert old_read["revision_head_id"] == third["window_id"]
         assert old_read["is_revision_head"] is False
 
-        old_again = await server.edit_memory(
-            memory_id=original["window_id"],
-            content=REVISED.replace("修订后的版本", "另一版"),
-            expected_source_hash=original["source_hash"],
-            idempotency_key="revise:old-again",
+        old_again = await server.revise_window_shadow(
+            original["window_id"],
+            REVISED.replace("修订后的版本", "另一版"),
+            original["source_hash"],
+            "revise:old-again",
         )
         assert old_again["reason"] == "window_already_superseded"
 
@@ -207,11 +206,11 @@ async def main() -> None:
             sections=newer_sections,
         )
         assert created is True
-        not_latest = await server.edit_memory(
-            memory_id=third["window_id"],
-            content=third_text.replace("第三版", "第四版"),
-            expected_source_hash=third["source_hash"],
-            idempotency_key="revise:not-latest",
+        not_latest = await server.revise_window_shadow(
+            third["window_id"],
+            third_text.replace("第三版", "第四版"),
+            third["source_hash"],
+            "revise:not-latest",
         )
         assert not_latest["reason"] == "revision_target_not_latest"
         assert store.latest()["window_id"] == newer["window_id"]

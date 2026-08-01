@@ -66,14 +66,13 @@ def _token(bucket: dict) -> str:
 
 async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
-    assert len(tools) == 14
+    assert len(tools) == 17
     assert "narrative_revision_inbox" in tools
     assert "review_narrative_revision" in tools
-    assert "edit_memory" in tools
-    schema = tools["edit_memory"].inputSchema
-    assert set(schema["required"]) == {"memory_id"}
-    assert "expected_updated_at" in schema["properties"]
-    assert schema["properties"]["status"]["enum"] == ["", "active", "archived"]
+    assert "set_scene_status" in tools
+    schema = tools["set_scene_status"].inputSchema
+    assert set(schema["required"]) == {"scene_id", "status", "expected_updated_at"}
+    assert schema["properties"]["status"]["enum"] == ["active", "archived"]
 
     with tempfile.TemporaryDirectory(prefix="ombre-scene-status-") as temp_dir:
         manager = BucketManager({"buckets_dir": temp_dir})

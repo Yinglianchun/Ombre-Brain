@@ -1,4 +1,4 @@
-"""Verify the compact daily memory facade and its runtime dispatch."""
+"""Verify exact typed reads stay separate from associative recall and writes."""
 
 from __future__ import annotations
 
@@ -21,110 +21,162 @@ class _LatestShadowStore:
         }
 
 
+class _SceneBucketManager:
+    async def get(self, scene_id: str) -> dict:
+        return {
+            "id": scene_id,
+            "content": "这是一条从窗影抽出的具体 Scene。",
+            "metadata": {
+                "name": "窗影中的 Scene",
+                "object_kind": "scene",
+                "memory_value_source": "authored_scene",
+                "active": True,
+            },
+        }
+
+
 async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
-    assert len(tools) == 14
-    assert {"read_memory", "write_memory", "edit_memory"} <= set(tools)
-    for retired_name in (
-        "recall",
+    registered = {tool.name for tool in server.mcp._tool_manager.list_tools()}
+    assert len(tools) == 17
+    assert registered == set(tools)
+    assert {
+        "recall_memory",
+        "read_memory",
         "write_scene",
         "edit_scene",
         "set_scene_status",
+        "close_window",
         "revise_window_shadow",
-        "read_portrait",
-    ):
+        "publish_narrative",
+        "publish_portrait",
+    } <= set(tools)
+    for retired_name in ("recall", "write_memory", "edit_memory", "read_portrait"):
         assert retired_name not in tools
 
+    read_schema = tools["read_memory"].inputSchema
+    assert set(read_schema["required"]) == {"memory_type", "memory_id"}
+    assert read_schema["properties"]["memory_type"]["enum"] == [
+        "scene",
+        "shadow",
+        "narrative",
+        "portrait",
+    ]
+    assert "query" not in read_schema["properties"]
+    assert "date" not in read_schema["properties"]
+    recall_schema = tools["recall_memory"].inputSchema["properties"]
+    assert {"query", "scene_id", "date", "include_related"} <= set(recall_schema)
+
     originals = {
-        "_recall_memory": server._recall_memory,
+        "_read_scene_memory": server._read_scene_memory,
+        "_read_window_shadow_memory": server._read_window_shadow_memory,
+        "_read_narrative_memory": server._read_narrative_memory,
         "read_portrait": server.read_portrait,
         "window_shadow_store": server.window_shadow_store,
-        "write_scene": server.write_scene,
-        "edit_scene": server.edit_scene,
-        "set_scene_status": server.set_scene_status,
-        "revise_window_shadow": server.revise_window_shadow,
+        "_recall_memory": server._recall_memory,
+        "_recall_from_scene_id": server._recall_from_scene_id,
+        "bucket_mgr": server.bucket_mgr,
+        "_build_mcp_diffused_memory_block": server._build_mcp_diffused_memory_block,
     }
-    calls: list[tuple[str, dict]] = []
+    calls: list[tuple[str, dict | str]] = []
 
-    async def fake_recall(**kwargs):
-        calls.append(("search", kwargs))
-        return "scene-search"
+    async def fake_scene(scene_id: str):
+        calls.append(("scene", scene_id))
+        return {"status": "ok", "scene_id": scene_id}
+
+    async def fake_shadow(**kwargs):
+        calls.append(("shadow", kwargs))
+        return {"status": "ok", "window_id": kwargs["window_id"]}
+
+    async def fake_narrative(narrative_id: str):
+        calls.append(("narrative", narrative_id))
+        return {"status": "ok", "narrative_id": narrative_id}
 
     async def fake_portrait(**kwargs):
         calls.append(("portrait", kwargs))
         return {"status": "ok", **kwargs}
 
-    async def fake_write(**kwargs):
-        calls.append(("write", kwargs))
-        return "scene-created"
+    async def fake_recall(**kwargs):
+        calls.append(("query_recall", kwargs))
+        return "query-recall"
 
-    async def fake_edit_scene(**kwargs):
-        calls.append(("edit_scene", kwargs))
-        return {"status": "updated"}
+    async def fake_scene_recall(scene_id: str, **kwargs):
+        calls.append(("scene_recall", {"scene_id": scene_id, **kwargs}))
+        return "scene-recall"
 
-    async def fake_status(**kwargs):
-        calls.append(("status", kwargs))
-        return {"status": "archived"}
-
-    async def fake_shadow(**kwargs):
-        calls.append(("shadow", kwargs))
-        return {"status": "revised"}
+    async def fake_related_block(source_buckets, *_args, **_kwargs):
+        calls.append(("related_block", source_buckets[0]["id"]))
+        return "[bucket_id:scene_related] 一条有效关联 Scene"
 
     try:
-        server._recall_memory = fake_recall
+        server._read_scene_memory = fake_scene
+        server._read_window_shadow_memory = fake_shadow
+        server._read_narrative_memory = fake_narrative
         server.read_portrait = fake_portrait
         server.window_shadow_store = _LatestShadowStore()
-        server.write_scene = fake_write
-        server.edit_scene = fake_edit_scene
-        server.set_scene_status = fake_status
-        server.revise_window_shadow = fake_shadow
+        server._recall_memory = fake_recall
+        server._recall_from_scene_id = fake_scene_recall
 
-        searched = await server.read_memory(query="雨天", date="2026-08-01")
-        opened = await server.read_memory(memory_type="shadow")
+        inline_scene_id = "window_parent_scene_1"
+        scene = await server.read_memory(memory_type="scene", memory_id=inline_scene_id)
+        shadow = await server.read_memory(
+            memory_type="shadow",
+            memory_id="window_parent",
+        )
+        latest = await server.read_memory(memory_type="shadow", memory_id="latest")
+        narrative = await server.read_memory(
+            memory_type="narrative",
+            memory_id="narrative_thread",
+        )
         portrait = await server.read_memory(
             memory_type="portrait",
-            scope="relationship",
+            memory_id="relationship",
             include_evidence_text=False,
         )
-        written = await server.write_memory(content="一件具体经历。", cues="提到这件事")
-        edited = await server.edit_memory(
-            memory_id="scene_facade",
-            expected_updated_at="revision-one",
-            title="修订标题",
+        query_recall = await server.recall_memory(
+            query="雨天",
+            include_related=True,
         )
-        archived = await server.edit_memory(
-            memory_id="scene_facade",
-            expected_updated_at="revision-two",
-            status="archived",
+        scene_recall = await server.recall_memory(
+            scene_id=inline_scene_id,
+            include_related=True,
         )
-        revised_shadow = await server.edit_memory(
-            memory_id="window_latest_facade",
-            content="完整修订窗影。",
-            expected_source_hash="a" * 64,
-            idempotency_key="facade-revision",
+        mixed = await server.recall_memory(query="雨天", scene_id=inline_scene_id)
+
+        server.bucket_mgr = _SceneBucketManager()
+        server._build_mcp_diffused_memory_block = fake_related_block
+        anchored = await originals["_recall_from_scene_id"](
+            inline_scene_id,
+            include_related=True,
+            related_per_memory=1,
+            edge_min_confidence=0.55,
+            max_tokens=3000,
         )
 
-        assert searched == "scene-search"
-        assert opened["window"]["window_id"] == "window_latest_facade"
-        assert opened["ordinary_recall"] is False
+        assert scene["scene_id"] == inline_scene_id
+        assert shadow["window_id"] == "window_parent"
+        assert latest["window"]["window_id"] == "window_latest_facade"
+        assert narrative["narrative_id"] == "narrative_thread"
         assert portrait["scope"] == "relationship"
-        assert written == "scene-created"
-        assert edited["status"] == "updated"
-        assert archived["status"] == "archived"
-        assert revised_shadow["status"] == "revised"
+        assert query_recall == "query-recall"
+        assert scene_recall == "scene-recall"
+        assert "两种召回入口" in mixed
+        assert "指定 Scene" in anchored
+        assert "scene_related" in anchored
         assert [name for name, _ in calls] == [
-            "search",
-            "portrait",
-            "write",
-            "edit_scene",
-            "status",
+            "scene",
             "shadow",
+            "narrative",
+            "portrait",
+            "query_recall",
+            "scene_recall",
+            "related_block",
         ]
     finally:
         for name, value in originals.items():
             setattr(server, name, value)
 
-    print("unified daily memory facade verified")
+    print("typed exact read and associative recall facade verified")
 
 
 if __name__ == "__main__":
