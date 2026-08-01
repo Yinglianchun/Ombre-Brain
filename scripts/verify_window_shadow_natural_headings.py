@@ -19,33 +19,36 @@ async def main() -> None:
     description = str(tools["close_window"].description or "")
     assert description.startswith("写下一篇窗影和想留下的记忆。")
     assert "date 必须填写 `YYYY-MM-DD`" in description
-    assert "`## 窗影`" in description
-    assert "`关于你，关于我们`" in description
-    assert (
-        "`### scene | 作者写的真实标题 | cue：一个召回入口 | cue：另一个召回入口`"
-        in description
-    )
+    assert "`## 给下个窗口的我`" in description
+    assert "不受旧的 250～400 字限制" in description
     assert "标题不能省略，标题后的每一项都必须以 `cue：` 开头" in description
 
     documented_example = """
-## 窗影
-这一窗我终于把关门格式说清楚了。
+# Window Shadow
+
+## 这一窗之后，什么留在了我身上
+我记住了关窗格式。
+
+## 这扇窗还亮着的线头
+- 下次确认 Scene 标记。
+
+## 给下个窗口的我
+醒来接住没说完的话。
 
 ## 想留下的记忆
-### scene | 我们把关窗格式说清楚了 | cue：提到 close_window 怎么写 | cue：再次遇到 Scene 标记校验
-我和你一起确认了完整的 Scene 标记，让下一次关窗不再被格式绊住。
+### scene | 说清关窗格式 | cue：提到 close_window 怎么写
+我和你确认了完整格式。
 """.strip()
     assert documented_example in description
     documented_sections, documented_errors = validate_window_shadow(documented_example)
     documented_scenes = extract_window_shadow_scenes(documented_example)
     assert documented_errors == []
-    assert documented_sections["self"] == "这一窗我终于把关门格式说清楚了。"
+    assert documented_sections["self"] == "我记住了关窗格式。"
+    assert documented_sections["care_items"] == "- 下次确认 Scene 标记。"
+    assert documented_sections["handoff"] == "醒来接住没说完的话。"
     assert len(documented_scenes) == 1
-    assert documented_scenes[0]["title"] == "我们把关窗格式说清楚了"
-    assert documented_scenes[0]["cues"] == [
-        "提到 close_window 怎么写",
-        "再次遇到 Scene 标记校验",
-    ]
+    assert documented_scenes[0]["title"] == "说清关窗格式"
+    assert documented_scenes[0]["cues"] == ["提到 close_window 怎么写"]
 
     diary_shadow = """
 ## 窗影

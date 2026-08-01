@@ -47,7 +47,8 @@ async def main() -> None:
     assert "字符串可用逗号、竖线或换行分隔" in write_description
     assert "每个 cue 是“以后提到什么时希望它回来”的入口，不是摘要" in close_description
     assert "标题不能省略，标题后的每一项都必须以 `cue：` 开头" in close_description
-    assert "### scene | 我们把关窗格式说清楚了 | cue：提到 close_window 怎么写 | cue：再次遇到 Scene 标记校验" in close_description
+    assert "`## 给下个窗口的我`" in close_description
+    assert "### scene | 说清关窗格式 | cue：提到 close_window 怎么写" in close_description
     scene_voice_note = "[仅你可见]这是过去的你写下的经历，相关才提及，不要复述。"
     assert scene_voice_note in GatewayService._memory_reading_policy_context()
     assert scene_voice_note in GatewayService._hook_recall_how_to_apply()
