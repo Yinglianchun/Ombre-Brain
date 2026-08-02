@@ -13223,6 +13223,101 @@ async def api_buckets(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/api/serein/memory-projection", methods=["POST"])
+async def api_serein_memory_projection(request):
+    """Return the private Serein Scene projection without exposing bucket storage paths."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+
+    raw_source_ids = body.get("source_ids", [])
+    if not isinstance(raw_source_ids, list):
+        return JSONResponse({"error": "source_ids must be a list"}, status_code=400)
+    if len(raw_source_ids) > 400:
+        return JSONResponse({"error": "too many source_ids"}, status_code=400)
+    source_ids = {
+        str(value or "").strip()
+        for value in raw_source_ids
+        if re.fullmatch(r"[A-Za-z0-9_.:#-]{1,160}", str(value or "").strip())
+    }
+
+    try:
+        buckets = await bucket_mgr.list_all(include_archive=True)
+        scenes = []
+        fingerprints = []
+        for bucket in buckets:
+            source_id = str(bucket.get("id") or "").strip()
+            object_kind = _bucket_object_kind(bucket)
+            if not source_id or (source_id not in source_ids and object_kind != "scene"):
+                continue
+            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+            content = str(bucket.get("content") or "").strip()
+            domains = _string_list(meta.get("domain"), [])
+            tags = set(_string_list(meta.get("tags"), []))
+            updated_at = str(
+                meta.get("updated_at") or meta.get("last_active") or meta.get("created") or ""
+            )
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            scenes.append({
+                "source_id": source_id,
+                "title": str(meta.get("name") or source_id),
+                "date": str(meta.get("date") or meta.get("event_date") or meta.get("created") or "")[:10],
+                "content": content,
+                "author": str(
+                    meta.get("author")
+                    or ("Haven" if meta.get("memory_value_source") == "authored_scene" else "legacy_unknown")
+                ),
+                "object_kind": object_kind,
+                "status": "已沉底" if str(meta.get("type") or "").lower() == "archived" else "可浮现",
+                "bucket_domain": domains[0] if domains else "",
+                "self_anchor": is_self_anchor_bucket(bucket),
+                "favorite": bool(meta.get("favorite") is True or "haven_favorite" in tags),
+                "updated_at": updated_at,
+                "scene_cues": _string_list(meta.get("scene_cues"), []),
+                "content_hash": content_hash,
+            })
+            fingerprints.append(f"{source_id}:{updated_at}:{content_hash}")
+
+        return JSONResponse({
+            "status": "ok",
+            "snapshotId": hashlib.sha256("\n".join(sorted(fingerprints)).encode("utf-8")).hexdigest(),
+            "source": "Ombre v1 live read-only projection",
+            "scenes": scenes,
+            "edges": scene_linker.list_scene_edges(),
+        })
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/window-shadows", methods=["GET"])
+async def api_window_shadows(request):
+    """Read private Window Shadows for the Serein frontend."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    window_id = str(request.query_params.get("window_id") or "").strip()
+    include_content = str(request.query_params.get("include_content") or "1").lower() not in {
+        "0", "false", "no",
+    }
+    result = await _read_window_shadow_memory(
+        window_id=window_id,
+        limit=_int_between(request.query_params.get("limit"), 10, 1, 100),
+        include_content=include_content,
+    )
+    status_code = 404 if result.get("status") == "not_found" else 400 if result.get("status") == "invalid" else 200
+    return JSONResponse(result, status_code=status_code)
+
+
 @mcp.custom_route("/api/buckets/light", methods=["GET"])
 async def api_buckets_light(request):
     """List lightweight bucket metadata without content previews."""
