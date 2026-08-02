@@ -96,7 +96,7 @@ from query_terms import (
 from recall_eval import RECALL_EVAL_BLOCKED_SECTIONS, RECALL_EVAL_DEFAULT_CASES
 from recall_policy import QueryAnchorPlan, RecallPolicy, diffusion_seed_topic_term_has_specific_residue
 from memory_nodes import MemoryNodeStore
-from memory_recall import SemanticRecallRouter
+from memory_recall import DomainRecallPolicy, SemanticRecallRouter
 from narrative_rolls import NarrativeRollStore
 from persona_engine import PersonaStateEngine
 from persona_event_selection import (
@@ -348,6 +348,7 @@ class GatewayService:
         self.dehydrator = dehydrator or Dehydrator(config)
         self.embedding_engine = embedding_engine or EmbeddingEngine(config)
         self.semantic_recall_router = SemanticRecallRouter(config, self.embedding_engine)
+        self.domain_recall_policy = DomainRecallPolicy(config)
         self.reranker_engine = reranker_engine or RerankerEngine(config)
         self.memory_edge_store = MemoryEdgeStore(config)
         self.scene_edge_store = SceneEdgeStore(config, create=False)
@@ -738,6 +739,7 @@ class GatewayService:
                     "enabled": self.semantic_recall_router.enabled,
                     "active": self.semantic_recall_router.active,
                 },
+                "domain_recall_policy": self.domain_recall_policy.dataset_payload(),
                 "narrative_roll_recall": {
                     "mode": "shadow_only",
                     "available_count": int(narrative_index.get("count") or 0),
@@ -2139,6 +2141,49 @@ class GatewayService:
         except ValueError as exc:
             error = str(exc) or type(exc).__name__
             status_code = 409 if error.startswith("route_publish_version_conflict:") else 400
+            return JSONResponse({"error": error}, status_code=status_code)
+        except RuntimeError as exc:
+            return JSONResponse(
+                {"error": str(exc) or type(exc).__name__},
+                status_code=503,
+            )
+
+    async def handle_domain_recall_policies(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        try:
+            return JSONResponse(self.domain_recall_policy.dataset_payload())
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return JSONResponse(
+                {"error": str(exc) or type(exc).__name__},
+                status_code=503,
+            )
+
+    async def handle_domain_recall_policy_publish(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid domain policy publish request"}, status_code=400)
+        try:
+            expected_version = int(body.get("expected_dataset_version"))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "expected_dataset_version is required"}, status_code=400)
+        try:
+            result = await self.domain_recall_policy.publish_dataset(
+                policies=body.get("policies"),
+                expected_dataset_version=expected_version,
+                confirmation=str(body.get("confirm") or ""),
+            )
+            return JSONResponse(result)
+        except ValueError as exc:
+            error = str(exc) or type(exc).__name__
+            status_code = 409 if error.startswith("domain_policy_publish_version_conflict:") else 400
             return JSONResponse({"error": error}, status_code=status_code)
         except RuntimeError as exc:
             return JSONResponse(
@@ -4084,6 +4129,7 @@ class GatewayService:
             "requested_moment_ids": [],
             "accepted_ids": [],
             "accepted_moment_ids": [],
+            "rejected_ids": [],
             "missing_ids": [],
             "source": "",
             "detail_tokens": 0,
@@ -4412,25 +4458,42 @@ class GatewayService:
 
         accepted_bucket_ids: list[str] = []
         accepted_moment_ids: list[str] = []
+        rejected_ids: list[dict[str, str]] = []
         missing_ids: list[str] = []
         for moment_id in moment_ids:
             moment = moment_map.get(moment_id)
             if not moment:
                 missing_ids.append(moment_id)
                 continue
-            accepted_moment_ids.append(moment_id)
             bucket_id = str(moment.get("bucket_id") or "")
+            bucket = bucket_map.get(bucket_id)
+            rejection = self._canonical_scene_domain_policy_rejection(
+                bucket,
+                explicit_id=moment_id in explicit_moment_ids,
+            )
+            if rejection:
+                rejected_ids.append({"id": moment_id, "reason": str(rejection["reason"])})
+                continue
+            accepted_moment_ids.append(moment_id)
             if bucket_id and bucket_id not in accepted_bucket_ids:
                 accepted_bucket_ids.append(bucket_id)
         for bucket_id in bucket_ids:
             if bucket_id not in bucket_map:
                 missing_ids.append(bucket_id)
                 continue
+            rejection = self._canonical_scene_domain_policy_rejection(
+                bucket_map[bucket_id],
+                explicit_id=bucket_id in explicit_bucket_ids,
+            )
+            if rejection:
+                rejected_ids.append({"id": bucket_id, "reason": str(rejection["reason"])})
+                continue
             if bucket_id not in accepted_bucket_ids:
                 accepted_bucket_ids.append(bucket_id)
         accepted_bucket_ids = accepted_bucket_ids[:max_items]
         debug["accepted_ids"] = accepted_bucket_ids
         debug["accepted_moment_ids"] = accepted_moment_ids
+        debug["rejected_ids"] = rejected_ids
         debug["missing_ids"] = missing_ids
         if not accepted_bucket_ids:
             debug["skip_reason"] = "no_allowed_ids"
@@ -12845,6 +12908,7 @@ class GatewayService:
             if str(bucket.get("id") or "")
             and self._is_canonical_scene_bucket(bucket)
             and can_bucket_be_related_target(bucket, explicit_lookup=False)
+            and self._canonical_scene_domain_policy(bucket)[1] == "normal"
         }
         payload["scene_node_count"] = len(scene_map)
 
@@ -14771,6 +14835,49 @@ class GatewayService:
         view = normalize_memory_metadata(bucket)
         return str(view.get("domain_parent") or view.get("canonical_domain") or "") == "tech"
 
+    def _canonical_scene_domain_policy(self, bucket: dict | None) -> tuple[str, str]:
+        if not isinstance(bucket, dict) or not self._is_canonical_scene_bucket(bucket):
+            return "", "normal"
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        domain = normalize_domain_key(meta.get("canonical_domain")) or "general"
+        policy_store = getattr(self, "domain_recall_policy", None)
+        if policy_store is None or not bool(getattr(policy_store, "active", False)):
+            return domain, "normal"
+        return domain, policy_store.policy_for_domain(domain)
+
+    def _canonical_scene_domain_policy_rejection(
+        self,
+        bucket: dict | None,
+        *,
+        direct_evidence: list[str] | None = None,
+        explicit_id: bool = False,
+    ) -> dict[str, Any] | None:
+        domain, policy = self._canonical_scene_domain_policy(bucket)
+        if not domain or policy == "normal":
+            return None
+        direct_labels = [
+            str(label)
+            for label in (direct_evidence or [])
+            if str(label) in {"authored_cue", "exact_anchor", "title_anchor"}
+        ]
+        if policy == "excluded":
+            return {
+                "reason": "domain_excluded",
+                "canonical_domain": domain,
+                "domain_policy": policy,
+                "direct_evidence": direct_labels,
+                "explicit_id": bool(explicit_id),
+            }
+        if policy == "explicit_only" and not (direct_labels or explicit_id):
+            return {
+                "reason": "domain_explicit_only",
+                "canonical_domain": domain,
+                "domain_policy": policy,
+                "direct_evidence": [],
+                "explicit_id": False,
+            }
+        return None
+
     def _moment_is_tech_domain(self, moment: dict | None) -> bool:
         if not isinstance(moment, dict):
             return False
@@ -14946,6 +15053,18 @@ class GatewayService:
                 for label in ("authored_cue", "exact_anchor", "title_anchor")
                 if label in hard_evidence_labels
             ]
+            domain_rejection = self._canonical_scene_domain_policy_rejection(
+                bucket,
+                direct_evidence=direct_labels,
+            )
+            if domain_rejection:
+                item["admission_reason"] = str(domain_rejection["reason"])
+                item["recall_policy_debug"] = {
+                    "canonical_scene": True,
+                    **domain_rejection,
+                    "auto": True,
+                }
+                return False
             semantic_score = self._safe_float(item.get("semantic_score"), 0.0)
             semantic_threshold = self._safe_float(
                 item.get("canonical_scene_semantic_threshold"),
@@ -14977,7 +15096,8 @@ class GatewayService:
                 if direct_labels
                 else "scene_strong_semantic"
             )
-            if self._bucket_is_tech_domain(bucket):
+            policy_store = getattr(self, "domain_recall_policy", None)
+            if not bool(getattr(policy_store, "active", False)) and self._bucket_is_tech_domain(bucket):
                 tech_rejection = self._tech_domain_recall_rejection(query, item, node=bucket)
                 if tech_rejection:
                     item["admission_reason"] = "tech_domain_without_query_anchor"
@@ -19229,6 +19349,12 @@ def create_gateway_app(
     async def semantic_recall_publish(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_semantic_recall_publish(request)
 
+    async def domain_recall_policies(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_domain_recall_policies(request)
+
+    async def domain_recall_policy_publish(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_domain_recall_policy_publish(request)
+
     async def recall_eval_debug(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_recall_eval_debug(request)
 
@@ -19244,6 +19370,8 @@ def create_gateway_app(
             Route("/api/hook/recall", hook_recall, methods=["POST"]),
             Route("/api/semantic-recall/routes", semantic_recall_routes, methods=["GET"]),
             Route("/api/semantic-recall/routes/publish", semantic_recall_publish, methods=["POST"]),
+            Route("/api/semantic-recall/domain-policies", domain_recall_policies, methods=["GET"]),
+            Route("/api/semantic-recall/domain-policies/publish", domain_recall_policy_publish, methods=["POST"]),
             Route("/api/debug/recall-eval", recall_eval_debug, methods=["GET"]),
             Route("/api/debug/upstream-usage", upstream_usage_debug, methods=["GET"]),
             Route("/v1/models", models, methods=["GET"]),
