@@ -1357,6 +1357,15 @@ class BucketManager:
             if bool(post.get("source_record_immutable", False)):
                 logger.warning("Refused immutable source record archive / 拒绝归档不可变来源记录: %s", bucket_id)
                 return False
+            if (
+                str(post.get("object_kind") or "").strip().lower() == "scene"
+                or str(post.get("memory_value_source") or "").strip() == "authored_scene"
+            ):
+                return await self.set_scene_status(
+                    bucket_id,
+                    "archived",
+                    changed_at=now_iso(),
+                )
             domain = post.get("domain", ["未分类"])
             if not isinstance(domain, list):
                 domain = [domain]
@@ -1394,6 +1403,15 @@ class BucketManager:
 
         try:
             post = frontmatter.load(file_path)
+            if (
+                str(post.get("object_kind") or "").strip().lower() == "scene"
+                or str(post.get("memory_value_source") or "").strip() == "authored_scene"
+            ):
+                return await self.set_scene_status(
+                    bucket_id,
+                    "active",
+                    changed_at=now_iso(),
+                )
             domain = post.get("domain", ["未分类"])
             if not isinstance(domain, list):
                 domain = [domain]

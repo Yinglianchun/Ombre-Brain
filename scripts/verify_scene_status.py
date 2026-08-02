@@ -117,6 +117,30 @@ async def main() -> None:
             source="legacy",
         )
         await manager.create(
+            bucket_id="scene_generic_status_contract",
+            name="通用入口也必须遵守 Scene 状态",
+            content="通用归档和恢复入口不能留下互相冲突的 Scene 元数据。",
+            source="scene_migration",
+            extra_metadata={
+                "object_kind": "scene",
+                "memory_value_source": "authored_scene",
+                "scene_cues": ["提到通用归档入口"],
+            },
+        )
+        await manager.create(
+            bucket_id="scene_dirty_archive_contract",
+            name="旧归档脏状态",
+            content="旧入口只写 archived type，却留下 active true。",
+            source="scene_migration",
+            bucket_type="archived",
+            extra_metadata={
+                "object_kind": "scene",
+                "memory_value_source": "authored_scene",
+                "scene_cues": ["提到旧归档脏状态"],
+                "active": True,
+            },
+        )
+        await manager.create(
             bucket_id="immutable_status_contract",
             name="不可变来源",
             content="不可变来源正文。",
@@ -141,8 +165,41 @@ async def main() -> None:
         server._refresh_entity_edges_for_bucket = lambda bucket: 1
         server._queue_scene_linking = lambda *_args: True
 
+        dirty_archive = await manager.get("scene_dirty_archive_contract")
+        normalized_archive = await server._set_scene_status_memory(
+            "scene_dirty_archive_contract",
+            status="archived",
+            expected_updated_at=_token(dirty_archive),
+        )
+        assert normalized_archive["status"] == "updated"
+        normalized_bucket = await manager.get("scene_dirty_archive_contract")
+        assert normalized_bucket["metadata"]["type"] == "archived"
+        assert normalized_bucket["metadata"]["active"] is False
+        assert normalized_bucket["metadata"]["scene_status"] == "archived"
+        assert normalized_bucket["metadata"]["archived_at"]
+        embeddings.deleted.clear()
+        entities.deleted.clear()
+        nodes.deleted.clear()
+
         original = await manager.get("scene_status_contract")
         original_updated_at = _token(original)
+
+        assert await manager.archive("scene_generic_status_contract") is True
+        generic_archived = await manager.get("scene_generic_status_contract")
+        assert generic_archived["metadata"]["type"] == "archived"
+        assert generic_archived["metadata"]["active"] is False
+        assert generic_archived["metadata"]["scene_status"] == "archived"
+        assert generic_archived["metadata"]["archived_at"]
+        assert generic_archived["metadata"]["last_status_change_source"] == "set_scene_status"
+        assert not _scene_in(await manager.list_all(), "scene_generic_status_contract")
+
+        assert await manager.activate("scene_generic_status_contract") is True
+        generic_restored = await manager.get("scene_generic_status_contract")
+        assert generic_restored["metadata"]["type"] == "dynamic"
+        assert generic_restored["metadata"]["active"] is True
+        assert generic_restored["metadata"]["scene_status"] == "active"
+        assert len(generic_restored["metadata"]["scene_status_history"]) == 2
+        assert _scene_in(await manager.list_all(), "scene_generic_status_contract")
 
         conflict = await server._set_scene_status_memory(
             "scene_status_contract",

@@ -11238,7 +11238,11 @@ async def _edit_scene_memory(
     )
 
     before_bucket = bucket
-    ok = await bucket_mgr.update(scene_id, **updates)
+    ok = await bucket_mgr.update(
+        scene_id,
+        **updates,
+        last_active=meta.get("last_active") or meta.get("created"),
+    )
     if not ok:
         return {
             "status": "error",
@@ -11295,6 +11299,21 @@ def _scene_storage_status(bucket: dict | None) -> str:
     ):
         return "archived"
     return "active"
+
+
+def _scene_status_metadata_is_consistent(bucket: dict | None, status: str) -> bool:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    if status == "archived":
+        return (
+            str(meta.get("type") or "").strip().lower() == "archived"
+            and meta.get("active") is False
+            and str(meta.get("scene_status") or "").strip().lower() == "archived"
+        )
+    return (
+        str(meta.get("type") or "").strip().lower() != "archived"
+        and meta.get("active") is not False
+        and str(meta.get("scene_status") or "").strip().lower() == "active"
+    )
 
 
 def _archive_scene_indexes(scene_id: str) -> tuple[dict, list[str]]:
@@ -11407,7 +11426,10 @@ async def _set_scene_status_memory(
         }
 
     current_status = _scene_storage_status(bucket)
-    if current_status == requested_status:
+    if (
+        current_status == requested_status
+        and _scene_status_metadata_is_consistent(bucket, requested_status)
+    ):
         return {
             "status": "unchanged",
             "scene_id": scene_id,

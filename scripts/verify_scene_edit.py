@@ -56,7 +56,7 @@ class _EditableBucketManager:
             self.bucket["content"] = kwargs["content"]
         self.bucket["metadata"].update(kwargs.get("extra_metadata") or {})
         self.bucket["metadata"]["updated_at"] = f"2026-07-24T10:00:0{self.update_count}+08:00"
-        self.bucket["metadata"]["last_active"] = self.bucket["metadata"]["updated_at"]
+        self.bucket["metadata"]["last_active"] = kwargs.get("last_active") or self.bucket["metadata"]["updated_at"]
         return True
 
 
@@ -108,6 +108,7 @@ async def main() -> None:
     assert title_only["changed_fields"] == ["title"]
     assert title_only["revision"] == 2
     assert title_only["scene_id"] == "scene_edit_contract"
+    assert manager.bucket["metadata"]["last_active"] == "2026-07-24T10:00:00+08:00"
     assert manager.bucket["content"] == "我和小雨保留下来的原 Scene 正文。"
     assert manager.bucket["metadata"]["scene_cues"] == ["提到旧标题"]
     assert manager.bucket["metadata"]["window_shadow_id"] == "window_edit_contract"
@@ -183,6 +184,7 @@ async def main() -> None:
         server.bucket_mgr = real_manager
         loaded = await real_manager.get("scene_file_roundtrip")
         loaded_updated_at = loaded["metadata"]["updated_at"]
+        original_last_active = loaded["metadata"]["last_active"]
         version_token = (
             loaded_updated_at.isoformat()
             if isinstance(loaded_updated_at, datetime)
@@ -197,6 +199,7 @@ async def main() -> None:
         reloaded = await real_manager.get("scene_file_roundtrip")
         assert reloaded["metadata"]["window_shadow_id"] == "window_file_roundtrip"
         assert reloaded["metadata"]["scene_revision_history"][0]["content"] == original
+        assert reloaded["metadata"]["last_active"] == original_last_active
         assert server._window_shadow_scene_source_valid(reloaded) is True
 
     print("authored Scene in-place edit contract verified")
