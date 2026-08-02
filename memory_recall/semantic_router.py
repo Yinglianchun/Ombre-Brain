@@ -293,6 +293,10 @@ class SemanticRecallRouter:
             0.0,
             min(1.0, float(cfg.get("boundary_veto_min_score", 0.72))),
         )
+        self.boundary_veto_max_deficit = max(
+            0.0,
+            min(1.0, float(cfg.get("boundary_veto_max_deficit", 0.0))),
+        )
         self.source_path = _resolve_path(
             cfg.get("routes_path"),
             default=project_dir / "resources" / "semantic_recall_routes.json",
@@ -339,6 +343,7 @@ class SemanticRecallRouter:
                 "enabled": self.boundary_veto_enabled,
                 "applied": False,
                 "threshold": self.boundary_veto_min_score,
+                "max_deficit": self.boundary_veto_max_deficit,
                 "candidate": None,
             },
             "errors": [],
@@ -440,7 +445,7 @@ class SemanticRecallRouter:
         boundary = self._best_boundary_veto(index, query_vector, winner)
         if boundary is not None:
             debug["boundary_veto"]["candidate"] = boundary
-            if boundary["passes_threshold"] and boundary["beats_skip"]:
+            if boundary["passes_threshold"] and boundary["within_deficit"]:
                 debug["boundary_veto"]["applied"] = True
                 debug["reason"] = "boundary_veto"
                 return debug, query_vector
@@ -756,6 +761,7 @@ class SemanticRecallRouter:
             return None
         score, boundary = max(candidates, key=lambda row: row[0])
         winner_score = float(winner.get("score") or 0.0)
+        deficit = max(0.0, winner_score - score)
         return {
             "route": str(boundary.get("route") or ""),
             "action": str(boundary.get("action") or "recall"),
@@ -763,4 +769,6 @@ class SemanticRecallRouter:
             "score": round(score, 6),
             "passes_threshold": score >= self.boundary_veto_min_score,
             "beats_skip": score >= winner_score,
+            "deficit": round(deficit, 6),
+            "within_deficit": deficit <= self.boundary_veto_max_deficit,
         }

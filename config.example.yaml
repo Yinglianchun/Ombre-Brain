@@ -374,6 +374,7 @@ gateway:
     aggregation_top_k: 1
     boundary_veto_enabled: true     # strong opposite-action boundary match can veto skip, never force injection
     boundary_veto_min_score: 0.72
+    boundary_veto_max_deficit: 0.0  # conservative default; allow a small validated gap only in private runtime config
   date_persona_trace_enabled: true   # date words like 昨天/昨晚 add small same-day persona/original-turn trace
   date_persona_trace_budget: 220
   date_persona_trace_max_events: 5

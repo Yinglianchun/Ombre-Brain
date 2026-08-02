@@ -40,10 +40,11 @@ class BoundaryEmbeddingEngine:
 
     async def embed_query(self, text: str) -> list[float]:
         vectors = {
-            "随口说说": [1.0, 0.0],
-            "回想以前": [0.0, 1.0],
-            "还记得第一次晚安吗": [0.8, 0.6],
-            "哥哥还记得第一次晚安吗": [0.8, 0.6],
+            "随口说说": [0.0, 0.0, 1.0],
+            "称呼表达": [1.0, 0.0, 0.0],
+            "回想以前": [0.0, 1.0, 0.0],
+            "还记得第一次晚安吗": [0.98, 0.199, 0.0],
+            "哥哥还记得第一次晚安吗": [1.0, 0.0, 0.0],
         }
         return vectors[text]
 
@@ -225,7 +226,10 @@ async def verify() -> None:
                             "name": "present_chitchat",
                             "action": "skip",
                             "threshold": 0.7,
-                            "utterances": [{"text": "随口说说", "role": "typical"}],
+                            "utterances": [
+                                {"text": "随口说说", "role": "typical"},
+                                {"text": "称呼表达", "role": "typical"},
+                            ],
                         },
                         {
                             "name": "recall_needed",
@@ -258,7 +262,8 @@ async def verify() -> None:
                         "mode": "active",
                         "routes_path": str(source_path),
                         "index_path": str(index_path),
-                        "boundary_veto_min_score": 0.72,
+                        "boundary_veto_min_score": 0.62,
+                        "boundary_veto_max_deficit": 0.03,
                     }
                 },
             },
@@ -270,6 +275,8 @@ async def verify() -> None:
         assert vetoed["would_skip"] is False
         assert vetoed["boundary_veto"]["applied"] is True
         assert vetoed["boundary_veto"]["candidate"]["text"] == "还记得第一次晚安吗"
+        assert vetoed["boundary_veto"]["candidate"]["beats_skip"] is False
+        assert vetoed["boundary_veto"]["candidate"]["within_deficit"] is True
 
         skipped = await router.route("随口说说")
         assert skipped["reason"] == "matched_skip_route"
