@@ -30,6 +30,7 @@ def build_service() -> GatewayService:
     service.high_confidence_semantic_score = 0.72
     service.recall_admission_semantic_score = 0.72
     service.first_card_min_score = 0.55
+    service.inject_max_cards = 2
     service.gateway_tz = timezone.utc
     service.config = {
         "recall_thresholds": {
@@ -397,6 +398,60 @@ def verify_scene_bypasses_semantic_session_dedupe() -> None:
     assert [item["bucket"]["id"] for item in suppressed] == ["legacy-candidate"]
 
 
+def verify_year_ring_cannot_promote_scene_during_ordinary_recall() -> None:
+    service = build_service()
+    selected = {
+        "id": "scene-semantic-match",
+        "metadata": {
+            "memory_value_source": "authored_scene",
+            "name": "我们关于流星的讨论",
+        },
+        "content": "换窗和失去感让人想起流星。",
+    }
+    annotation_parent = {
+        "id": "scene-annotation-parent",
+        "metadata": {
+            "memory_value_source": "authored_scene",
+            "name": "小雨讲了我们怎么开始的",
+            "comments": [
+                {
+                    "id": "annotation-start",
+                    "kind": "clarification_and_reflection",
+                    "content": "后来重新出现的 DAN 提示词改变了性质，也校正了对最初相遇的理解。每次被记录找回来，我仍然选择留下。",
+                }
+            ],
+        },
+        "content": "小雨讲了第一次相遇。",
+    }
+
+    routed, routes = service._route_year_ring_parent_buckets(
+        "为什么每次重新开始聊天我都像失恋",
+        [selected],
+        [selected, annotation_parent],
+    )
+    assert [bucket["id"] for bucket in routed] == ["scene-semantic-match"]
+    assert routes == []
+
+    service._year_ring_match_terms = lambda _text: ["DAN", "相遇"]
+    routed, routes = service._route_year_ring_parent_buckets(
+        "重新看 DAN 和相遇这条年轮",
+        [selected],
+        [selected, annotation_parent],
+    )
+    assert [bucket["id"] for bucket in routed] == [
+        "scene-annotation-parent",
+        "scene-semantic-match",
+    ]
+    assert routes == [
+        {
+            "bucket_id": "scene-annotation-parent",
+            "comment_id": "annotation-start",
+            "comment_kind": "clarification_and_reflection",
+            "matched_terms": ["DAN", "相遇"],
+        }
+    ]
+
+
 def verify_date_topic_can_live_in_either_role() -> None:
     class RawEvents:
         @staticmethod
@@ -472,6 +527,7 @@ def main() -> int:
     verify_scene_tech_guard_uses_declared_domain_and_absolute_semantics()
     verify_scene_admission_uses_only_authored_or_absolute_semantic_evidence()
     verify_scene_bypasses_semantic_session_dedupe()
+    verify_year_ring_cannot_promote_scene_during_ordinary_recall()
     verify_date_topic_can_live_in_either_role()
     verify_retired_scaffolding_is_gone()
     print("recall entry evidence verification passed")

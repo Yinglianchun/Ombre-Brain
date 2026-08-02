@@ -14326,10 +14326,11 @@ class GatewayService:
         selected_buckets: list[dict],
         all_buckets: list[dict],
     ) -> tuple[list[dict], list[dict]]:
-        """Route a concrete annotation-text hit back to its parent bucket.
+        """Route an explicit annotation lookup back to its parent bucket.
 
-        A vague "后来呢" is intentionally insufficient. This path needs a
-        specific term overlap or a substantial literal excerpt from a comment.
+        Ordinary recall must not promote a Scene merely because query terms
+        happen to occur in an attached annotation. Explicit year-ring lookups
+        still need a specific term overlap or a substantial literal excerpt.
         """
         text = str(query or "").strip()
         if not text or self.inject_max_cards <= 0:
@@ -14339,6 +14340,8 @@ class GatewayService:
             marker in text_lower
             for marker in ("年轮", "后来", "之后怎么看", "现在怎么看", "重新看", "再看", "later")
         )
+        if not explicit_year_ring_lookup:
+            return list(selected_buckets or []), []
         generic_keys = {
             "后来",
             "后来呢",
@@ -14367,8 +14370,6 @@ class GatewayService:
         candidates: list[tuple[float, dict, dict]] = []
         for bucket in all_buckets or []:
             if not isinstance(bucket, dict) or self._is_profile_fact_bucket(bucket):
-                continue
-            if not explicit_year_ring_lookup and not self._is_canonical_scene_bucket(bucket):
                 continue
             if self._is_self_anchor_recall_excluded_bucket(bucket):
                 continue
