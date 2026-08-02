@@ -32,6 +32,22 @@ class FakeEmbeddingEngine:
         return [float((checksum % 97) + 1), float((checksum % 53) + 1)]
 
 
+class BoundaryEmbeddingEngine:
+    enabled = True
+    model = "boundary-test"
+    query_instruction = "boundary veto verification"
+    max_chars = 6000
+
+    async def embed_query(self, text: str) -> list[float]:
+        vectors = {
+            "随口说说": [1.0, 0.0],
+            "回想以前": [0.0, 1.0],
+            "还记得第一次晚安吗": [0.8, 0.6],
+            "哥哥还记得第一次晚安吗": [0.8, 0.6],
+        }
+        return vectors[text]
+
+
 class RequestStub:
     headers: dict[str, str] = {}
 
@@ -134,6 +150,9 @@ async def verify() -> None:
         }
         assert "回来继续昨天的话题" not in indexed_texts
         assert "我们先继续改这个页面吧" in indexed_texts
+        assert [item["text"] for item in index["boundaries"]] == [
+            "回来继续昨天的话题"
+        ]
         assert json.loads(source_path.read_text(encoding="utf-8"))["dataset_version"] == 7
 
         try:
@@ -187,6 +206,71 @@ async def verify() -> None:
         )
         assert conflict_response.status_code == 409
         assert json.loads(conflict_response.body)["error"] == "route_publish_version_conflict:8"
+
+    with TemporaryDirectory() as directory:
+        state_dir = Path(directory)
+        source_path = state_dir / "routes.json"
+        index_path = state_dir / "index.json"
+        source_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "dataset_version": 1,
+                    "routes": [
+                        {
+                            "name": "present_chitchat",
+                            "action": "skip",
+                            "threshold": 0.7,
+                            "utterances": [{"text": "随口说说", "role": "typical"}],
+                        },
+                        {
+                            "name": "recall_needed",
+                            "action": "recall",
+                            "utterances": [
+                                {"text": "回想以前", "role": "typical"},
+                                {
+                                    "text": "还记得第一次晚安吗",
+                                    "role": "boundary",
+                                },
+                            ],
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        engine = BoundaryEmbeddingEngine()
+        await build_route_index(
+            source_path=source_path,
+            output_path=index_path,
+            embedding_engine=engine,
+        )
+        router = SemanticRecallRouter(
+            {
+                "buckets_dir": str(state_dir),
+                "gateway": {
+                    "semantic_recall_router": {
+                        "mode": "active",
+                        "routes_path": str(source_path),
+                        "index_path": str(index_path),
+                        "boundary_veto_min_score": 0.72,
+                    }
+                },
+            },
+            engine,
+        )
+        vetoed = await router.route("哥哥还记得第一次晚安吗")
+        assert vetoed["route"] == "present_chitchat"
+        assert vetoed["reason"] == "boundary_veto"
+        assert vetoed["would_skip"] is False
+        assert vetoed["boundary_veto"]["applied"] is True
+        assert vetoed["boundary_veto"]["candidate"]["text"] == "还记得第一次晚安吗"
+
+        skipped = await router.route("随口说说")
+        assert skipped["reason"] == "matched_skip_route"
+        assert skipped["would_skip"] is True
+        assert skipped["boundary_veto"]["applied"] is False
 
 
 asyncio.run(verify())

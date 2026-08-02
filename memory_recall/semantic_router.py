@@ -172,7 +172,7 @@ async def build_route_index(
             raise RuntimeError(f"route_embedding_empty:{text[:40]}")
         return [float(value) for value in vector]
 
-    pending: list[tuple[dict[str, Any], dict[str, str], Any]] = []
+    pending: list[tuple[str, dict[str, Any], dict[str, str], Any]] = []
     active_routes = [route for route in source["routes"] if route.get("enabled", True)]
     route_centers_by_name: dict[str, list[dict[str, str]]] = {}
     for route in active_routes:
@@ -187,7 +187,22 @@ async def build_route_index(
         route_centers_by_name[route["name"]] = route_centers
     for route in active_routes:
         for utterance in route_centers_by_name[route["name"]]:
-            pending.append((route, utterance, asyncio.create_task(embed(utterance["text"]))))
+            pending.append(
+                ("center", route, utterance, asyncio.create_task(embed(utterance["text"])))
+            )
+        for utterance in route["utterances"]:
+            if (
+                utterance.get("role") == "boundary"
+                and utterance.get("status") == "published"
+            ):
+                pending.append(
+                    (
+                        "boundary",
+                        route,
+                        utterance,
+                        asyncio.create_task(embed(utterance["text"])),
+                    )
+                )
     if not pending:
         raise RuntimeError("route_source_active_utterances_missing")
 
@@ -201,17 +216,26 @@ async def build_route_index(
         }
         for route in active_routes
     }
-    for route, utterance, task in pending:
+    boundary_rows: list[dict[str, Any]] = []
+    for kind, route, utterance, task in pending:
         vector = await task
         dimensions.add(len(vector))
-        route_rows[route["name"]]["utterances"].append(
-            {
-                "text": utterance["text"],
-                "source": utterance["source"],
-                "origin": utterance["origin"],
-                "embedding": vector,
-            }
-        )
+        row = {
+            "text": utterance["text"],
+            "source": utterance["source"],
+            "origin": utterance["origin"],
+            "embedding": vector,
+        }
+        if kind == "center":
+            route_rows[route["name"]]["utterances"].append(row)
+        else:
+            boundary_rows.append(
+                {
+                    "route": route["name"],
+                    "action": route["action"],
+                    **row,
+                }
+            )
     if len(dimensions) != 1:
         raise RuntimeError("route_embedding_dimension_mismatch")
 
@@ -225,6 +249,7 @@ async def build_route_index(
             "kind": "query",
         },
         "routes": list(route_rows.values()),
+        "boundaries": boundary_rows,
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
@@ -262,6 +287,11 @@ class SemanticRecallRouter:
         self.aggregation_top_k = max(
             1,
             min(8, int(cfg.get("aggregation_top_k", 1))),
+        )
+        self.boundary_veto_enabled = bool(cfg.get("boundary_veto_enabled", True))
+        self.boundary_veto_min_score = max(
+            0.0,
+            min(1.0, float(cfg.get("boundary_veto_min_score", 0.72))),
         )
         self.source_path = _resolve_path(
             cfg.get("routes_path"),
@@ -305,6 +335,12 @@ class SemanticRecallRouter:
             "dimension": 0,
             "query_vector_ready": False,
             "scores": [],
+            "boundary_veto": {
+                "enabled": self.boundary_veto_enabled,
+                "applied": False,
+                "threshold": self.boundary_veto_min_score,
+                "candidate": None,
+            },
             "errors": [],
         }
 
@@ -401,6 +437,14 @@ class SemanticRecallRouter:
             debug["reason"] = "insufficient_margin"
             return debug, query_vector
 
+        boundary = self._best_boundary_veto(index, query_vector, winner)
+        if boundary is not None:
+            debug["boundary_veto"]["candidate"] = boundary
+            if boundary["passes_threshold"] and boundary["beats_skip"]:
+                debug["boundary_veto"]["applied"] = True
+                debug["reason"] = "boundary_veto"
+                return debug, query_vector
+
         debug["recommended_action"] = "skip"
         debug["would_skip"] = True
         debug["reason"] = "matched_skip_route"
@@ -490,6 +534,17 @@ class SemanticRecallRouter:
                 vector = utterance.get("embedding") if isinstance(utterance, dict) else None
                 if not isinstance(vector, list) or len(vector) != dimension:
                     return "route_index_vector_dimension_mismatch"
+        boundaries = raw.get("boundaries", [])
+        if not isinstance(boundaries, list):
+            return "route_index_boundaries_invalid"
+        for boundary in boundaries:
+            if not isinstance(boundary, dict):
+                return "route_index_boundary_invalid"
+            if str(boundary.get("action") or "") not in ROUTE_ACTIONS:
+                return "route_index_boundary_action_invalid"
+            vector = boundary.get("embedding")
+            if not isinstance(vector, list) or len(vector) != dimension:
+                return "route_index_boundary_vector_dimension_mismatch"
         return ""
 
     def dataset_payload(self) -> dict[str, Any]:
@@ -592,7 +647,6 @@ class SemanticRecallRouter:
                     json.dumps(source_payload, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
                 )
-                normalized_source = load_route_source(source_path)
                 index = await build_route_index(
                     source_path=source_path,
                     output_path=index_path,
@@ -617,13 +671,7 @@ class SemanticRecallRouter:
                     "center_example_count": sum(
                         len(route.get("utterances") or []) for route in index["routes"]
                     ),
-                    "boundary_example_count": sum(
-                        1
-                        for route in normalized_source["routes"]
-                        for item in route["utterances"]
-                        if item.get("role") == "boundary"
-                        and item.get("status") == "published"
-                    ),
+                    "boundary_example_count": len(index.get("boundaries") or []),
                 }
                 manifest_tmp = self.publish_dir / f".active-{uuid4().hex}.tmp"
                 manifest_tmp.write_text(
@@ -681,3 +729,30 @@ class SemanticRecallRouter:
             )
         output.sort(key=lambda row: (-row["score"], row["name"]))
         return output
+
+    def _best_boundary_veto(
+        self,
+        index: dict[str, Any],
+        query_vector: list[float],
+        winner: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not self.boundary_veto_enabled or winner.get("action") != "skip":
+            return None
+        candidates: list[tuple[float, dict[str, Any]]] = []
+        for boundary in index.get("boundaries") or []:
+            if boundary.get("action") == winner.get("action"):
+                continue
+            score = _cosine_similarity(query_vector, boundary.get("embedding") or [])
+            candidates.append((score, boundary))
+        if not candidates:
+            return None
+        score, boundary = max(candidates, key=lambda row: row[0])
+        winner_score = float(winner.get("score") or 0.0)
+        return {
+            "route": str(boundary.get("route") or ""),
+            "action": str(boundary.get("action") or "recall"),
+            "text": str(boundary.get("text") or ""),
+            "score": round(score, 6),
+            "passes_threshold": score >= self.boundary_veto_min_score,
+            "beats_skip": score >= winner_score,
+        }
