@@ -117,6 +117,8 @@ async def verify() -> None:
         assert initial["dataset_version"] == 7
         assert initial["source_kind"] == "seed"
         assert initial["index_ready"] is True
+        assert initial["boundary_index_ready"] is True
+        assert initial["indexed_boundary_example_count"] == 1
 
         routes = initial["routes"]
         routes[0]["utterances"].append(
@@ -136,6 +138,8 @@ async def verify() -> None:
         assert published["source_kind"] == "published"
         assert published["index_ready"] is True
         assert published["published"]["boundary_example_count"] == 1
+        assert published["boundary_index_ready"] is True
+        assert published["indexed_boundary_example_count"] == 1
 
         manifest = json.loads(router.active_manifest_path.read_text(encoding="utf-8"))
         generation_dir = router.publish_dir / manifest["generation"]

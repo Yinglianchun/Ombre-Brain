@@ -568,6 +568,12 @@ class SemanticRecallRouter:
             for item in route["utterances"]
             if item.get("role") == "boundary" and item.get("status") == "published"
         )
+        indexed_boundary_count = len(index.get("boundaries") or [])
+        boundary_index_ready = (
+            not index_error
+            and "boundaries" in index
+            and indexed_boundary_count == boundary_count
+        )
         return {
             "ok": True,
             "schema_version": source["schema_version"],
@@ -579,6 +585,8 @@ class SemanticRecallRouter:
             "index_ready": not index_error,
             "index_error": index_error,
             "boundary_example_count": boundary_count,
+            "indexed_boundary_example_count": indexed_boundary_count,
+            "boundary_index_ready": boundary_index_ready,
         }
 
     @staticmethod
