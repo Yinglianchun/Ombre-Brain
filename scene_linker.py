@@ -96,10 +96,20 @@ def _ensure_scene_edge_schema(conn: sqlite3.Connection) -> None:
             active INTEGER NOT NULL DEFAULT 1,
             accepted_at TEXT NOT NULL,
             accepted_by TEXT,
+            deactivated_at TEXT,
+            deactivated_by TEXT,
+            deactivation_reason TEXT,
             updated_at TEXT NOT NULL
         )
         """
     )
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(scene_edges)").fetchall()
+    }
+    for name in ("deactivated_at", "deactivated_by", "deactivation_reason"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE scene_edges ADD COLUMN {name} TEXT")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_scene_edges_active_source "
         "ON scene_edges(active, source_scene_id)"
@@ -214,6 +224,71 @@ class SceneEdgeStore:
         finally:
             conn.close()
 
+    def deactivate_edge(
+        self,
+        edge_id: str,
+        *,
+        scene_id: str,
+        reviewer: str = "",
+        reason: str = "manual_remove",
+    ) -> dict:
+        """Soft-disable one exact reviewed edge while preserving its audit row."""
+        normalized_edge = str(edge_id or "").strip()
+        normalized_scene = str(scene_id or "").strip()
+        if not normalized_edge or not normalized_scene or not os.path.exists(self.db_path):
+            return {"status": "not_found", "edge_id": normalized_edge}
+        conn = self._connect()
+        try:
+            _ensure_scene_edge_schema(conn)
+            row = conn.execute(
+                "SELECT * FROM scene_edges WHERE edge_id = ?",
+                (normalized_edge,),
+            ).fetchone()
+            if row is None:
+                return {"status": "not_found", "edge_id": normalized_edge}
+            edge = self._edge_payload(dict(row))
+            if normalized_scene not in {edge["source"], edge["target"]}:
+                return {
+                    "status": "invalid",
+                    "reason": "scene_not_edge_endpoint",
+                    "edge": edge,
+                }
+            if not edge["active"]:
+                return {"status": "unchanged", "edge": edge}
+            now = _now_utc()
+            cursor = conn.execute(
+                """
+                UPDATE scene_edges
+                   SET active = 0,
+                       deactivated_at = ?,
+                       deactivated_by = ?,
+                       deactivation_reason = ?,
+                       updated_at = ?
+                 WHERE edge_id = ? AND active = 1
+                """,
+                (
+                    now,
+                    str(reviewer or "").strip() or None,
+                    str(reason or "manual_remove").strip() or "manual_remove",
+                    now,
+                    normalized_edge,
+                ),
+            )
+            conn.commit()
+            updated = conn.execute(
+                "SELECT * FROM scene_edges WHERE edge_id = ?",
+                (normalized_edge,),
+            ).fetchone()
+            return {
+                "status": "deactivated" if int(cursor.rowcount or 0) == 1 else "unchanged",
+                "edge": self._edge_payload(dict(updated)),
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     @staticmethod
     def _edge_payload(row: dict) -> dict:
         return {
@@ -233,6 +308,9 @@ class SceneEdgeStore:
             "active": bool(row.get("active")),
             "accepted_at": str(row.get("accepted_at") or ""),
             "accepted_by": str(row.get("accepted_by") or ""),
+            "deactivated_at": str(row.get("deactivated_at") or ""),
+            "deactivated_by": str(row.get("deactivated_by") or ""),
+            "deactivation_reason": str(row.get("deactivation_reason") or ""),
             "updated_at": str(row.get("updated_at") or ""),
             "graph_scope": "scene",
         }
@@ -1102,6 +1180,21 @@ class SceneLinker:
 
     def deactivate_scene_edges(self, scene_id: str) -> int:
         return SceneEdgeStore(self.config, create=False).deactivate_for_scene(scene_id)
+
+    def deactivate_scene_edge(
+        self,
+        edge_id: str,
+        *,
+        scene_id: str,
+        reviewer: str = "",
+        reason: str = "manual_remove",
+    ) -> dict:
+        return SceneEdgeStore(self.config, create=False).deactivate_edge(
+            edge_id,
+            scene_id=scene_id,
+            reviewer=reviewer,
+            reason=reason,
+        )
 
     @staticmethod
     def _load_providers(cfg: dict, clients: dict[str, Any]) -> list[dict]:

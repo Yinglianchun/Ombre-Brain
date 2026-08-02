@@ -13628,12 +13628,74 @@ async def api_edges(request):
 
 @mcp.custom_route("/api/scene-edges", methods=["GET"])
 async def api_scene_edges(request):
-    """List reviewed Scene-only edges; legacy JSONL edges are excluded."""
+    """List reviewed Scene-only edges, optionally scoped to one endpoint Scene."""
     from starlette.responses import JSONResponse
     err = _require_dashboard_auth(request)
     if err:
         return err
-    return JSONResponse({"edges": scene_linker.list_scene_edges()})
+    scene_id = str(request.query_params.get("scene_id") or "").strip()
+    include_inactive = str(request.query_params.get("include_inactive") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if scene_id and not MEMORY_ID_RE.fullmatch(scene_id):
+        return JSONResponse({"error": "invalid scene_id"}, status_code=400)
+    edges = scene_linker.list_scene_edges(include_inactive=include_inactive)
+    if scene_id:
+        edges = [
+            edge
+            for edge in edges
+            if scene_id in {str(edge.get("source") or ""), str(edge.get("target") or "")}
+        ]
+    all_buckets = await bucket_mgr.list_all(include_archive=True)
+    titles = {
+        str(bucket.get("id") or ""): str((bucket.get("metadata") or {}).get("name") or "")
+        for bucket in all_buckets
+    }
+    return JSONResponse({
+        "scene_id": scene_id,
+        "edges": [
+            {
+                **edge,
+                "source_title": titles.get(str(edge.get("source") or ""), ""),
+                "target_title": titles.get(str(edge.get("target") or ""), ""),
+            }
+            for edge in edges
+        ],
+    })
+
+
+@mcp.custom_route("/api/scene-edges/{edge_id}", methods=["DELETE"])
+async def api_scene_edge_delete(request):
+    """Soft-disable one exact reviewed Scene edge after endpoint-bound confirmation."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    edge_id = str(request.path_params.get("edge_id") or "").strip()
+    if not edge_id or not MEMORY_ID_RE.fullmatch(edge_id):
+        return JSONResponse({"error": "invalid edge_id"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    if str(body.get("confirm") or "") != "DELETE_SCENE_EDGE":
+        return JSONResponse({"error": "confirm must be DELETE_SCENE_EDGE"}, status_code=400)
+    scene_id = str(body.get("scene_id") or "").strip()
+    if not scene_id or not MEMORY_ID_RE.fullmatch(scene_id):
+        return JSONResponse({"error": "valid scene_id is required"}, status_code=400)
+    result = scene_linker.deactivate_scene_edge(
+        edge_id,
+        scene_id=scene_id,
+        reviewer=_dashboard_author_name(),
+        reason=str(body.get("reason") or "manual_remove")[:200],
+    )
+    if result.get("status") == "not_found":
+        return JSONResponse(result, status_code=404)
+    if result.get("status") == "invalid":
+        return JSONResponse(result, status_code=409)
+    return JSONResponse(result)
 
 
 @mcp.custom_route("/api/breath-debug", methods=["GET"])
