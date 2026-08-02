@@ -40,12 +40,23 @@ async def run(args: argparse.Namespace) -> int:
     active_routes = [
         route for route in source["routes"] if route.get("enabled", True)
     ]
-    example_count = sum(len(route["utterances"]) for route in active_routes)
+    example_count = sum(
+        1
+        for route in active_routes
+        for item in route["utterances"]
+        if item.get("role") == "typical" and item.get("status") == "published"
+    )
+    boundary_count = sum(
+        1
+        for route in active_routes
+        for item in route["utterances"]
+        if item.get("role") == "boundary" and item.get("status") == "published"
+    )
     template_count = len(source["routes"]) - len(active_routes)
     if args.validate_only:
         print(
             f"valid active_routes={len(active_routes)} templates={template_count} "
-            f"examples={example_count} "
+            f"centers={example_count} boundaries={boundary_count} "
             f"dataset_version={source['dataset_version']}"
         )
         return 0
@@ -66,7 +77,8 @@ async def run(args: argparse.Namespace) -> int:
         concurrency=args.concurrency,
     )
     print(
-        f"built routes={len(payload['routes'])} examples={example_count} "
+        f"built routes={len(payload['routes'])} centers={example_count} "
+        f"boundaries={boundary_count} "
         f"model={payload['embedding']['model']} "
         f"dimension={payload['embedding']['dimension']} output={output_path}"
     )

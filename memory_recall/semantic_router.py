@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
 from pathlib import Path
+import shutil
 from typing import Any
+from uuid import uuid4
 
 
 ROUTE_SOURCE_SCHEMA_VERSION = 1
 ROUTE_INDEX_SCHEMA_VERSION = 1
 ROUTE_ACTIONS = frozenset({"skip", "recall"})
+ROUTE_EXAMPLE_ROLES = frozenset({"typical", "boundary"})
+ROUTE_EXAMPLE_ORIGINS = frozenset(
+    {"manual", "online_false_positive", "online_false_negative", "import"}
+)
+ROUTE_EXAMPLE_STATUSES = frozenset({"draft", "published", "retired"})
+ROUTE_PUBLISH_CONFIRMATION = "PUBLISH_SEMANTIC_ROUTES"
 
 
 def _resolve_path(value: Any, *, default: Path, base_dir: Path) -> Path:
@@ -44,6 +53,16 @@ def _embedding_profile(embedding_engine: Any) -> dict[str, Any]:
         ).strip(),
         "max_chars": int(getattr(embedding_engine, "max_chars", 0) or 0),
     }
+
+
+def _legacy_example_metadata(source: str) -> tuple[str, str]:
+    if source == "hard_negative":
+        return "boundary", "import"
+    if source == "historical_false_positive":
+        return "typical", "online_false_positive"
+    if source == "historical_false_negative":
+        return "typical", "online_false_negative"
+    return "typical", "import"
 
 
 def load_route_source(path: Path) -> dict[str, Any]:
@@ -81,21 +100,42 @@ def load_route_source(path: Path) -> dict[str, Any]:
             if isinstance(item, str):
                 text = item.strip()
                 source = "seed"
+                role, origin = _legacy_example_metadata(source)
+                status = "published"
             elif isinstance(item, dict):
                 text = str(item.get("text") or "").strip()
                 source = str(item.get("source") or "seed").strip()
+                legacy_role, legacy_origin = _legacy_example_metadata(source)
+                role = str(item.get("role") or legacy_role).strip().lower()
+                origin = str(item.get("origin") or legacy_origin).strip().lower()
+                status = str(item.get("status") or "published").strip().lower()
             else:
                 raise ValueError(f"route_source_utterance_invalid:{name}")
+            if role not in ROUTE_EXAMPLE_ROLES:
+                raise ValueError(f"route_source_utterance_role_invalid:{name}")
+            if origin not in ROUTE_EXAMPLE_ORIGINS:
+                raise ValueError(f"route_source_utterance_origin_invalid:{name}")
+            if status not in ROUTE_EXAMPLE_STATUSES:
+                raise ValueError(f"route_source_utterance_status_invalid:{name}")
             text_key = " ".join(text.split()).lower()
             if not text_key or text_key in seen_texts:
                 raise ValueError(f"route_source_utterance_duplicate:{name}")
             seen_texts.add(text_key)
-            normalized_utterances.append({"text": text, "source": source or "seed"})
+            normalized_utterances.append(
+                {
+                    "text": text,
+                    "source": source or "seed",
+                    "role": role,
+                    "origin": origin,
+                    "status": status,
+                }
+            )
 
         threshold = route.get("threshold")
         normalized_routes.append(
             {
                 "name": name,
+                "label": str(route.get("label") or "").strip(),
                 "action": action,
                 "enabled": enabled,
                 "threshold": float(threshold) if threshold is not None else None,
@@ -134,8 +174,19 @@ async def build_route_index(
 
     pending: list[tuple[dict[str, Any], dict[str, str], Any]] = []
     active_routes = [route for route in source["routes"] if route.get("enabled", True)]
+    route_centers_by_name: dict[str, list[dict[str, str]]] = {}
     for route in active_routes:
-        for utterance in route["utterances"]:
+        route_centers = [
+            utterance
+            for utterance in route["utterances"]
+            if utterance.get("role") == "typical"
+            and utterance.get("status") == "published"
+        ]
+        if not route_centers:
+            raise RuntimeError(f"route_source_active_center_missing:{route['name']}")
+        route_centers_by_name[route["name"]] = route_centers
+    for route in active_routes:
+        for utterance in route_centers_by_name[route["name"]]:
             pending.append((route, utterance, asyncio.create_task(embed(utterance["text"]))))
     if not pending:
         raise RuntimeError("route_source_active_utterances_missing")
@@ -157,6 +208,7 @@ async def build_route_index(
             {
                 "text": utterance["text"],
                 "source": utterance["source"],
+                "origin": utterance["origin"],
                 "embedding": vector,
             }
         )
@@ -221,8 +273,15 @@ class SemanticRecallRouter:
             default=state_dir / "semantic_recall_routes.v1.json",
             base_dir=state_dir,
         )
+        self.publish_dir = _resolve_path(
+            cfg.get("publish_dir"),
+            default=state_dir / "semantic_recall_routes",
+            base_dir=state_dir,
+        )
+        self.active_manifest_path = self.publish_dir / "active.json"
+        self._publish_lock = asyncio.Lock()
         self._loaded_index: dict[str, Any] | None = None
-        self._loaded_index_mtime_ns = -1
+        self._loaded_index_signature: tuple[str, int, int] | None = None
 
     def debug_base(self, query: str) -> dict[str, Any]:
         return {
@@ -354,31 +413,58 @@ class SemanticRecallRouter:
             and debug.get("would_skip")
         )
 
+    def _active_paths(self) -> tuple[Path, Path, int, str]:
+        if not self.active_manifest_path.exists():
+            return self.source_path, self.index_path, -1, ""
+        try:
+            manifest = json.loads(self.active_manifest_path.read_text(encoding="utf-8"))
+            generation = str(manifest.get("generation") or "").strip()
+            if not generation or Path(generation).name != generation:
+                return self.source_path, self.index_path, -1, "route_publish_manifest_invalid"
+            generation_dir = (self.publish_dir / generation).resolve()
+            if generation_dir.parent != self.publish_dir.resolve():
+                return self.source_path, self.index_path, -1, "route_publish_manifest_invalid"
+            return (
+                generation_dir / "source.json",
+                generation_dir / "index.json",
+                self.active_manifest_path.stat().st_mtime_ns,
+                "",
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return self.source_path, self.index_path, -1, "route_publish_manifest_invalid"
+
     def _load_index(self) -> tuple[dict[str, Any], str]:
-        if not self.source_path.exists():
+        source_path, index_path, manifest_mtime_ns, manifest_error = self._active_paths()
+        if manifest_error:
+            return {}, manifest_error
+        if not source_path.exists():
             return {}, "route_source_missing"
-        if not self.index_path.exists():
+        if not index_path.exists():
             return {}, "route_index_missing"
         try:
-            mtime_ns = self.index_path.stat().st_mtime_ns
-            if self._loaded_index is None or mtime_ns != self._loaded_index_mtime_ns:
-                raw = json.loads(self.index_path.read_text(encoding="utf-8"))
-                error = self._validate_index(raw)
+            signature = (str(index_path), index_path.stat().st_mtime_ns, manifest_mtime_ns)
+            if self._loaded_index is None or signature != self._loaded_index_signature:
+                raw = json.loads(index_path.read_text(encoding="utf-8"))
+                error = self._validate_index(raw, source_path=source_path)
                 if error:
                     return {}, error
                 self._loaded_index = raw
-                self._loaded_index_mtime_ns = mtime_ns
+                self._loaded_index_signature = signature
             return self._loaded_index, ""
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return {}, "route_index_invalid"
 
-    def _validate_index(self, raw: Any) -> str:
+    def _validate_index(self, raw: Any, *, source_path: Path | None = None) -> str:
+        source_path = source_path or self.source_path
         if not isinstance(raw, dict):
             return "route_index_not_object"
         if int(raw.get("schema_version") or 0) != ROUTE_INDEX_SCHEMA_VERSION:
             return "route_index_schema_mismatch"
-        if str(raw.get("source_sha256") or "") != _source_sha256(self.source_path):
+        if str(raw.get("source_sha256") or "") != _source_sha256(source_path):
             return "route_index_stale"
+        source = load_route_source(source_path)
+        if int(raw.get("dataset_version") or 0) != int(source["dataset_version"]):
+            return "route_index_dataset_version_mismatch"
         profile = raw.get("embedding")
         if not isinstance(profile, dict):
             return "route_index_embedding_profile_missing"
@@ -405,6 +491,158 @@ class SemanticRecallRouter:
                 if not isinstance(vector, list) or len(vector) != dimension:
                     return "route_index_vector_dimension_mismatch"
         return ""
+
+    def dataset_payload(self) -> dict[str, Any]:
+        source_path, index_path, _manifest_mtime_ns, manifest_error = self._active_paths()
+        if manifest_error:
+            raise RuntimeError(manifest_error)
+        source = load_route_source(source_path)
+        index_error = ""
+        index: dict[str, Any] = {}
+        if index_path.exists():
+            try:
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                index_error = self._validate_index(index, source_path=source_path)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                index_error = "route_index_invalid"
+        else:
+            index_error = "route_index_missing"
+        boundary_count = sum(
+            1
+            for route in source["routes"]
+            for item in route["utterances"]
+            if item.get("role") == "boundary" and item.get("status") == "published"
+        )
+        return {
+            "ok": True,
+            "schema_version": source["schema_version"],
+            "dataset_version": source["dataset_version"],
+            "deployment_state": "production",
+            "source_kind": "published" if self.active_manifest_path.exists() else "seed",
+            "routes": source["routes"],
+            "embedding": index.get("embedding") or _embedding_profile(self.embedding_engine),
+            "index_ready": not index_error,
+            "index_error": index_error,
+            "boundary_example_count": boundary_count,
+        }
+
+    @staticmethod
+    def _published_source_payload(routes: Any, dataset_version: int) -> dict[str, Any]:
+        if not isinstance(routes, list):
+            raise ValueError("route_publish_routes_missing")
+        published_routes = []
+        for route in routes:
+            if not isinstance(route, dict):
+                raise ValueError("route_source_route_not_object")
+            published_items = []
+            for item in route.get("utterances") or []:
+                if isinstance(item, str):
+                    published_items.append({"text": item, "status": "published"})
+                    continue
+                if not isinstance(item, dict):
+                    raise ValueError("route_source_utterance_invalid")
+                normalized = dict(item)
+                if str(normalized.get("status") or "draft").strip().lower() != "retired":
+                    normalized["status"] = "published"
+                published_items.append(normalized)
+            published_routes.append(
+                {
+                    "name": route.get("name"),
+                    "label": route.get("label"),
+                    "action": route.get("action"),
+                    "enabled": route.get("enabled", True),
+                    "threshold": route.get("threshold"),
+                    "utterances": published_items,
+                }
+            )
+        return {
+            "schema_version": ROUTE_SOURCE_SCHEMA_VERSION,
+            "dataset_version": dataset_version,
+            "routes": published_routes,
+        }
+
+    async def publish_dataset(
+        self,
+        *,
+        routes: Any,
+        expected_dataset_version: int,
+        confirmation: str,
+        concurrency: int = 3,
+    ) -> dict[str, Any]:
+        if confirmation != ROUTE_PUBLISH_CONFIRMATION:
+            raise ValueError("route_publish_confirmation_required")
+        async with self._publish_lock:
+            current = self.dataset_payload()
+            current_version = int(current["dataset_version"])
+            if int(expected_dataset_version) != current_version:
+                raise ValueError(f"route_publish_version_conflict:{current_version}")
+
+            next_version = current_version + 1
+            source_payload = self._published_source_payload(routes, next_version)
+            self.publish_dir.mkdir(parents=True, exist_ok=True)
+            staging_name = f".staging-{uuid4().hex}"
+            staging_dir = self.publish_dir / staging_name
+            staging_dir.mkdir()
+            source_path = staging_dir / "source.json"
+            index_path = staging_dir / "index.json"
+            generation_dir: Path | None = None
+            activated = False
+            try:
+                source_path.write_text(
+                    json.dumps(source_payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                normalized_source = load_route_source(source_path)
+                index = await build_route_index(
+                    source_path=source_path,
+                    output_path=index_path,
+                    embedding_engine=self.embedding_engine,
+                    concurrency=concurrency,
+                )
+                index_error = self._validate_index(index, source_path=source_path)
+                if index_error:
+                    raise RuntimeError(index_error)
+
+                generation = f"v{next_version:06d}-{_source_sha256(source_path)[:12]}-{uuid4().hex[:8]}"
+                generation_dir = self.publish_dir / generation
+                staging_dir.replace(generation_dir)
+                manifest = {
+                    "schema_version": 1,
+                    "dataset_version": next_version,
+                    "generation": generation,
+                    "source_sha256": index["source_sha256"],
+                    "published_at": datetime.now(timezone.utc).isoformat(),
+                    "embedding": index["embedding"],
+                    "route_count": len(index["routes"]),
+                    "center_example_count": sum(
+                        len(route.get("utterances") or []) for route in index["routes"]
+                    ),
+                    "boundary_example_count": sum(
+                        1
+                        for route in normalized_source["routes"]
+                        for item in route["utterances"]
+                        if item.get("role") == "boundary"
+                        and item.get("status") == "published"
+                    ),
+                }
+                manifest_tmp = self.publish_dir / f".active-{uuid4().hex}.tmp"
+                manifest_tmp.write_text(
+                    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                manifest_tmp.replace(self.active_manifest_path)
+                activated = True
+                self._loaded_index = None
+                self._loaded_index_signature = None
+                result = self.dataset_payload()
+                result["published"] = manifest
+                return result
+            except Exception:
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+                if not activated and generation_dir is not None and generation_dir.exists():
+                    shutil.rmtree(generation_dir, ignore_errors=True)
+                raise
 
     def _score_routes(
         self,

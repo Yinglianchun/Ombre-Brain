@@ -2163,6 +2163,50 @@ class GatewayService:
             response["debug"] = {**debug, **minimal_debug}
         return JSONResponse(response)
 
+    async def handle_semantic_recall_routes(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        try:
+            return JSONResponse(self.semantic_recall_router.dataset_payload())
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return JSONResponse(
+                {"error": str(exc) or type(exc).__name__},
+                status_code=503,
+            )
+
+    async def handle_semantic_recall_publish(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid semantic route publish request"}, status_code=400)
+        try:
+            expected_version = int(body.get("expected_dataset_version"))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "expected_dataset_version is required"}, status_code=400)
+        try:
+            result = await self.semantic_recall_router.publish_dataset(
+                routes=body.get("routes"),
+                expected_dataset_version=expected_version,
+                confirmation=str(body.get("confirm") or ""),
+                concurrency=max(1, min(8, int(body.get("concurrency") or 3))),
+            )
+            return JSONResponse(result)
+        except ValueError as exc:
+            error = str(exc) or type(exc).__name__
+            status_code = 409 if error.startswith("route_publish_version_conflict:") else 400
+            return JSONResponse({"error": error}, status_code=status_code)
+        except RuntimeError as exc:
+            return JSONResponse(
+                {"error": str(exc) or type(exc).__name__},
+                status_code=503,
+            )
+
     async def _handle_hook_recall_full(
         self,
         *,
@@ -19316,6 +19360,12 @@ def create_gateway_app(
     async def hook_recall(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_hook_recall(request)
 
+    async def semantic_recall_routes(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_semantic_recall_routes(request)
+
+    async def semantic_recall_publish(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_semantic_recall_publish(request)
+
     async def recall_eval_debug(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_recall_eval_debug(request)
 
@@ -19329,6 +19379,8 @@ def create_gateway_app(
             Route("/api/config", config_route, methods=["GET", "POST"]),
             Route("/api/debug/injections", injection_debug, methods=["GET"]),
             Route("/api/hook/recall", hook_recall, methods=["POST"]),
+            Route("/api/semantic-recall/routes", semantic_recall_routes, methods=["GET"]),
+            Route("/api/semantic-recall/routes/publish", semantic_recall_publish, methods=["POST"]),
             Route("/api/debug/recall-eval", recall_eval_debug, methods=["GET"]),
             Route("/api/debug/upstream-usage", upstream_usage_debug, methods=["GET"]),
             Route("/v1/models", models, methods=["GET"]),
