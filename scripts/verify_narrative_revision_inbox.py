@@ -13,7 +13,6 @@ if str(ROOT) not in sys.path:
 from mcp_surface import DAILY_TOOL_NAMES
 from narrative_revision_inbox import NarrativeRevisionInbox
 from narrative_rolls import NarrativeRollStore
-from portrait_engine import PATCH_KEYS, PORTRAIT_PROMPT_TEMPLATE
 
 
 SCENE_OLD = "scene_timeline_old"
@@ -60,8 +59,6 @@ def _scene(scene_id: str, date: str, cue: str, content: str) -> dict:
 
 
 def main() -> int:
-    assert "profile_fact_candidate" not in PATCH_KEYS
-    assert "profile_fact_candidate" not in PORTRAIT_PROMPT_TEMPLATE
     assert "narrative_revision_inbox" in DAILY_TOOL_NAMES
     assert "review_narrative_revision" in DAILY_TOOL_NAMES
 

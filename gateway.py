@@ -514,27 +514,6 @@ class GatewayService:
             min(8, int(self.gateway_cfg.get("diffusion_explore_multiplier", 3))),
         )
         self.core_memory_interval_rounds = max(0, int(self.gateway_cfg.get("core_memory_interval_rounds", 0)))
-        self.portrait_memory_configured_enabled = self._bool_config_value(
-            self.gateway_cfg.get("portrait_memory_enabled"),
-            False,
-        )
-        # Legacy raw profile_fact/anchor injection is retired. Portrait state is
-        # restored once through breath(mode="handoff") instead of every turn.
-        self.portrait_memory_enabled = False
-        self.portrait_memory_budget = max(120, int(self.gateway_cfg.get("portrait_memory_budget", 360)))
-        self.portrait_memory_max_sources = max(
-            1,
-            min(20, int(self.gateway_cfg.get("portrait_memory_max_sources", 8))),
-        )
-        self.portrait_memory_include_anchors = self._bool_config_value(
-            self.gateway_cfg.get("portrait_memory_include_anchors"),
-            False,
-        )
-        self._portrait_memory_cache: dict[str, Any] = {
-            "key": None,
-            "block": "",
-            "debug": self._portrait_memory_debug_base(),
-        }
         self.current_inner_state_interval_rounds = max(
             0, int(self.gateway_cfg.get("current_inner_state_interval_rounds", 0))
         )
@@ -856,12 +835,6 @@ class GatewayService:
             "retrieval_mode": self.retrieval_mode,
             "bucket_list_cache_ttl_seconds": self.bucket_list_cache_ttl_seconds,
             "recall_fusion_mode": self.recall_fusion_mode,
-            "portrait_memory_enabled": self.portrait_memory_enabled,
-            "portrait_memory_configured_enabled": self.portrait_memory_configured_enabled,
-            "portrait_memory_retired": True,
-            "portrait_memory_budget": self.portrait_memory_budget,
-            "portrait_memory_max_sources": self.portrait_memory_max_sources,
-            "portrait_memory_include_anchors": self.portrait_memory_include_anchors,
             "semantic_rescue_enabled": self.semantic_rescue_enabled,
             "semantic_rescue_candidate_limit": self.semantic_rescue_candidate_limit,
             "semantic_rescue_max_tokens": self.semantic_rescue_max_tokens,
@@ -1285,29 +1258,6 @@ class GatewayService:
             self.recall_fusion_mode = self._normalize_recall_fusion_mode(payload["recall_fusion_mode"])
             self.gateway_cfg["recall_fusion_mode"] = self.recall_fusion_mode
             updated.append("gateway.recall_fusion_mode")
-        if "portrait_memory_enabled" in payload:
-            self.portrait_memory_configured_enabled = self._bool_config_value(
-                payload["portrait_memory_enabled"],
-                False,
-            )
-            self.portrait_memory_enabled = False
-            self.gateway_cfg["portrait_memory_enabled"] = False
-            updated.append("gateway.portrait_memory_enabled")
-        if "portrait_memory_budget" in payload:
-            self.portrait_memory_budget = max(120, int(payload["portrait_memory_budget"]))
-            self.gateway_cfg["portrait_memory_budget"] = self.portrait_memory_budget
-            updated.append("gateway.portrait_memory_budget")
-        if "portrait_memory_max_sources" in payload:
-            self.portrait_memory_max_sources = max(1, min(20, int(payload["portrait_memory_max_sources"])))
-            self.gateway_cfg["portrait_memory_max_sources"] = self.portrait_memory_max_sources
-            updated.append("gateway.portrait_memory_max_sources")
-        if "portrait_memory_include_anchors" in payload:
-            self.portrait_memory_include_anchors = self._bool_config_value(
-                payload["portrait_memory_include_anchors"],
-                False,
-            )
-            self.gateway_cfg["portrait_memory_include_anchors"] = self.portrait_memory_include_anchors
-            updated.append("gateway.portrait_memory_include_anchors")
         if "semantic_rescue_enabled" in payload:
             self.semantic_rescue_enabled = self._bool_config_value(
                 payload["semantic_rescue_enabled"],
@@ -2550,8 +2500,6 @@ class GatewayService:
 
         persona_block = ""
         core_memory = ""
-        portrait_memory = ""
-        portrait_memory_debug: dict[str, Any] = self._portrait_memory_debug_base()
         just_now_context = ""
         just_now_context_debug: dict[str, Any] = self._just_now_context_debug_base(current_user_query)
         date_recall = ""
@@ -2698,18 +2646,6 @@ class GatewayService:
                 stage_started_at = time.perf_counter()
                 core_memory = await self._build_core_memory_block(all_buckets)
                 mark_step("core_memory", stage_started_at)
-            if needs_handoff_first or just_now_context_requested or date_recall_requested:
-                portrait_memory_debug["skip_reason"] = (
-                    "just_now_context"
-                    if just_now_context_requested and not needs_handoff_first
-                    else "date_recall"
-                    if date_recall_requested and not needs_handoff_first
-                    else handoff_skip_reason
-                )
-            else:
-                stage_started_at = time.perf_counter()
-                portrait_memory, portrait_memory_debug = self._build_portrait_memory_block(all_buckets)
-                mark_step("portrait_memory", stage_started_at)
             if self.recalled_budget > 0 or self.related_memory_budget > 0:
                 if skip_broad_dynamic_recall:
                     logger.info(
@@ -2996,7 +2932,6 @@ class GatewayService:
         stable_context, dynamic_context = self._build_injected_context_messages(
             persona_block=persona_block,
             core_memory=core_memory,
-            portrait_memory=portrait_memory,
             just_now_context=just_now_context,
             date_recall=date_recall,
             recent_context=recent_context,
@@ -3183,8 +3118,6 @@ class GatewayService:
                 stable_context=stable_context,
                 dynamic_context=dynamic_context,
                 all_buckets=all_buckets,
-                portrait_memory=portrait_memory,
-                portrait_memory_debug=portrait_memory_debug,
                 recalled_moments=recalled_moments,
                 recalled_memory=recalled_memory,
                 date_persona_trace=date_persona_trace,
@@ -7537,28 +7470,6 @@ class GatewayService:
             reverse=True,
         )
         return await self._summarize_buckets(core_buckets, self.core_budget)
-
-    def _build_portrait_memory_block(self, all_buckets: list[dict]) -> tuple[str, dict[str, Any]]:
-        debug = self._portrait_memory_debug_base()
-        debug["skip_reason"] = "retired_use_breath_handoff"
-        return "", debug
-
-    def _portrait_memory_debug_base(self) -> dict[str, Any]:
-        return {
-            "enabled": False,
-            "configured_enabled": bool(
-                getattr(self, "portrait_memory_configured_enabled", False)
-            ),
-            "retired": True,
-            "cache_hit": False,
-            "skip_reason": "",
-            "source_count": 0,
-            "source_ids": [],
-            "source_roles": [],
-            "source_hash": "",
-            "token_estimate": 0,
-            "generated_portrait_version": "",
-        }
 
     async def _build_recent_context_block(
         self,
@@ -15688,7 +15599,6 @@ class GatewayService:
         self,
         persona_block: str,
         core_memory: str,
-        portrait_memory: str,
         just_now_context: str = "",
         recent_context: str = "",
         recalled_memory: str = "",
@@ -15740,7 +15650,7 @@ class GatewayService:
             ]
         )
         stable_sections = []
-        if core_memory.strip() or portrait_memory.strip():
+        if core_memory.strip():
             stable_sections = [
                 "Use the following private memory only when it fits naturally. "
                 "Keep the reply seamless and do not mention memory lookup, search, or hidden context.",
@@ -15751,7 +15661,6 @@ class GatewayService:
                     stable_sections.extend(["", title, content])
 
             add_stable_section("Core Memory", core_memory)
-            add_stable_section("Portrait Memory", portrait_memory)
 
         dynamic_sections = []
         if has_dynamic_context:
@@ -16624,8 +16533,6 @@ class GatewayService:
         stable_context: str,
         dynamic_context: str,
         all_buckets: list[dict],
-        portrait_memory: str,
-        portrait_memory_debug: dict[str, Any],
         recalled_moments: list[dict],
         recalled_memory: str,
         related_memory: str,
@@ -16811,8 +16718,6 @@ class GatewayService:
             "query_preview": self._clip_text(query, 500),
             "stable_tokens": count_tokens_approx(stable_context),
             "dynamic_tokens": count_tokens_approx(dynamic_context),
-            "portrait_memory_injected": bool(str(portrait_memory or "").strip()),
-            "portrait_memory_debug": portrait_memory_debug or self._portrait_memory_debug_base(),
             "just_now_context_injected": bool(str(just_now_context or "").strip()),
             "just_now_context_debug": just_now_context_debug or self._just_now_context_debug_base(query),
             "date_recall_injected": bool(str(date_recall or "").strip()),

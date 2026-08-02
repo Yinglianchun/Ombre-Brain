@@ -38,7 +38,7 @@ class _SceneBucketManager:
 async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
     registered = {tool.name for tool in server.mcp._tool_manager.list_tools()}
-    assert len(tools) == 17
+    assert len(tools) == 16
     assert registered == set(tools)
     assert {
         "recall_memory",
@@ -49,9 +49,14 @@ async def main() -> None:
         "close_window",
         "revise_window_shadow",
         "publish_narrative",
-        "publish_portrait",
     } <= set(tools)
-    for retired_name in ("recall", "write_memory", "edit_memory", "read_portrait"):
+    for retired_name in (
+        "recall",
+        "write_memory",
+        "edit_memory",
+        "read_portrait",
+        "publish_portrait",
+    ):
         assert retired_name not in tools
 
     read_schema = tools["read_memory"].inputSchema
@@ -60,7 +65,6 @@ async def main() -> None:
         "scene",
         "shadow",
         "narrative",
-        "portrait",
     ]
     assert "query" not in read_schema["properties"]
     assert "date" not in read_schema["properties"]
@@ -71,7 +75,6 @@ async def main() -> None:
         "_read_scene_memory": server._read_scene_memory,
         "_read_window_shadow_memory": server._read_window_shadow_memory,
         "_read_narrative_memory": server._read_narrative_memory,
-        "read_portrait": server.read_portrait,
         "window_shadow_store": server.window_shadow_store,
         "_recall_memory": server._recall_memory,
         "_recall_from_scene_id": server._recall_from_scene_id,
@@ -92,10 +95,6 @@ async def main() -> None:
         calls.append(("narrative", narrative_id))
         return {"status": "ok", "narrative_id": narrative_id}
 
-    async def fake_portrait(**kwargs):
-        calls.append(("portrait", kwargs))
-        return {"status": "ok", **kwargs}
-
     async def fake_recall(**kwargs):
         calls.append(("query_recall", kwargs))
         return "query-recall"
@@ -112,7 +111,6 @@ async def main() -> None:
         server._read_scene_memory = fake_scene
         server._read_window_shadow_memory = fake_shadow
         server._read_narrative_memory = fake_narrative
-        server.read_portrait = fake_portrait
         server.window_shadow_store = _LatestShadowStore()
         server._recall_memory = fake_recall
         server._recall_from_scene_id = fake_scene_recall
@@ -127,11 +125,6 @@ async def main() -> None:
         narrative = await server.read_memory(
             memory_type="narrative",
             memory_id="narrative_thread",
-        )
-        portrait = await server.read_memory(
-            memory_type="portrait",
-            memory_id="relationship",
-            include_evidence_text=False,
         )
         query_recall = await server.recall_memory(
             query="雨天",
@@ -157,7 +150,6 @@ async def main() -> None:
         assert shadow["window_id"] == "window_parent"
         assert latest["window"]["window_id"] == "window_latest_facade"
         assert narrative["narrative_id"] == "narrative_thread"
-        assert portrait["scope"] == "relationship"
         assert query_recall == "query-recall"
         assert scene_recall == "scene-recall"
         assert "两种召回入口" in mixed
@@ -167,7 +159,6 @@ async def main() -> None:
             "scene",
             "shadow",
             "narrative",
-            "portrait",
             "query_recall",
             "scene_recall",
             "related_block",

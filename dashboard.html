@@ -3207,7 +3207,6 @@
   <div class="tab" data-tab="reflection">日印象</div>
   <div class="tab" data-tab="dreams">梦境</div>
   <div class="tab" data-tab="persona">Persona</div>
-  <div class="tab" data-tab="profile">画像</div>
   <div class="tab" data-tab="narrative-revisions">叙事修订</div>
   <div class="tab" data-tab="word-map">词图</div>
   <div class="tab" data-tab="proposals">关系提案</div>
@@ -3646,38 +3645,6 @@
   </div>
 </div>
 
-<div class="content" id="profile-view" style="display:none">
-  <div class="profile-shell">
-    <div class="profile-toolbar">
-      <div>
-        <h2>Portrait State</h2>
-        <p>后台每天整理画像候选；Stable 只由当前作者审阅证据后亲自定稿，并在 breath/handoff 开场恢复。</p>
-      </div>
-      <div class="profile-actions">
-        <button type="button" onclick="refreshPortraitView()">刷新</button>
-        <button type="button" onclick="runPortraitMaintain()">整理候选</button>
-        <button type="button" class="danger" onclick="resetPortraitState()">清空画像</button>
-      </div>
-    </div>
-    <section class="portrait-state-panel" id="portrait-state-panel">
-      <div class="profile-proposal-message" id="portrait-maintain-message"></div>
-      <div class="portrait-state-summary" id="portrait-state-summary">加载中…</div>
-      <div id="portrait-state-content">
-        <div class="loading">加载 Portrait State…</div>
-      </div>
-    </section>
-    <div class="profile-proposal-panel">
-      <div class="profile-proposal-form">
-        <input type="text" id="anchor-proposal-bucket-id" placeholder="候选 anchor bucket id" />
-        <span></span>
-        <button type="button" onclick="generateAnchorProposals()">生成 Anchor 候选</button>
-      </div>
-      <div class="profile-proposal-message" id="anchor-proposal-message"></div>
-      <div class="profile-proposal-list" id="anchor-proposal-list"></div>
-    </div>
-  </div>
-</div>
-
 <div class="content" id="narrative-revisions-view" style="display:none">
   <div class="profile-shell">
     <div class="profile-toolbar">
@@ -4087,52 +4054,12 @@
     </div>
 
     <div class="config-section">
-      <h3>每日画像 Portrait</h3>
-      <div class="config-row">
-        <label>画像引擎</label>
-        <select id="cfg-portrait-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">总开关；只维护 state/portrait_state.json，不自动发布 Stable，也不写 profile_fact、anchor 或 Core Memory</div>
-      <div class="config-row">
-        <label>自动维护</label>
-        <select id="cfg-portrait-auto"><option value="true">开启</option><option value="false">关闭</option></select>
-      </div>
-      <div class="config-row">
-        <label>自动首次生成</label>
-        <select id="cfg-portrait-auto-initial"><option value="false">关闭</option><option value="true">开启</option></select>
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认关闭；新安装或空 state 时，第一次画像需要手动点击生成</div>
-      <div class="config-row">
-        <label>每日维护</label>
-        <select id="cfg-portrait-daily"><option value="true">开启</option><option value="false">关闭</option></select>
-      </div>
-      <div class="config-row">
-        <label>当天材料上限</label>
-        <input type="number" id="cfg-portrait-material-limit" min="1" max="100" />
-      </div>
-      <div class="config-row">
-        <label>首次材料上限</label>
-        <input type="number" id="cfg-portrait-first-limit" min="1" max="500" />
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">第一次画像初始化可适当调大；之后每天只看当天新增/更新的记忆材料</div>
-      <div class="config-row">
-        <label>User 重生阈值</label>
-        <input type="number" id="cfg-portrait-user-delta" min="1" max="100" />
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 10；生成依据相对上个 User Portrait 新增到该数量时完整重生</div>
-      <div class="config-row">
-        <label>删除抑制天数</label>
-        <input type="number" id="cfg-portrait-suppress-days" min="1" max="90" />
-      </div>
-    </div>
-
-    <div class="config-section">
       <h3>自我入口</h3>
       <div class="config-row">
         <label>总入口 bucket</label>
         <input type="text" id="cfg-self-anchor-entry" placeholder="留空按最高分自我桶 fallback" />
       </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">handoff 和画像页只读这一条；不会把它设成普通 anchor</div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">handoff 只读这一条；不会把它设成普通 anchor</div>
     </div>
 
     <div class="config-section">
@@ -4186,8 +4113,6 @@ const PATH_PREFIX = location.pathname.replace(/\/dashboard\/?$/, '');
 const BASE = location.origin + PATH_PREFIX;
 let allBuckets = [];
 let renderedBuckets = [];
-let portraitState = null;
-let portraitEditorScope = '';
 let narrativeRevisionItems = [];
 let anchorProposals = [];
 let wordMapData = null;
@@ -4329,7 +4254,6 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('reflection-view').style.display = target === 'reflection' ? '' : 'none';
     document.getElementById('dreams-view').style.display = target === 'dreams' ? '' : 'none';
     document.getElementById('persona-view').style.display = target === 'persona' ? '' : 'none';
-    document.getElementById('profile-view').style.display = target === 'profile' ? '' : 'none';
     document.getElementById('narrative-revisions-view').style.display = target === 'narrative-revisions' ? '' : 'none';
     document.getElementById('word-map-view').style.display = target === 'word-map' ? '' : 'none';
     document.getElementById('proposal-view').style.display = target === 'proposals' ? '' : 'none';
@@ -4343,9 +4267,6 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (target === 'reflection') renderReflectionReview();
     if (target === 'dreams') loadDreams();
     if (target === 'persona') loadPersona();
-    if (target === 'profile') {
-      loadPortraitState();
-    }
     if (target === 'narrative-revisions') loadNarrativeRevisionInbox();
     if (target === 'word-map') loadWordMap();
     if (target === 'proposals') loadSceneLinkerPanel();
@@ -4385,9 +4306,6 @@ async function loadBuckets(options) {
     if (getActiveTab() === 'reflection') renderReflectionReview();
     if (getActiveTab() === 'todos') loadTodos();
     if (getActiveTab() === 'dreams') loadDreams();
-    if (getActiveTab() === 'profile' && !options.skipProfileRefresh) {
-      loadPortraitState();
-    }
     if (getActiveTab() === 'word-map') loadWordMap();
   } catch (e) {
     document.getElementById('bucket-list').innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
@@ -6907,7 +6825,6 @@ async function searchBuckets(query) {
 }
 
 async function showDetail(id) {
-  portraitEditorScope = '';
   var panel = document.getElementById('detail-panel');
   var content = document.getElementById('detail-content');
   content.innerHTML = '<div class="loading">加载中…</div>';
@@ -7232,7 +7149,6 @@ async function deleteBucketComment(bucketId, commentId) {
 }
 
 function closeDetail() {
-  portraitEditorScope = '';
   document.getElementById('detail-panel').classList.remove('open');
 }
 
@@ -8991,22 +8907,6 @@ async function loadConfig() {
     document.getElementById('cfg-reflection-key').placeholder =
       '当前: ' + ((cfg.reflection && cfg.reflection.api_key_masked) || ((cfg.reflection && cfg.reflection.api_ready) ? '***' : '未设置'));
     document.getElementById('cfg-reflection-key').value = '';
-    document.getElementById('cfg-portrait-enabled').value =
-      (cfg.portrait && cfg.portrait.enabled) === false ? 'false' : 'true';
-    document.getElementById('cfg-portrait-auto').value =
-      (cfg.portrait && cfg.portrait.auto_enabled) === false ? 'false' : 'true';
-    document.getElementById('cfg-portrait-auto-initial').value =
-      (cfg.portrait && cfg.portrait.auto_initial_enabled) === true ? 'true' : 'false';
-    document.getElementById('cfg-portrait-daily').value =
-      (cfg.portrait && cfg.portrait.daily_enabled) === false ? 'false' : 'true';
-    document.getElementById('cfg-portrait-material-limit').value =
-      (cfg.portrait && cfg.portrait.material_limit) ?? 18;
-    document.getElementById('cfg-portrait-first-limit').value =
-      (cfg.portrait && cfg.portrait.first_run_material_limit) ?? 160;
-    document.getElementById('cfg-portrait-user-delta').value =
-      (cfg.portrait && cfg.portrait.user_rewrite_evidence_delta) ?? 10;
-    document.getElementById('cfg-portrait-suppress-days').value =
-      (cfg.portrait && cfg.portrait.manual_suppress_days) ?? 14;
     document.getElementById('cfg-self-anchor-entry').value =
       (cfg.self_anchor && cfg.self_anchor.entry_bucket_id) || '';
     document.getElementById('cfg-merge').value = cfg.merge_threshold ?? 90;
@@ -9022,8 +8922,6 @@ async function loadConfig() {
       'Gateway upstreams: <strong>' + upstreamCount + ' providers / ' + upstreamModelCount + ' models</strong><br>' +
       'Persona API: <strong>' + ((cfg.persona && cfg.persona.api_ready) ? '已设置' : '未设置') + '</strong><br>' +
       '日印象 API: <strong>' + ((cfg.reflection && cfg.reflection.api_ready) ? '已设置' : '未设置') + '</strong><br>' +
-      'Portrait API: <strong>' + ((cfg.portrait && cfg.portrait.api_ready) ? '已设置' : '未设置') + '</strong><br>' +
-      'Portrait state: <strong>' + esc((cfg.portrait && cfg.portrait.state_path) || '默认') + '</strong><br>' +
       'Dream API: <strong>' + (cfg.dream.api_ready ? '已设置' : '未设置') + '</strong><br>' +
       'Embedding effective URL: <strong>' + esc(cfg.embedding.effective_base_url || '未设置') + '</strong><br>' +
       'Reranker effective URL: <strong>' + esc(reranker.effective_base_url || '未设置') + '</strong>';
@@ -9131,16 +9029,6 @@ async function saveConfig(persist, persistEnv) {
       daily_conversation_turn_limit: numberValue('cfg-reflection-daily-turns', 12),
       memory_affect_anchor_enabled: document.getElementById('cfg-reflection-memory-anchor').value === 'true',
       relationship_weather_affect_anchor_enabled: document.getElementById('cfg-reflection-weather-anchor').value === 'true',
-    };
-    candidate.portrait = {
-      enabled: document.getElementById('cfg-portrait-enabled').value === 'true',
-      auto_enabled: document.getElementById('cfg-portrait-auto').value === 'true',
-      auto_initial_enabled: document.getElementById('cfg-portrait-auto-initial').value === 'true',
-      daily_enabled: document.getElementById('cfg-portrait-daily').value === 'true',
-      material_limit: numberValue('cfg-portrait-material-limit', 18),
-      first_run_material_limit: numberValue('cfg-portrait-first-limit', 160),
-      user_rewrite_evidence_delta: numberValue('cfg-portrait-user-delta', 10),
-      manual_suppress_days: numberValue('cfg-portrait-suppress-days', 14),
     };
     candidate.self_anchor = {
       entry_bucket_id: document.getElementById('cfg-self-anchor-entry').value.trim(),
@@ -9251,7 +9139,6 @@ async function saveConfig(persist, persistEnv) {
     'recall',
     'memory_diffusion',
     'reflection',
-    'portrait',
     'self_anchor',
   ].forEach(function(sectionName) {
     if (candidate[sectionName]) {

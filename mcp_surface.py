@@ -18,7 +18,6 @@ DAILY_TOOL_NAMES: tuple[str, ...] = (
     "narrative_revision_inbox",
     "review_narrative_revision",
     "publish_narrative",
-    "publish_portrait",
     "read_diary",
     "write_diary",
     "revise_diary",

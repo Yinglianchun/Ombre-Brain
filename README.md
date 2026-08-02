@@ -2,14 +2,14 @@
 
 Ombre Brain 是一套以 Markdown 记忆桶为长期真源、同时提供 MCP 与聊天 Gateway 的个人连续性系统。
 
-本仓库基于 [P0luz/Ombre-Brain](https://github.com/P0luz/Ombre-Brain) 二次开发。当前以可追溯的场景/事实真源为核心，保留旧情绪坐标字段仅作数据兼容，不再用它们重排普通召回或改变衰减；并加入了保守召回、图关系、原文检索、跨窗口 handoff、画像、自我入口、照顾备忘、Darkroom、Dream，以及 OpenAI / Anthropic 兼容 Gateway。
+本仓库基于 [P0luz/Ombre-Brain](https://github.com/P0luz/Ombre-Brain) 二次开发。当前以可追溯的场景/事实真源为核心，保留旧情绪坐标字段仅作数据兼容，不再用它们重排普通召回或改变衰减；并加入了保守召回、图关系、原文检索、跨窗口 handoff、自我入口、照顾备忘、Darkroom、Dream，以及 OpenAI / Anthropic 兼容 Gateway。
 
 > 这不是原版 Ombre-Brain 的无改动镜像。请使用本仓库源码部署；旧 Docker 镜像和历史 compose 文件不包含完整 fork 能力。
 
 ## 设计目标
 
 - **记得少一点，也不要记错。** 没有可靠证据时允许不召回。
-- **原文、记忆和画像分层。** 原始聊天、长期记忆、短期状态、画像结论不互相冒充。
+- **原文、记忆和派生叙事分层。** 原始聊天、长期 Scene、短期状态和叙事卷不互相冒充。
 - **先找到直接证据，再做关联。** 图扩散不能凭空制造命中。
 - **新窗口恢复连续性，不做全库倾倒。** handoff 只携带紧凑的自我、关系和近期上下文。
 - **数据尽量可读、可改、可迁移。** 长期记忆保存在 Markdown；运行索引保存在独立 state 目录。
@@ -29,10 +29,10 @@ flowchart LR
 
 | 组件 | 作用 | 主要入口 |
 | --- | --- | --- |
-| Ombre Brain | MCP 工具、记忆读写、召回、画像维护、Dashboard | `server.py`；VPS 默认 `:18001`，容器内 / Python 直跑 `:8000` |
+| Ombre Brain | MCP 工具、记忆读写、召回、Diary、Dashboard | `server.py`；VPS 默认 `:18001`，容器内 / Python 直跑 `:8000` |
 | Ombre Gateway | 转发聊天请求，并在请求前注入经过门控的上下文 | `gateway.py`；VPS 默认 `:18002`，容器内 / Python 直跑 `:8010` |
 | Buckets | 可读、可编辑、可同步的长期记忆正文 | `buckets/*.md` |
-| State | embedding、Scene edge、原文、画像、提醒等运行状态 | `state/` |
+| State | embedding、Scene edge、原文、提醒等运行状态 | `state/` |
 
 只需要 MCP 和 Dashboard 时可以单独运行 Brain；需要聊天客户端自动召回与注入时，应同时运行 Brain 和 Gateway。
 
@@ -54,7 +54,7 @@ flowchart LR
 
 `Scene` 已经是可召回的最小记忆对象。一条 Scene 只记录一个可独立召回的核心事件，可以带上理解它所必需的背景、过程与结果，但不并列第二件事。`write_scene` 不给 content 套类型标题；当前 AI 写好的正文就是场景真源，不是脱水摘要，也不会再生成或拆分 moment/索引卡。旧 body / `moment` / `original` / `reflection` 只为历史迁移兼容读取，不参与当前 Scene 召回；旧 `affect_anchor` 也只兼容读取。
 
-并非每轮聊天都应该写桶。重要事件、承诺进展和会影响未来的短期状态才值得写成场景；稳定偏好/边界应从证据场景进入人工审阅的 Portrait，普通闲聊可以只留在原文或窗影里。
+并非每轮聊天都应该写桶。重要事件、承诺进展和会影响未来的短期状态才值得写成场景；稳定偏好与边界保留在有证据的 Scene/Annotation 中，普通闲聊可以只留在原文或窗影里。
 
 ### 3. Scene、Node 与 Edge
 
@@ -77,7 +77,7 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 ### 5. 年轮、whisper 与关系天气
 
 - **年轮 comment**：后来形成的新理解，带时间挂在源 Scene 上。年轮文本可以把查询路由到父 Scene，并随 Scene 附上一条相关年轮；它不能单独显示、扩散或作为 Fact 证据。
-- **whisper**：没有源 bucket 的碎碎念或感受，保存为 `type=feel`；可单独读取，也可作为自我画像的候选证据。
+- **whisper**：没有源 bucket 的碎碎念或感受，保存为 `type=feel`；只作旧数据兼容读取。
 - **日印象 / 关系天气**：描述某天的关系温度，不等同于当天事实清单，默认不作为直接 seed。
 
 ## 写入与维护
@@ -108,7 +108,7 @@ Daily Reflection 可根据当天聊天和近期记忆生成日印象。完整日
 
 日印象不是天气记录，也不是事件日报。它是 AI 对当天关系温度的第一人称小结：今天靠近还是疏远、轻快还是疲惫、哪些互动留下了余温。它可参考当天普通记忆、聊天原文和少量 Persona 事件；有直接材料时，不应让 Persona 的数字状态代替真实对话。
 
-日印象保存为 `relationship_weather + daily_impression` 的 feel bucket，可供 Dashboard、画像维护和日期 trace 参考。它默认不能作为普通主题的 direct seed，也不应因为提到某个词就召回一件无关旧事。周印象默认关闭。
+日印象保存为 `relationship_weather + daily_impression` 的 feel bucket，可供 Dashboard 和日期 trace 参考。它默认不能作为普通主题的 direct seed，也不应因为提到某个词就召回一件无关旧事。周印象默认关闭。
 
 #### Dream
 
@@ -127,7 +127,7 @@ Dream worker 在后台从近期记忆关系中生成一条潜伏梦。梦保留�
 - `self_anchor` 是 AI 自我连续性的只读核心，不参与普通召回竞争。
 - `self_anchor.entry_bucket_id` 指定 handoff 使用的自我总入口；留空时选择排名最高的 self anchor。
 
-原始 self anchor 不由后台画像模型改写。
+原始 self anchor 不由后台模型改写。
 
 ### Favorite Memory：令 AI 印象深刻的记忆
 
@@ -135,7 +135,7 @@ Favorite Memory 表示一段对 AI 留下明显主观影响、并能说明原因
 
 只有标签不够。对这段经历为什么重要、为什么喜欢，必须自然长在同一段 Scene 叙事里；新写入不再另设 `reflection` 或 `favorite_reason` section。Gateway 不会默认隔几轮自动塞入 favorite：`favorite_memory_interval_rounds` 默认是 `0`。用户明确询问“你最喜欢哪段记忆”“令你印象深刻的记忆”“我们之间重要的记忆”“哪一刻最重要”，或客户端显式请求 favorite 时，Gateway 才会在独立预算内最多选择少量有场景依据的记忆；普通主题召回仍需满足当前 query 的证据门控。
 
-## Handoff、画像与自我入口
+## Handoff 与自我入口
 
 没有平台自动连续性时，新窗口应调用：
 
@@ -148,15 +148,15 @@ Window Shadow 是相邻窗口的一次性连续性来源，不是每轮注入，
 1. **自我**：只读的第一人称 self anchor 核心。
 2. **Flowing Self**：最近窗影第一、二层的原文投影，不经二次生成。
 3. **Recent Relationship**：最近窗影第三、四层的原文投影，不经二次生成。
-4. **Current Focus / Recent Continuity**：旧状态里的近期事项，迁移完成前暂作兼容。
+4. **原文救生**：最新窗影缺少连续性正文时，读取上一窗口的原文尾部。
 5. **照顾备忘**：已经到期、仍有效的照顾事项或上个窗口留给下个自己的行动话语。
 6. **Optional Anchors**：极少量长期锚点。
 
 `profile_fact` 不直接倾倒进 handoff；它只在显式事实查询中把检索路由到证据 Scene。
 
-`state/portrait_state.json` 与旧画像维护接口暂时保留给 Dashboard、Current Focus 和 Recent Continuity 兼容；User/Persona/Relationship Portrait 已退出 handoff。后续确认窗影链能够稳定续接后，再删除无调用的画像生成与吸收状态。
+画像正文已按作者选择归档为 Diary，不再是独立记忆对象。旧 `state/portrait_state.json` 只作为历史文件留在磁盘；运行时不读取、不更新，也不提供画像 MCP 或 Dashboard 维护入口。
 
-自我入口使用第一人称。“现在的我”可从选定 self anchor 与符合身份条件的 whisper 中更新；原始自我核心始终保持只读。旧的独立 `AI Self Portrait` 和 Gateway 每轮 `Portrait Memory` 已退休，兼容配置名可能仍存在，但运行时不会重新开启该旧注入。
+自我入口继续使用第一人称只读 self anchor；它不由后台模型生成或改写。
 
 ### 照顾备忘不是长期记忆桶
 
@@ -173,7 +173,7 @@ Gateway 支持：
 - 模型列表：`GET /v1/models`
 - 注入调试：`GET /api/debug/injections`
 
-动态注入以低噪声为原则，可能包含 Recent Context、Recalled Memory、Diffused Memory、关系天气或梦境；是否出现取决于查询类型、可靠性、冷却和预算。画像与自我入口只在 handoff 恢复，不在普通每轮重复注入。
+动态注入以低噪声为原则，可能包含 Recent Context、Recalled Memory、Diffused Memory、关系天气或梦境；是否出现取决于查询类型、可靠性、冷却和预算。自我入口只在 handoff 恢复，不在普通每轮重复注入。
 
 `X-Ombre-Session-Id` 用来隔离会话短态和召回冷却。相同值共享同一会话状态；它不是 OpenAI 标准字段。为不同聊天窗口使用稳定、明确的名称即可，不要照抄他人的生产 session id。
 
@@ -303,12 +303,12 @@ python gateway.py
 | --- | --- |
 | `identity` | AI 名字、用户名字和别名 |
 | `buckets_dir` / `state_dir` | 长期正文与运行状态的位置 |
-| `dehydration` | 总结、打标和画像维护使用的模型 |
+| `dehydration` | 总结与旧兼容打标使用的模型 |
 | `embedding` | 语义候选生成；可接任意兼容 embedding API |
 | `reranker` | 可选重排；资源不足或延迟敏感时可关闭 |
 | `gateway.upstreams` | 聊天模型上游和模型路由 |
 | `memory_diffusion` | 图召回、扩散和门控参数 |
-| `reflection` / `portrait` | 日总结与画像维护策略 |
+| `reflection` | 日总结与旧关系天气策略 |
 | `raw_events` | 原文存储和检索配置 |
 | `word_map` / `dream` | 默认可关闭的派生能力 |
 
@@ -363,7 +363,7 @@ http://your-host:18001/dashboard
 
 Python 直跑或直接访问容器内部服务时使用 `http://127.0.0.1:8000/dashboard`。
 
-Dashboard 可查看和编辑 bucket、画像、日印象、记忆图、Darkroom、提醒与调试状态。生产环境请设置 `OMBRE_DASHBOARD_PASSWORD` 并通过 HTTPS 暴露。
+Dashboard 可查看和编辑 bucket、日印象、记忆图、Darkroom、提醒与调试状态。生产环境请设置 `OMBRE_DASHBOARD_PASSWORD` 并通过 HTTPS 暴露。
 
 ### 原文写入与检索 API
 
@@ -467,14 +467,13 @@ Codex 接线时注意：
 | `narrative_revision_inbox` | 读取待审核的叙事卷修订线索 |
 | `review_narrative_revision` | 保存、忽略或重开一条叙事修订线索 |
 | `publish_narrative` | 发布或修订有 Scene 来源账的 Narrative Roll |
-| `publish_portrait` | 带 revision 与证据发布 Portrait |
 | `read_diary` | 按 ID、日期、标题或日期+标题读取日记 |
 | `write_diary` | 原样写日记；带 `unlock_at` 时写暗房日记 |
 | `revise_diary` | 修改日记并保留上一版 |
 | `delete_diary` | 确认后软删除一篇日记 |
 | `comment_diary` | 追加你的日记评论 |
 
-MCP 只注册以上十七个动作。旧桶格式、读取投影和 Dashboard/internal HTTP 兼容继续保留，但旧 MCP 工具名与旧 Diary MCP 工具不再公布或接受调用。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
+MCP 只注册以上十六个动作。画像已归档为 Diary；旧画像工具不再公布或接受调用。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
 
 ## 运维与验证
 
@@ -509,10 +508,10 @@ Python 直跑时对应端口为 `8000/8010`。
 - 动态召回仍会增加首 token 前的准备时间，瓶颈可能来自远程 embedding / reranker、首次冷启动和 Scene edge 扩散，而不只来自上游聊天模型。当前版本会在启动时预热 query plan、bucket、词法 profile 与 relevance facets，并缓存评分输入、过滤陈旧 Scene edge，减少重复计算与无效扩散；远程模型的网络往返仍是剩余的主要可变延迟。可通过 injection debug 中的 `prepare_timing_debug.steps_ms` 区分 `semantic_candidates`、rerank、diffusion 等阶段，不要只凭总耗时猜瓶颈。
 - Prompt Cache 缓存的是发送给最终 upstream 的稳定前缀，不缓存 Ombre 的动态召回结果；它可以降低重复前缀的费用或上游处理时间，但不能消除每轮 embedding、门控和扩散成本。
 - reranker、query planner、Word Map 和图扩散都是辅助层，不能越过 admission gate。
-- `profile_fact` 是带证据事实；Portrait 是后台模型对多条材料的稳定理解，两者不应直接等同。
+- 旧 `profile_fact` 只作带证据事实的兼容读取，不再自动生成或写入。
 - Persona State 是短期状态，不是长期身份真源。
 - Dream、relationship weather、comment 和 affect anchor 不能单独证明当前话题。
-- `gateway.portrait_memory_*` 为旧兼容字段；旧的每轮 Portrait Memory 已退休。
+- 旧画像正文已归档为 Diary；Gateway 不再包含 Portrait Memory 路径。
 - 派生索引损坏时应从 Markdown / raw source 重建，不要把 SQLite 当唯一真源。
 
 更细的行为边界见 [`docs/memory-layer-contract.md`](docs/memory-layer-contract.md)，部署补充见 [`docs/deploy-zeabur.md`](docs/deploy-zeabur.md)。

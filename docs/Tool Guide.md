@@ -1,6 +1,6 @@
 # External Platform Tool Guide
 
-这份文档用于把 Ombre-Brain 接给聊天平台。MCP 只注册十七个日常动作；不要猜测或调用历史工具名。
+这份文档用于把 Ombre-Brain 接给聊天平台。MCP 只注册十六个日常动作；不要猜测或调用历史工具名。
 
 ## 当前 MCP 工具
 
@@ -15,7 +15,6 @@
 - `narrative_revision_inbox`：读取待审核的叙事卷修订线索。
 - `review_narrative_revision`：保存、忽略或重开一条叙事修订线索。
 - `publish_narrative`：发布或修订有 Scene 来源账的 Narrative Roll。
-- `publish_portrait`：带 optimistic revision 与可验证 evidence 发布 Portrait。
 - `read_diary`：按 ID、日期、标题或日期+标题统一读取日记。
 - `write_diary`：原样写日记；带 `unlock_at` 时写暗房日记。
 - `revise_diary`：修改日记并保存上一版快照。
@@ -35,7 +34,6 @@
 - 新窗口没有自动连续性时，用 read_memory(memory_type="shadow", memory_id="latest")；最新窗影本身就是交接。
 - 需要完整对象时，用 read_memory(memory_id=..., memory_type="scene|shadow|narrative")。
 - memory_type 与 memory_id 都必填；精确读取不做语义搜索或关联扩展，也不从 ID 前缀猜类型。
-- Portrait 也走统一入口：read_memory(memory_type="portrait", memory_id="user|relationship|all")。
 - 精确日期没有证据时，不拿相邻日期的语义结果冒充当天内容。
 - Window Shadow 不进入普通 recall；Narrative Roll 是有来源的派生叙事，精确事实继续下钻 Scene。
 
@@ -82,12 +80,10 @@
 - query_cues 属于该卷自己的审阅后路由数据，不建立全局主题词表。
 
 画像：
-- 先 read_memory(memory_type="portrait", memory_id="user|relationship")，再 publish_portrait。
-- 发布必须传 expected_revision 和可验证 evidence。
-- 模型生成的候选不是已发布画像；不得自动发布。
+- 画像原文已经归档为带 `portrait_archive` 标签的 Diary，不再是独立 MCP 对象。
 
 不要：
 - 不要把闲聊、临时测试、运维流水或工具 debug 默认写进长期记忆。
-- 不要把 Portrait、Narrative Roll 或 Window Shadow 塞进普通 Scene candidate 池。
+- 不要把 Narrative Roll、Window Shadow 或画像归档日记塞进普通 Scene candidate 池。
 - 不要调用文档外的历史工具名；它们已经从 MCP 注册表删除。
 ```

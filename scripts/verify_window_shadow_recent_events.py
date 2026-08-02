@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,19 +19,6 @@ class _EmptyBuckets:
     async def list_all(self, include_archive: bool = False) -> list[dict]:
         _ = include_archive
         return []
-
-
-class _PortraitFallback:
-    state_path = ""
-
-    @staticmethod
-    def build_handoff_sections(max_recent_items: int = 3) -> dict:
-        _ = max_recent_items
-        return {
-            "current_focus": "- 后台生成的当前关注不应盖过作者事件。",
-            "recent_continuity": "- 2026-07-24｜这是后台生成的最近事件 fallback。",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
 
 
 async def main() -> None:
@@ -89,7 +75,12 @@ async def main() -> None:
 
         server.window_shadow_store = store
         server.bucket_mgr = _EmptyBuckets()
-        server.portrait_engine = _PortraitFallback()
+        server._emergency_raw_handoff_projection = lambda: {
+            "text": "- 2026-07-24｜这是原文保险箱里的最近事件 fallback。",
+            "session_id": "raw-fallback-window",
+            "source": "raw_events",
+            "inferred": True,
+        }
         server._format_handoff_care_memos = lambda **kwargs: ""
 
         authored_handoff = await server._build_handoff_breath(max_tokens=1800, debug=True)
@@ -97,8 +88,7 @@ async def main() -> None:
         assert "Bridge 管醒来，窗影管沉淀" in authored_handoff
         assert "=== Things That Still Need Care ===" in authored_handoff
         assert "旧窗影的 handoff note 仍要兼容读取" in authored_handoff
-        assert "后台生成的最近事件 fallback" not in authored_handoff
-        assert "后台生成的当前关注" not in authored_handoff
+        assert "原文保险箱里的最近事件 fallback" not in authored_handoff
         assert server._last_handoff_status["route"] == "window_shadow_recent_events"
         assert (
             server._last_handoff_status["window_shadow_continuity_section"]
@@ -124,7 +114,7 @@ async def main() -> None:
         legacy_handoff = await server._build_handoff_breath(max_tokens=1800, debug=True)
         assert "=== Legacy Previous-Window Note ===" in legacy_handoff
         assert legacy_note in legacy_handoff
-        assert "后台生成的最近事件 fallback" not in legacy_handoff
+        assert "原文保险箱里的最近事件 fallback" not in legacy_handoff
         assert server._last_handoff_status["route"] == "window_shadow_legacy_handoff"
 
         fallback_shadow = (
@@ -141,9 +131,9 @@ async def main() -> None:
         )
         assert created is True
         generated_handoff = await server._build_handoff_breath(max_tokens=1800, debug=True)
-        assert "=== Generated Recent Continuity Fallback ===" in generated_handoff
-        assert "后台生成的最近事件 fallback" in generated_handoff
-        assert server._last_handoff_status["route"] == "recent_continuity"
+        assert "=== Emergency Recent Events ===" in generated_handoff
+        assert "原文保险箱里的最近事件 fallback" in generated_handoff
+        assert server._last_handoff_status["route"] == "raw_events"
 
     print("Window Shadow recent-events handoff contract verified")
 

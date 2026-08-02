@@ -13,7 +13,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from portrait_engine import DailyPortraitMaintainer
 from reflection_engine import ReflectionEngine
 
 
@@ -97,68 +96,8 @@ async def _verify_reflection_skips() -> None:
         assert not hasattr(engine, "_fallback_reflection")
 
 
-async def _verify_portrait_skips() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        state_path = Path(temp_dir) / "portrait_state.json"
-        engine = DailyPortraitMaintainer(
-            {
-                "portrait": {
-                    "enabled": True,
-                    "daily_enabled": True,
-                    "auto_initial_enabled": True,
-                    "state_path": str(state_path),
-                }
-            }
-        )
-
-        async def reconcile(self, _bucket_mgr):
-            return {"status": "ok"}
-
-        async def materials(self, *_args, **_kwargs):
-            return {
-                "date": "2026-07-31",
-                "initial": True,
-                "buckets": [{"bucket_id": "memory-1", "name": "旧记忆标题"}],
-                "daily_bucket_count": 1,
-                "evidence_scope_limits": {},
-                "existing_bucket_ids": ["memory-1"],
-                "persona_stable_evidence": {},
-                "persona_events": [],
-                "window_shadows": [],
-                "previous_portrait": self._portrait_snapshot(self._empty_state()),
-            }
-
-        async def generator_error(self, *_args, **_kwargs):
-            raise RuntimeError("simulated model failure")
-
-        engine.reconcile_evidence = MethodType(reconcile, engine)
-        engine._daily_materials = MethodType(materials, engine)
-        engine._api_patch = MethodType(generator_error, engine)
-        engine.client = object()
-        result = await engine.maintain_daily(
-            _BucketManager(),
-            force=True,
-            now=datetime.fromisoformat("2026-07-31T23:00:00+08:00"),
-        )
-        assert result["status"] == "skipped", result
-        assert result["reason"] == "generator_error", result
-        assert not state_path.exists(), "failed portrait generation wrote state"
-
-        engine.client = None
-        result = await engine.maintain_daily(
-            _BucketManager(),
-            force=True,
-            now=datetime.fromisoformat("2026-07-31T23:00:00+08:00"),
-        )
-        assert result["status"] == "skipped", result
-        assert result["reason"] == "generator_unavailable", result
-        assert not state_path.exists(), "unavailable portrait generator wrote state"
-        assert not hasattr(engine, "_fallback_patch")
-
-
 async def main() -> None:
     await _verify_reflection_skips()
-    await _verify_portrait_skips()
     print("generation failure skip checks passed")
 
 

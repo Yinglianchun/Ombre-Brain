@@ -16,7 +16,7 @@ from narrative_rolls import NarrativeRollStore
 
 async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
-    assert len(tools) == 17
+    assert len(tools) == 16
     assert "narrative_revision_inbox" in tools
     assert "review_narrative_revision" in tools
 
@@ -67,7 +67,6 @@ async def main() -> None:
         "scene",
         "shadow",
         "narrative",
-        "portrait",
     ]
     assert set(read_schema["required"]) == {"memory_type", "memory_id"}
     recall_schema = tools["recall_memory"].inputSchema
@@ -79,6 +78,7 @@ async def main() -> None:
         "write_memory",
         "edit_memory",
         "read_portrait",
+        "publish_portrait",
     ):
         assert retired_name not in tools
 

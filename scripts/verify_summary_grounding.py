@@ -13,7 +13,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from portrait_engine import DailyPortraitMaintainer
 from reflection_engine import ReflectionEngine
 
 
@@ -134,68 +133,11 @@ async def _verify_source_ids_are_filtered(root: Path) -> None:
     assert item["source_event_ids"] == []
 
 
-def _verify_relationship_outcome_guard(root: Path) -> None:
-    engine = DailyPortraitMaintainer(
-        {
-            "state_dir": str(root / "portrait-state"),
-            "portrait": {"enabled": False},
-        }
-    )
-    materials = {
-        "buckets": [
-            {
-                "bucket_id": "reflection_daily_2026-07-17",
-                "source": "reflection",
-                "source_excerpt": "感觉我们在合作中越来越默契。",
-                "source_turn_ids": [17],
-                "source_event_ids": [],
-                "allowed_scopes": ["relationship"],
-            }
-        ],
-        "existing_bucket_ids": ["reflection_daily_2026-07-17"],
-        "previous_portrait": {},
-        "persona_events": [],
-        "window_shadows": [],
-    }
-    rejected_patch, rejected = engine._normalize_patch(
-        {
-            "add_recent": [
-                {
-                    "scope": "relationship",
-                    "text": "她接受了限制，合作顺畅，信任感增强。",
-                    "evidence": [{"bucket_id": "reflection_daily_2026-07-17"}],
-                    "source_turn_ids": [17],
-                }
-            ]
-        },
-        materials,
-    )
-    assert rejected_patch["add_recent"] == []
-    assert rejected[0]["reason"] == "unsupported_relationship_outcome"
-
-    grounded_patch, grounded_rejected = engine._normalize_patch(
-        {
-            "add_recent": [
-                {
-                    "scope": "relationship",
-                    "text": "她在听到限制说明后继续追问未展示的思考链。",
-                    "evidence": [{"bucket_id": "reflection_daily_2026-07-17"}],
-                    "source_turn_ids": [17, 999],
-                }
-            ]
-        },
-        materials,
-    )
-    assert grounded_rejected == []
-    assert grounded_patch["add_recent"][0]["source_turn_ids"] == [17]
-
-
 async def main() -> None:
     with tempfile.TemporaryDirectory(prefix="ombre-summary-grounding-") as tmp:
         root = Path(tmp)
         await _verify_failed_generation_is_skipped_and_audited(root)
         await _verify_source_ids_are_filtered(root)
-        _verify_relationship_outcome_guard(root)
 
     print("Summary grounding verified")
 

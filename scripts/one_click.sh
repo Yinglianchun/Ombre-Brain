@@ -344,7 +344,7 @@ choose_feature_scope() {
   local choice
   line
   printf '选择功能范围\n'
-  printf '1. 只用 Ombre MCP 部分（MCP 工具 + Dashboard + 画像/Darkroom，不启动 Gateway）\n'
+  printf '1. 只用 Ombre MCP 部分（MCP 工具 + Dashboard + Darkroom，不启动 Gateway）\n'
   printf '2. 部署全部（MCP + Dashboard + Gateway 自动注入）\n'
   read -r -p '输入（1-2）：' choice
   case "${choice}" in
@@ -519,10 +519,6 @@ gateway:
   recalled_memory_budget: 400
   direct_render_mode: "auto"
   retrieval_mode: "bucket"
-  portrait_memory_enabled: false
-  portrait_memory_budget: 360
-  portrait_memory_max_sources: 8
-  portrait_memory_include_anchors: false
   memory_detail_recall_enabled: false
   memory_detail_recall_max_ids: 3
   memory_detail_recall_budget: 1200
@@ -577,30 +573,6 @@ persona:
   thinking_mode: ""
   temperature: 0.1
   max_tokens: 500
-
-portrait:
-  enabled: true
-  auto_enabled: true
-  auto_initial_enabled: false
-  daily_enabled: true
-  timezone: "Asia/Shanghai"
-  daily_hour: 4
-  check_interval_minutes: 60
-  state_path: ""
-  base_url: ""
-  model: ""
-  thinking_mode: ""
-  temperature: 0.1
-  max_tokens: 3200
-  json_response_format: true
-  material_limit: 18
-  first_run_material_limit: 160
-  source_excerpt_chars: 900
-  recent_continuity_days: 3
-  persona_events_limit: 24
-  recent_buffer_max: 24
-  staging_pool_max: 24
-  candidate_max: 40
 
 reflection:
   enabled: true
@@ -836,7 +808,7 @@ print_client_guide() {
     printf '仅 MCP 不提供 Gateway Just Now 注入；刚刚/上一句优先看客户端当前对话上下文，不要默认 breath(query="刚刚...")。\n'
   fi
   printf '自我锚点用 breath(domain="self_anchor")，分段查用 breath(domain="self_anchor", query="关键词")。\n'
-  printf '画像在 Dashboard 的 Persona/画像面板手动生成/刷新；profile_fact 需要证据 bucket/moment 后再确认。\n'
+  printf '画像已归档为 Diary，不再生成或注入；profile_fact 需要证据 bucket/moment 后再确认。\n'
   printf '暗房默认读写同一个 active 房间草稿，new_room=true 才新开；darkroom_view 只有 completeness>=1 且解锁后才回显房间 revisions。\n'
   printf '完整工具说明见 docs/Tool Guide.md；Dashboard 桶列表可批量选择并删除普通记忆桶。\n'
 
@@ -911,12 +883,6 @@ EOF
 EOF
   fi
   cat >> connection_guide.txt <<EOF
-
-  Portrait and Profile facts:
-    Use Dashboard -> Persona/Portrait panel to generate or refresh portrait_state.json.
-    Portrait state may hold profile_fact_candidates; it does not write profile_fact automatically.
-    Use profile_fact(...) only with evidence bucket or evidence moment.
-    Gateway portrait memory reads profile_fact by default and does not include ordinary anchors unless explicitly enabled.
 
   Darkroom:
     Use darkroom_continue_context(limit=3) only to read the current active room draft, continue private reflection, and judge completeness.

@@ -116,7 +116,7 @@ anchor:
   min_age_hours: 24
 
 # --- Self anchor / AI self entry ---
-# entry_bucket_id selects the total self entry used by handoff and portrait.
+# entry_bucket_id selects the total self entry used by handoff.
 # Empty = fall back to the highest-ranked self_anchor bucket.
 self_anchor:
   entry_bucket_id: ""
@@ -287,7 +287,7 @@ gateway:
   port: 8010
   default_session_id: "main"      # stable transport alias; Gateway rotates internal window epochs after close_window
   handoff_breath_url: "http://127.0.0.1:8000/breath-hook"  # private; send Bearer from OMBRE_BREATH_HOOK_TOKEN or OMBRE_GATEWAY_TOKEN
-  handoff_max_tokens: 1400         # reviewed portraits + exact 250–400-char handoff note + small unfinished items
+  handoff_max_tokens: 1400         # latest Window Shadow + raw rescue + small unfinished items
   handoff_timeout_seconds: 3
   upstream_base_url: "https://api.openai.com/v1"
   upstream_default_model: "gpt-4.1-mini"
@@ -381,10 +381,6 @@ gateway:
   retrieval_mode: bucket      # compatibility key; runtime is permanently whole-Scene recall
   operit_context_rewrite_enabled: false # Operit-only text turn cleanup: split stable/activity attachment context before forwarding
   bucket_list_cache_ttl_seconds: 300 # cache active bucket list inside Gateway; 0 disables
-  portrait_memory_enabled: false # retired compatibility key; Gateway ignores raw profile_fact/anchor injection
-  portrait_memory_budget: 360
-  portrait_memory_max_sources: 8
-  portrait_memory_include_anchors: false # true optionally adds ordinary anchors; never includes pinned/protected/self_anchor
   semantic_rescue_enabled: false # optional last gate for semantic-only candidates; validates an exact evidence span
   semantic_rescue_candidate_limit: 3 # one batched cheap-model call, top 1-3 semantic candidates
   semantic_rescue_max_tokens: 220
@@ -594,10 +590,6 @@ reflection:
   daily_hour: 4                   # legacy rollback only (OMBRE_LEGACY_MEMORY_WRITES=1)
   daily_min_memory_items: 5        # legacy rollback only
   daily_conversation_turn_limit: 12 # legacy rollback only
-  daily_activity_summary_enabled: true      # writes one "what happened today" item into portrait recent_timeline
-  daily_activity_summary_turn_limit: 0      # 0 = use all raw_events for that date
-  daily_activity_summary_max_tokens: 320
-  # daily_activity_summary_diagnostics_path: "" # default: state/daily_activity_summary_runs.jsonl
   persona_events_limit: 12         # selected and deduped; persona events supplement daily weather only
   persona_events_scan_limit: 80
   weekly_enabled: false            # retired legacy weekly impression writes
@@ -672,41 +664,6 @@ scene_linker:
       token_parameter: "max_tokens"
       max_tokens: 1100
       temperature: 0.0
-
-# --- Daily Portrait Maintainer / 每日画像维护 ---
-# Writes only an inspectable state/portrait_state.json. It does not edit
-# pinned/protected/Core Memory. Stable portrait changes remain authored review;
-# retired Profile Fact does not generate new candidates here.
-portrait:
-  enabled: true
-  auto_enabled: true
-  auto_initial_enabled: false       # first portrait state requires manual generation
-  daily_enabled: true
-  timezone: "Asia/Shanghai"
-  daily_hour: 4
-  check_interval_minutes: 60
-  state_path: ""                    # default = state/portrait_state.json
-  base_url: ""                      # empty = reflection/persona/dehydration base_url
-  model: ""                         # empty = reflection/persona/dehydration model
-  # api_key: ""                     # OMBRE_PORTRAIT_API_KEY overrides
-  thinking_mode: ""
-  temperature: 0.1
-  max_tokens: 3200
-  json_response_format: true
-  material_limit: 18
-  first_run_material_limit: 160
-  user_rewrite_evidence_delta: 10 # regenerate User Portrait after 10 new visible evidence items
-  manual_suppress_days: 14        # keep manually deleted evidence/recent items from immediately returning
-  source_excerpt_chars: 900
-  recent_continuity_days: 3
-  persona_events_limit: 24
-  window_shadow_limit: 4            # read the latest sequential window self-narratives for persona/relationship only
-  window_shadow_chars: 2400         # max characters from each shadow; the full original remains in its own SQLite store
-  recent_buffer_max: 24
-  staging_pool_max: 24
-  candidate_max: 40
-  # Env vars:
-  #   OMBRE_PORTRAIT_API_KEY
 
 # --- Narrative Rolls / 叙事卷 ---
 # A manually published typed projection layer. Each revision preserves the exact

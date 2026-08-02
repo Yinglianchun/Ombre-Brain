@@ -24,9 +24,6 @@
 #       narrative_revision_inbox / review_narrative_revision / publish_narrative
 #         Review sourced revision hints, then manually publish exact narrative revisions.
 #         审核有来源的修订线索，再亲自发布逐字叙事修订。
-#       read_memory(portrait) / publish_portrait
-#         Review and publish portraits.
-#         审阅并发布画像。
 #       read_diary / write_diary / revise_diary / delete_diary / comment_diary
 #         Read and author Diary or Darkroom entries with revision, soft
 #         deletion, time-lock, and comment boundaries.
@@ -156,7 +153,6 @@ from narrative_rolls import NarrativeRollStore
 from narrative_revision_inbox import NarrativeRevisionInbox
 from persona_engine import PersonaStateEngine
 from persona_event_selection import select_persona_events
-from portrait_engine import DailyPortraitMaintainer
 from raw_events import RawEventStore
 from reflection_engine import ReflectionEngine
 from recall_diagnostics import RecallDiagnosticsLogger
@@ -201,9 +197,6 @@ setup_logging(config.get("log_level", "INFO"))
 logger = logging.getLogger("ombre_brain")
 
 MEMORY_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-HANDOFF_RECENT_CONTINUITY_MAX_AGE_HOURS = 72
-
-
 class CloseWindowShadowPatchInput(TypedDict):
     """Explicit section-body replacements for one stored rejected Shadow draft."""
 
@@ -246,7 +239,6 @@ reflection_engine = ReflectionEngine(config)           # Daily/weekly reflection
 diary_source_importer = DiarySourceImporter()          # Lossless diary evidence snapshots / 无损日记证据快照
 metadata_enricher = reflection_engine                  # Proposal-only metadata worker / 只提案、不改正文或权重
 scene_linker = SceneLinker(config)                     # Async Scene-edge proposals / 异步 Scene 边提案
-portrait_engine = DailyPortraitMaintainer(config, window_shadow_store=window_shadow_store) # Daily portrait state / 每日画像状态
 dream_engine = DreamEngine(config)                     # Night dream worker / 夜梦
 identity_semantic_store = IdentitySemanticStore(config) # Private relationship alias index / 私有关系语义索引
 word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
@@ -1846,85 +1838,6 @@ def _emergency_raw_handoff_projection(
     }
 
 
-def _parse_handoff_state_time(value: object) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _recent_continuity_fallback_status(
-    portrait_sections: dict,
-    *,
-    now: datetime | None = None,
-    max_age_hours: int = HANDOFF_RECENT_CONTINUITY_MAX_AGE_HOURS,
-) -> dict:
-    """Return a fresh nightly continuity fallback without rewriting its text."""
-    sections = portrait_sections if isinstance(portrait_sections, dict) else {}
-    text = str(sections.get("recent_continuity") or "").strip()
-    updated_at = str(sections.get("updated_at") or "").strip()
-    last_run_date = str(sections.get("last_run_date") or "").strip()
-    timestamp = None
-    timestamp_source = ""
-    if last_run_date:
-        try:
-            # A date-only portrait run covers that local day. Treat the next
-            # local midnight as its conservative completion timestamp.
-            timestamp = (
-                datetime.fromisoformat(last_run_date)
-                .replace(tzinfo=LOCAL_TZ)
-                .astimezone(timezone.utc)
-                + timedelta(days=1)
-            )
-            timestamp_source = "last_run_date"
-        except ValueError:
-            timestamp = None
-    if timestamp is None:
-        timestamp = _parse_handoff_state_time(updated_at)
-        timestamp_source = "updated_at" if timestamp else ""
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    current = current.astimezone(timezone.utc)
-    age_hours = (
-        max(0.0, (current - timestamp).total_seconds() / 3600.0)
-        if timestamp is not None
-        else None
-    )
-    available = bool(text)
-    fresh = bool(
-        available
-        and timestamp is not None
-        and age_hours is not None
-        and age_hours <= max(1, int(max_age_hours or 0))
-    )
-    if not available:
-        reason = "empty"
-    elif timestamp is None:
-        reason = "missing_timestamp"
-    elif not fresh:
-        reason = "stale"
-    else:
-        reason = "fresh"
-    return {
-        "text": text if fresh else "",
-        "available": available,
-        "fresh": fresh,
-        "reason": reason,
-        "updated_at": updated_at,
-        "last_run_date": last_run_date,
-        "timestamp_source": timestamp_source,
-        "age_hours": round(age_hours, 2) if age_hours is not None else None,
-        "max_age_hours": max(1, int(max_age_hours or 0)),
-    }
-
-
 def _window_shadow_scene_source_valid(bucket: dict) -> bool:
     """Verify a current or deliberately revised Scene against its original Shadow text."""
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
@@ -2100,13 +2013,6 @@ async def _build_handoff_breath(
         logger.warning("Handoff breath bucket list failed / handoff 列桶失败: %s", e)
         all_buckets = []
 
-    try:
-        portrait_sections = portrait_engine.build_handoff_sections(max_recent_items=3)
-    except Exception as e:
-        logger.warning("Handoff portrait state failed / handoff portrait 状态失败: %s", e)
-        portrait_sections = {}
-
-    recent_continuity_status = _recent_continuity_fallback_status(portrait_sections)
     self_anchor = _format_handoff_self_anchor(all_buckets, limit=1)
     anchors = _format_handoff_anchors(all_buckets, limit=2)
     care_memos = _format_handoff_care_memos(limit=3)
@@ -2135,19 +2041,9 @@ async def _build_handoff_breath(
         if shadow_projection
         else {"text": "", "scene_id": "", "injected": False, "reason": "no_window_shadow"}
     )
-    recent_continuity = (
-        ""
-        if shadow_continuity
-        else str(recent_continuity_status.get("text") or "").strip()
-    )
-    current_focus = (
-        ""
-        if shadow_continuity
-        else str(portrait_sections.get("current_focus") or "").strip()
-    )
     emergency_raw = (
         {}
-        if shadow_continuity or recent_continuity
+        if shadow_continuity
         else _emergency_raw_handoff_projection()
     )
     handoff_route = (
@@ -2155,8 +2051,6 @@ async def _build_handoff_breath(
         if recent_events
         else "window_shadow_legacy_handoff"
         if legacy_handoff_note
-        else "recent_continuity"
-        if recent_continuity
         else "raw_events"
         if emergency_raw
         else "none"
@@ -2199,12 +2093,6 @@ async def _build_handoff_breath(
             "continued_scene_injected": bool(continued_scene.get("injected")),
             "continued_scene_id": str(continued_scene.get("scene_id") or ""),
             "continued_scene_reason": str(continued_scene.get("reason") or ""),
-            "recent_continuity_fresh": bool(recent_continuity_status.get("fresh")),
-            "recent_continuity_reason": str(recent_continuity_status.get("reason") or ""),
-            "recent_continuity_age_hours": recent_continuity_status.get("age_hours"),
-            "recent_continuity_updated_at": str(
-                recent_continuity_status.get("updated_at") or ""
-            ),
             "emergency_raw_session_id": str(emergency_raw.get("session_id") or ""),
         }
     )
@@ -2226,8 +2114,6 @@ async def _build_handoff_breath(
         # A bare first-turn `继续吧` reads exactly the authored primary Scene.
         # It is deliberately preserved whole and never diffused or summarized.
         ("Continued Scene", str(continued_scene.get("text") or ""), 1200, False, True),
-        ("Generated Current Focus Fallback", current_focus, 90, True),
-        ("Generated Recent Continuity Fallback", recent_continuity, 520, True),
         ("Emergency Recent Events", str(emergency_raw.get("text") or ""), 520, True),
         ("照顾备忘", care_memos, 180, True),
         ("Optional Anchors", anchors, 90, True),
@@ -2241,9 +2127,6 @@ async def _build_handoff_breath(
         sections.append(
             (
                 "Handoff Debug",
-                f"portrait_state_path: {portrait_sections.get('state_path', getattr(portrait_engine, 'state_path', ''))}\n"
-                f"portrait_updated_at: {portrait_sections.get('updated_at', '')}\n"
-                f"portrait_last_run_date: {portrait_sections.get('last_run_date', '')}\n"
                 f"handoff_route: {handoff_route}\n"
                 f"window_shadow_id: {shadow_projection.get('window_id', '')}\n"
                 f"window_shadow_continuity_section: {shadow_continuity_section}\n"
@@ -2262,9 +2145,6 @@ async def _build_handoff_breath(
                 f"continued_scene_injected: {continued_scene.get('injected', False)}\n"
                 f"continued_scene_id: {continued_scene.get('scene_id', '')}\n"
                 f"continued_scene_reason: {continued_scene.get('reason', '')}\n"
-                f"recent_continuity_fresh: {recent_continuity_status.get('fresh', False)}\n"
-                f"recent_continuity_reason: {recent_continuity_status.get('reason', '')}\n"
-                f"recent_continuity_age_hours: {recent_continuity_status.get('age_hours', '')}\n"
                 f"emergency_raw_session_id: {emergency_raw.get('session_id', '')}\n"
                 f"emergency_raw_source: {emergency_raw.get('source', '')}\n"
                 f"emergency_raw_inferred: {emergency_raw.get('inferred', '')}",
@@ -3784,14 +3664,6 @@ async def health_check(request):
                 "api_ready": bool(reflection_engine.api_key),
             },
             "scene_linker": scene_linker.status(),
-            "portrait": {
-                "enabled": portrait_engine.enabled,
-                "auto_enabled": portrait_engine.auto_enabled,
-                "auto_initial_enabled": getattr(portrait_engine, "auto_initial_enabled", False),
-                "model": portrait_engine.model,
-                "api_ready": bool(portrait_engine.api_key),
-                "state_path": portrait_engine.state_path,
-            },
             "diary": diary_store.stats(),
             "mcp_surface": mcp.surface_status(),
             "memory_object_writes": memory_object_write_status(config),
@@ -4041,7 +3913,7 @@ def _clip_text(text: str, max_chars: int) -> str:
 
 
 def _handoff_timezone():
-    for section in ("portrait", "reflection"):
+    for section in ("reflection",):
         value = config.get(section, {}) if isinstance(config.get(section, {}), dict) else {}
         name = str(value.get("timezone") or "").strip()
         if name:
@@ -11152,330 +11024,6 @@ async def reflect(period: str = "daily", force: bool = False) -> dict:
     )
 
 
-async def portrait_maintain(force: bool = False, scope: str = "") -> dict:
-    """整理 Portrait 状态与候选内容。force 强制运行；scope 可限定范围。"""
-    await decay_engine.ensure_started()
-    force_scopes = [str(scope or "").strip()] if str(scope or "").strip() else []
-    return await portrait_engine.maintain_daily(
-        bucket_mgr,
-        persona_engine,
-        force=force,
-        force_scopes=force_scopes,
-    )
-
-
-def _portrait_evidence_input_rows(value: object) -> list[dict]:
-    if isinstance(value, (str, dict)):
-        value = [value]
-    if not isinstance(value, list):
-        return []
-    rows = []
-    for item in value:
-        if isinstance(item, str):
-            clean = item.strip()
-            if clean:
-                rows.append({"bucket_id": clean})
-        elif isinstance(item, dict):
-            rows.append(dict(item))
-    return rows
-
-
-def _portrait_window_evidence(value: str) -> dict | None:
-    key = str(value or "").strip()
-    if not key:
-        return None
-    direct = window_shadow_store.get(key)
-    if direct:
-        return direct
-    return next(
-        (
-            row
-            for row in window_shadow_store.list(limit=200, include_content=True)
-            if str(row.get("session_id") or "").strip() == key
-        ),
-        None,
-    )
-
-
-async def _resolve_portrait_publication_evidence(
-    scope: str,
-    evidence: object,
-) -> tuple[list[dict], list[str], list[dict], list[dict]]:
-    """Validate refs and let User Portrait follow Shadow/Roll refs to Scenes."""
-    normalized: list[dict] = []
-    source_dates: list[str] = []
-    resolved: list[dict] = []
-    errors: list[dict] = []
-    for raw in _portrait_evidence_input_rows(evidence):
-        bucket_id = str(raw.get("bucket_id") or raw.get("id") or "").strip()
-        narrative_id = str(raw.get("narrative_id") or "").strip()
-        window_ref = str(raw.get("window_id") or raw.get("session_id") or "").strip()
-        if bucket_id:
-            bucket = await bucket_mgr.get(bucket_id)
-            if not bucket:
-                errors.append({"ref": bucket_id, "reason": "bucket_not_found"})
-                continue
-            if not _is_canonical_scene_bucket(bucket):
-                errors.append({"ref": bucket_id, "reason": "portrait_evidence_requires_scene"})
-                continue
-            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-            row = {"bucket_id": bucket_id}
-            moment_id = str(raw.get("moment_id") or "").strip()
-            if moment_id:
-                row["moment_id"] = moment_id
-            normalized.append(row)
-            date_key = _bucket_handoff_date(bucket)
-            if date_key:
-                source_dates.append(date_key)
-            resolved.append(
-                {
-                    "type": "scene",
-                    "bucket_id": bucket_id,
-                    "title": str(meta.get("name") or bucket_id),
-                    "date": date_key,
-                    "content": str(bucket.get("content") or ""),
-                }
-            )
-            continue
-
-        if narrative_id:
-            roll = narrative_roll_store.read(narrative_id)
-            if str(roll.get("status") or "") != "ok":
-                errors.append(
-                    {
-                        "ref": narrative_id,
-                        "reason": "narrative_unavailable",
-                        "integrity_status": str(roll.get("integrity_status") or ""),
-                    }
-                )
-                continue
-            normalized.append({"narrative_id": narrative_id})
-            source_dates.extend(
-                str(roll.get(key) or "").strip()
-                for key in ("time_end", "time_start")
-                if str(roll.get(key) or "").strip()
-            )
-            resolved.append(
-                {
-                    "type": "narrative_roll",
-                    "narrative_id": narrative_id,
-                    "title": str(roll.get("title") or narrative_id),
-                    "time_start": str(roll.get("time_start") or ""),
-                    "time_end": str(roll.get("time_end") or ""),
-                    "linked_scene_ids": list(roll.get("linked_scene_ids") or []),
-                    "body": str(roll.get("body") or ""),
-                }
-            )
-            continue
-
-        if window_ref:
-            window = _portrait_window_evidence(window_ref)
-            if not window:
-                errors.append({"ref": window_ref, "reason": "window_shadow_not_found"})
-                continue
-            session_id = str(window.get("session_id") or window.get("window_id") or "").strip()
-            source_date = str(window.get("source_date") or "").strip()
-            if scope == "user":
-                linked_scene_ids = list(window.get("scene_bucket_ids") or [])
-                linked_count = 0
-                for scene_id in linked_scene_ids:
-                    scene = await bucket_mgr.get(str(scene_id or "").strip())
-                    if not scene or not _is_canonical_scene_bucket(scene):
-                        continue
-                    normalized.append({"bucket_id": str(scene_id)})
-                    scene_date = _bucket_handoff_date(scene)
-                    if scene_date:
-                        source_dates.append(scene_date)
-                    scene_meta = (
-                        scene.get("metadata", {})
-                        if isinstance(scene.get("metadata"), dict)
-                        else {}
-                    )
-                    resolved.append(
-                        {
-                            "type": "scene",
-                            "bucket_id": str(scene_id),
-                            "title": str(scene_meta.get("name") or scene_id),
-                            "date": scene_date,
-                            "content": str(scene.get("content") or ""),
-                            "via_window_shadow": str(window.get("window_id") or ""),
-                        }
-                    )
-                    linked_count += 1
-                if linked_count == 0:
-                    errors.append(
-                        {
-                            "ref": window_ref,
-                            "reason": "user_window_shadow_requires_linked_scene",
-                        }
-                    )
-                    continue
-            else:
-                normalized.append({"session_id": session_id, "role": "window_shadow"})
-                if source_date:
-                    source_dates.append(source_date)
-                resolved.append(
-                    {
-                        "type": "window_shadow",
-                        "window_id": str(window.get("window_id") or ""),
-                        "session_id": session_id,
-                        "date": source_date,
-                        "content": str(window.get("content") or ""),
-                        "linked_scene_ids": list(window.get("scene_bucket_ids") or []),
-                    }
-                )
-            continue
-        errors.append({"ref": raw, "reason": "unsupported_evidence_ref"})
-
-    normalized = portrait_engine._normalize_evidence(normalized)
-    source_dates = sorted(
-        {str(value or "").strip() for value in source_dates if str(value or "").strip()},
-        reverse=True,
-    )[:8]
-    return normalized, source_dates, resolved[:8], errors
-
-
-async def _resolved_portrait_evidence(rows: object, *, include_text: bool) -> list[dict]:
-    output = []
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, dict):
-            continue
-        bucket_id = str(row.get("bucket_id") or "").strip()
-        narrative_id = str(row.get("narrative_id") or "").strip()
-        session_id = str(row.get("session_id") or "").strip()
-        if bucket_id:
-            bucket = await bucket_mgr.get(bucket_id)
-            meta = bucket.get("metadata", {}) if isinstance((bucket or {}).get("metadata"), dict) else {}
-            item = {
-                "type": "scene",
-                "bucket_id": bucket_id,
-                "available": bool(bucket),
-                "title": str(meta.get("name") or bucket_id),
-                "date": _bucket_handoff_date(bucket) if bucket else "",
-            }
-            if include_text and bucket:
-                item["content"] = str(bucket.get("content") or "")
-            output.append(item)
-        elif narrative_id:
-            roll = narrative_roll_store.read(narrative_id)
-            item = {
-                "type": "narrative_roll",
-                "narrative_id": narrative_id,
-                "available": str(roll.get("status") or "") == "ok",
-                "title": str(roll.get("title") or narrative_id),
-                "time_start": str(roll.get("time_start") or ""),
-                "time_end": str(roll.get("time_end") or ""),
-                "linked_scene_ids": list(roll.get("linked_scene_ids") or []),
-            }
-            if include_text and item["available"]:
-                item["body"] = str(roll.get("body") or "")
-            output.append(item)
-        elif session_id:
-            window = _portrait_window_evidence(session_id)
-            item = {
-                "type": "window_shadow",
-                "session_id": session_id,
-                "available": bool(window),
-                "window_id": str((window or {}).get("window_id") or ""),
-                "date": str((window or {}).get("source_date") or ""),
-                "linked_scene_ids": list((window or {}).get("scene_bucket_ids") or []),
-            }
-            if include_text and window:
-                item["content"] = str(window.get("content") or "")
-            output.append(item)
-    return output
-
-
-async def read_portrait(scope: str = "", include_evidence_text: bool = True) -> dict:
-    """读取 Portrait。scope 传 user、relationship 或留空读取两者；include_evidence_text 控制是否带证据正文。"""
-    result = portrait_engine.read_reviewed_portrait(scope=scope)
-    if str(result.get("status") or "") != "ok":
-        return result
-    result.pop("publication_boundary", None)
-    for item in (result.get("scopes") or {}).values():
-        if not isinstance(item, dict):
-            continue
-        item["resolved_evidence"] = await _resolved_portrait_evidence(
-            item.get("evidence", []),
-            include_text=bool(include_evidence_text),
-        )
-        for candidate in item.get("candidate_materials", []) or []:
-            if not isinstance(candidate, dict):
-                continue
-            candidate["resolved_evidence"] = await _resolved_portrait_evidence(
-                candidate.get("evidence", []),
-                include_text=bool(include_evidence_text),
-            )
-    return result
-
-
-def _portrait_default_publication_evidence(scope: str) -> tuple[list[dict], str]:
-    """Use the newest candidate's sources, then the current published sources."""
-    reviewed = portrait_engine.read_reviewed_portrait(scope=scope)
-    scope_state = (
-        (reviewed.get("scopes") or {}).get(scope, {})
-        if isinstance(reviewed, dict)
-        else {}
-    )
-    candidates = (
-        scope_state.get("candidate_materials", [])
-        if isinstance(scope_state, dict)
-        else []
-    )
-    for candidate in reversed(candidates if isinstance(candidates, list) else []):
-        if not isinstance(candidate, dict):
-            continue
-        candidate_evidence = _portrait_evidence_input_rows(candidate.get("evidence", []))
-        if candidate_evidence:
-            return candidate_evidence, str(candidate.get("id") or candidate.get("created_at") or "")
-    stable_evidence = _portrait_evidence_input_rows(
-        scope_state.get("evidence", []) if isinstance(scope_state, dict) else []
-    )
-    return stable_evidence, "current_portrait" if stable_evidence else ""
-
-
-async def _publish_portrait_memory(
-    scope: str,
-    text: str,
-    expected_revision: int,
-    evidence: list[dict] | None = None,
-    locked: bool = True,
-) -> dict:
-    """Publish an authored Portrait while preserving its source relationship."""
-    safe_scope = str(scope or "").strip().lower()
-    selected_evidence = _portrait_evidence_input_rows(evidence)
-    inherited_from = ""
-    if evidence is None:
-        selected_evidence, inherited_from = _portrait_default_publication_evidence(safe_scope)
-    normalized, source_dates, resolved, errors = await _resolve_portrait_publication_evidence(
-        safe_scope,
-        selected_evidence,
-    )
-    if errors:
-        return {
-            "status": "invalid",
-            "reason": "invalid_evidence",
-            "scope": safe_scope,
-            "errors": errors,
-            "resolved_evidence": resolved,
-        }
-    result = portrait_engine.publish_reviewed_portrait(
-        scope=safe_scope,
-        text=text,
-        expected_revision=expected_revision,
-        evidence=normalized,
-        source_dates=source_dates,
-        locked=locked,
-    )
-    result["resolved_evidence"] = resolved
-    if inherited_from:
-        result["evidence_inherited_from"] = inherited_from
-    return result
-
-
-publish_portrait_patch = _publish_portrait_memory
-
-
 async def _write_scene_memory(
     content: str,
     *,
@@ -12001,28 +11549,15 @@ async def recall_memory(
 
 @mcp.tool()
 async def read_memory(
-    memory_type: Literal["scene", "shadow", "narrative", "portrait"],
+    memory_type: Literal["scene", "shadow", "narrative"],
     memory_id: str,
     include_content: bool = True,
-    include_evidence_text: bool = True,
 ) -> dict:
-    """按明确类型和 ID 精确读取一个对象，不做语义搜索或关联扩展。memory_type 选 scene、shadow、narrative、portrait；memory_id 填真实 ID。读取最新窗影时用 shadow + latest；Portrait 的 ID 用 user、relationship 或 all。"""
+    """按明确类型和 ID 精确读取一个对象，不做语义搜索或关联扩展。memory_type 选 scene、shadow、narrative；memory_id 填真实 ID。读取最新窗影时用 shadow + latest。"""
     safe_id = _coerce_memory_id(memory_id)
     safe_type = str(memory_type or "").strip().lower()
     if not safe_id:
         return {"status": "invalid", "reason": "memory_id_required", "memory_type": safe_type}
-    if safe_type == "portrait":
-        scope = "" if safe_id.lower() == "all" else safe_id.lower()
-        if scope not in {"", "user", "relationship"}:
-            return {
-                "status": "invalid",
-                "reason": "portrait_id_must_be_user_relationship_or_all",
-                "memory_id": safe_id,
-            }
-        return await read_portrait(
-            scope=scope,
-            include_evidence_text=include_evidence_text,
-        )
     if safe_type == "narrative":
         return await _read_narrative_memory(safe_id)
     if safe_type == "shadow":
@@ -12312,117 +11847,6 @@ async def publish_narrative(
     return result
 
 
-@mcp.tool()
-async def publish_portrait(
-    scope: str,
-    text: str,
-    expected_revision: int,
-    evidence: list[dict] | None = None,
-    locked: bool = True,
-) -> dict:
-    """发布 Portrait。scope 选 user 或 relationship；text 写正文；expected_revision 填 read_memory(memory_type="portrait", memory_id=scope) 返回的 revision；evidence 可省略并使用最新候选来源；locked 控制锁定状态。"""
-    return await _publish_portrait_memory(
-        scope=scope,
-        text=text,
-        expected_revision=expected_revision,
-        evidence=evidence,
-        locked=locked,
-    )
-
-
-async def _self_anchor_entry_payload() -> dict:
-    try:
-        all_buckets = await bucket_mgr.list_all(include_archive=False)
-    except Exception as e:
-        logger.warning("Portrait self-anchor entry list failed / 画像自我入口列桶失败: %s", e)
-        return {}
-    bucket = _select_self_anchor_entry_bucket(all_buckets)
-    if not bucket:
-        return {}
-    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-    text = _self_anchor_body_text(bucket, include_reflection=True, max_chars=1200)
-    return {
-        "bucket_id": bucket.get("id", ""),
-        "name": meta.get("name") or SELF_ANCHOR_TAG,
-        "text": text,
-        "configured": bool(_self_anchor_entry_bucket_id()),
-        "updated_at": meta.get("updated_at") or meta.get("last_active") or meta.get("created", ""),
-    }
-
-
-async def _portrait_state_payload() -> dict:
-    evidence_health = {}
-    if hasattr(portrait_engine, "reconcile_evidence"):
-        evidence_health = await portrait_engine.reconcile_evidence(bucket_mgr)
-    state = portrait_engine.load_state()
-    handoff_sections = {}
-    if hasattr(portrait_engine, "build_handoff_sections"):
-        try:
-            handoff_sections = portrait_engine.build_handoff_sections(max_recent_items=3)
-        except Exception as exc:
-            logger.warning("Portrait handoff preview failed: %s", exc)
-    recent_continuity_status = _recent_continuity_fallback_status(handoff_sections)
-    try:
-        window_shadow_stats = window_shadow_store.stats()
-    except Exception as exc:
-        logger.warning("Window shadow dashboard stats failed: %s", exc)
-        window_shadow_stats = {}
-    return {
-        "state_path": getattr(portrait_engine, "state_path", ""),
-        "enabled": bool(getattr(portrait_engine, "enabled", True)),
-        "auto_enabled": bool(getattr(portrait_engine, "auto_enabled", True)),
-        "auto_initial_enabled": bool(getattr(portrait_engine, "auto_initial_enabled", False)),
-        "daily_enabled": bool(getattr(portrait_engine, "daily_enabled", True)),
-        "generator_ready": bool(getattr(portrait_engine, "client", None)),
-        "generator_model": str(getattr(portrait_engine, "model", "") or ""),
-        "generator_source": str(getattr(portrait_engine, "model_source", "dehydration") or "dehydration"),
-        "updated_at": state.get("updated_at", ""),
-        "last_run_date": state.get("last_run_date", ""),
-        "portrait": state.get("portrait", {}),
-        "recent_activities": state.get("recent_activities", []),
-        "recent_timeline": state.get("recent_timeline", []),
-        "current_focus_items": (
-            portrait_engine.current_focus_items(max_items=8)
-            if hasattr(portrait_engine, "current_focus_items")
-            else state.get("recent_activities", [])
-        ),
-        "current_focus": str(handoff_sections.get("current_focus") or ""),
-        "recent_continuity": str(handoff_sections.get("recent_continuity") or ""),
-        "recent_continuity_status": recent_continuity_status,
-        "handoff_policy": {
-            "order": [
-                "window_shadow_recent_events",
-                "window_shadow_legacy_handoff",
-                "recent_continuity",
-                "raw_events",
-            ],
-            "recent_continuity_max_age_hours": HANDOFF_RECENT_CONTINUITY_MAX_AGE_HOURS,
-            "window_shadow_section": "recent_events",
-            "window_shadow_optional_section": "care_items",
-            "legacy_window_shadow_section": "handoff_note",
-        },
-        "last_handoff": dict(_last_handoff_status),
-        "window_shadow_stats": window_shadow_stats,
-        "stable_candidates": state.get("stable_candidates", []),
-        "generation_status": (
-            {
-                scope: portrait_engine.scope_generation_status(scope)
-                for scope in ("user", "persona", "relationship")
-            }
-            if hasattr(portrait_engine, "scope_generation_status")
-            else {}
-        ),
-        "evidence_health": evidence_health,
-        "self_anchor_entry": await _self_anchor_entry_payload(),
-    }
-
-
-async def portrait_state() -> dict:
-    """读取当前 portrait state，供检查 handoff 画像来源。"""
-    return await _portrait_state_payload()
-
-
-# =============================================================
 # Dashboard API endpoints (for lightweight Web UI)
 # 仪表板 API（轻量 Web UI 用）
 # =============================================================
@@ -12942,275 +12366,6 @@ async def api_domain_taxonomy(request):
     if err:
         return err
     return JSONResponse({"domains": domain_options()})
-
-
-@mcp.custom_route("/api/portrait-state", methods=["GET"])
-async def api_portrait_state(request):
-    """Read maintained portrait state for dashboard inspection."""
-    from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-    try:
-        return JSONResponse(await _portrait_state_payload())
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@mcp.custom_route("/api/portrait-maintain", methods=["POST"])
-async def api_portrait_maintain(request):
-    """Collect portrait state and candidates without publishing Stable heads."""
-    from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    if not isinstance(body, dict):
-        body = {}
-    try:
-        await decay_engine.ensure_started()
-        scope = str(body.get("scope") or "").strip()
-        if scope and scope not in {"user", "persona", "relationship"}:
-            return JSONResponse({"error": "invalid scope"}, status_code=400)
-        force = _bool_value(body.get("force"), False)
-        maintain_kwargs = {"force": force}
-        if scope:
-            maintain_kwargs["force_scopes"] = [scope]
-        elif force:
-            maintain_kwargs["force_scopes"] = ["user", "persona", "relationship"]
-        result = await portrait_engine.maintain_daily(
-            bucket_mgr,
-            persona_engine,
-            **maintain_kwargs,
-        )
-        status_code = 409 if result.get("status") == "blocked" else 200
-        return JSONResponse(result, status_code=status_code)
-    except Exception as e:
-        logger.warning("Portrait maintain API failed: %s", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@mcp.custom_route("/api/portrait-state/items", methods=["DELETE"])
-async def api_portrait_state_item_delete(request):
-    """Delete one portrait state row or clear one maintained portrait paragraph."""
-    from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid json body"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "json body must be an object"}, status_code=400)
-    if body.get("confirm") != "DELETE":
-        return JSONResponse({"error": "confirmation required"}, status_code=400)
-
-    raw_index = body.get("index")
-    try:
-        index = int(raw_index) if raw_index is not None and str(raw_index) != "" else None
-    except (TypeError, ValueError):
-        return JSONResponse({"error": "index must be an integer"}, status_code=400)
-    result = portrait_engine.delete_state_item(
-        area=str(body.get("area") or ""),
-        scope=str(body.get("scope") or ""),
-        layer=str(body.get("layer") or ""),
-        index=index,
-        text=str(body.get("text") or ""),
-    )
-    status = str(result.get("status") or "")
-    if status == "deleted":
-        return JSONResponse(result)
-    if status == "not_found":
-        return JSONResponse(result, status_code=404)
-    if status == "conflict":
-        return JSONResponse(result, status_code=409)
-    return JSONResponse(result, status_code=400)
-
-
-@mcp.custom_route("/api/portrait-state/items", methods=["POST"])
-async def api_portrait_state_item_add(request):
-    """Add one manual Current Focus item."""
-    from starlette.responses import JSONResponse
-
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid json body"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "json body must be an object"}, status_code=400)
-    if str(body.get("area") or "") != "recent_activities":
-        return JSONResponse({"error": "only recent_activities can be added manually"}, status_code=400)
-    result = portrait_engine.add_recent_activity(
-        str(body.get("text") or ""),
-        source_date=str(body.get("source_date") or ""),
-    )
-    return _portrait_mutation_response(result)
-
-
-@mcp.custom_route("/api/portrait-state/items", methods=["PUT"])
-async def api_portrait_state_item_edit(request):
-    """Edit one Current Focus or portrait generation-evidence row."""
-    from starlette.responses import JSONResponse
-
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid json body"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "json body must be an object"}, status_code=400)
-    raw_index = body.get("index")
-    try:
-        index = int(raw_index) if raw_index is not None and str(raw_index) != "" else None
-    except (TypeError, ValueError):
-        return JSONResponse({"error": "index must be an integer"}, status_code=400)
-    result = portrait_engine.edit_state_item(
-        area=str(body.get("area") or ""),
-        scope=str(body.get("scope") or ""),
-        layer=str(body.get("layer") or ""),
-        index=index,
-        text=str(body.get("text") or ""),
-        expected_text=str(body.get("expected_text") or ""),
-    )
-    return _portrait_mutation_response(result)
-
-
-def _portrait_mutation_response(result: dict):
-    from starlette.responses import JSONResponse
-
-    status = str(result.get("status") or "")
-    if status in {"updated", "unchanged"}:
-        return JSONResponse(result)
-    if status == "conflict":
-        return JSONResponse(result, status_code=409)
-    if status == "not_found":
-        return JSONResponse(result, status_code=404)
-    return JSONResponse(result, status_code=400)
-
-
-def _portrait_expected_revision(body: dict) -> int | None:
-    raw = body.get("expected_revision")
-    if raw is None or str(raw).strip() == "":
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
-
-
-@mcp.custom_route("/api/portrait-state/stable", methods=["PUT"])
-async def api_portrait_stable_edit(request):
-    """Manually replace one stable portrait paragraph with optimistic locking."""
-    from starlette.responses import JSONResponse
-
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid json body"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "json body must be an object"}, status_code=400)
-    expected_revision = _portrait_expected_revision(body)
-    if expected_revision is None:
-        return JSONResponse({"error": "expected_revision is required"}, status_code=400)
-    locked = _bool_value(body.get("locked"), False) if "locked" in body else None
-    result = portrait_engine.edit_stable(
-        scope=str(body.get("scope") or ""),
-        text=str(body.get("text") or ""),
-        expected_revision=expected_revision,
-        locked=locked,
-    )
-    return _portrait_mutation_response(result)
-
-
-@mcp.custom_route("/api/portrait-state/stable/lock", methods=["POST"])
-async def api_portrait_stable_lock(request):
-    """Lock or unlock one stable portrait paragraph."""
-    from starlette.responses import JSONResponse
-
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid json body"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "json body must be an object"}, status_code=400)
-    expected_revision = _portrait_expected_revision(body)
-    if expected_revision is None or "locked" not in body:
-        return JSONResponse({"error": "expected_revision and locked are required"}, status_code=400)
-    result = portrait_engine.set_stable_lock(
-        scope=str(body.get("scope") or ""),
-        locked=_bool_value(body.get("locked"), False),
-        expected_revision=expected_revision,
-    )
-    return _portrait_mutation_response(result)
-
-
-@mcp.custom_route("/api/portrait-state/stable/rollback", methods=["POST"])
-async def api_portrait_stable_rollback(request):
-    """Restore one stable portrait history revision without discarding newer history."""
-    from starlette.responses import JSONResponse
-
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid json body"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "json body must be an object"}, status_code=400)
-    expected_revision = _portrait_expected_revision(body)
-    try:
-        target_revision = int(body.get("target_revision"))
-    except (TypeError, ValueError):
-        target_revision = None
-    if expected_revision is None or target_revision is None:
-        return JSONResponse(
-            {"error": "expected_revision and target_revision are required"},
-            status_code=400,
-        )
-    result = portrait_engine.rollback_stable(
-        scope=str(body.get("scope") or ""),
-        target_revision=target_revision,
-        expected_revision=expected_revision,
-    )
-    return _portrait_mutation_response(result)
-
-
-@mcp.custom_route("/api/portrait-state/reset", methods=["POST"])
-async def api_portrait_state_reset(request):
-    """Reset maintained portrait state so the next manual generation is an initial run."""
-    from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid json body"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "json body must be an object"}, status_code=400)
-    if body.get("confirm") != "RESET":
-        return JSONResponse({"error": "confirmation required"}, status_code=400)
-    try:
-        return JSONResponse(portrait_engine.reset_state())
-    except Exception as e:
-        logger.warning("Portrait state reset API failed: %s", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @mcp.custom_route("/api/profile-facts", methods=["GET"])
@@ -14731,56 +13886,6 @@ async def api_reflection_run(request):
 
 
 
-def _store_daily_activity_summary_result(result: dict, portrait_engine_arg=None) -> dict:
-    if not isinstance(result, dict):
-        return {"status": "invalid", "reason": "result_not_object"}
-    if result.get("status") != "ready":
-        return result
-    item = result.get("activity_summary") if isinstance(result.get("activity_summary"), dict) else {}
-    if not item:
-        return {**result, "status": "skipped", "reason": "empty_activity_summary"}
-    engine = portrait_engine_arg or portrait_engine
-    date_key = str(result.get("date") or item.get("source_date") or "").strip()
-    try:
-        stored = engine.upsert_recent_timeline_item(item, date_key)
-    except Exception as exc:
-        logger.warning("Daily activity summary portrait upsert failed: %s", exc)
-        return {**result, "status": "error", "error": str(exc)}
-    return {**result, "status": "stored", "portrait": stored}
-
-
-@mcp.custom_route("/api/daily-activity-summary/run", methods=["POST"])
-async def api_daily_activity_summary_run(request):
-    """Summarize what happened that day into portrait recent_timeline."""
-    from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    if not isinstance(body, dict):
-        body = {}
-    try:
-        activity_date = str(body.get("date") or "")
-        result = await reflection_engine.run_daily_activity_summary(
-            conversation_turn_store=gateway_state_store,
-            raw_event_store=raw_event_store,
-            persona_engine=persona_engine,
-            key=str(body.get("date") or ""),
-            force=_bool_value(body.get("force"), False),
-        )
-        return JSONResponse(_store_daily_activity_summary_result(result))
-    except Exception as e:
-        logger.warning("Daily activity summary API failed: %s", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-
-
-
-
 @mcp.custom_route("/dashboard", methods=["GET"])
 async def dashboard(request):
     """Serve the dashboard HTML page."""
@@ -14886,7 +13991,6 @@ async def api_config_get(request):
     persona_cfg = config.get("persona", {}) if isinstance(config.get("persona", {}), dict) else {}
     dream_cfg = config.get("dream", {}) if isinstance(config.get("dream", {}), dict) else {}
     reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
-    portrait_cfg = config.get("portrait", {}) if isinstance(config.get("portrait", {}), dict) else {}
     self_anchor_cfg = config.get("self_anchor", {}) if isinstance(config.get("self_anchor", {}), dict) else {}
     domain_sentinel_configured_model = str(gateway_cfg.get("domain_sentinel_model") or "").strip()
     domain_sentinel_effective_model = domain_sentinel_configured_model or str(dehy.get("model") or "").strip()
@@ -14973,13 +14077,6 @@ async def api_config_get(request):
                 False,
             ),
             "recall_fusion_mode": _normalize_recall_fusion_mode(gateway_cfg.get("recall_fusion_mode", "dynamic")),
-            "portrait_memory_enabled": _bool_value(gateway_cfg.get("portrait_memory_enabled"), False),
-            "portrait_memory_budget": gateway_cfg.get("portrait_memory_budget", 360),
-            "portrait_memory_max_sources": gateway_cfg.get("portrait_memory_max_sources", 8),
-            "portrait_memory_include_anchors": _bool_value(
-                gateway_cfg.get("portrait_memory_include_anchors"),
-                False,
-            ),
             "query_planner_enabled": _bool_value(gateway_cfg.get("query_planner_enabled"), True),
             "query_planner_model": gateway_cfg.get("query_planner_model", ""),
             "query_planner_min_chars": gateway_cfg.get("query_planner_min_chars", 16),
@@ -15089,68 +14186,12 @@ async def api_config_get(request):
                     getattr(reflection_engine, "daily_conversation_turn_limit", 12),
                 )
             ),
-            "daily_activity_summary_enabled": bool(
-                reflection_cfg.get(
-                    "daily_activity_summary_enabled",
-                    getattr(reflection_engine, "daily_activity_summary_enabled", True),
-                )
-            ),
-            "daily_activity_summary_turn_limit": int(
-                reflection_cfg.get(
-                    "daily_activity_summary_turn_limit",
-                    getattr(reflection_engine, "daily_activity_summary_turn_limit", 0),
-                )
-            ),
-            "daily_activity_summary_max_tokens": int(
-                reflection_cfg.get(
-                    "daily_activity_summary_max_tokens",
-                    getattr(reflection_engine, "daily_activity_summary_max_tokens", 320),
-                )
-            ),
             "model": getattr(reflection_engine, "model", reflection_cfg.get("model", "")),
             "thinking_mode": str(reflection_cfg.get("thinking_mode") or getattr(reflection_engine, "thinking_mode", "") or ""),
             "base_url": str(reflection_cfg.get("base_url") or ""),
             "effective_base_url": getattr(reflection_engine, "base_url", reflection_base_url),
             "api_key_masked": _mask_key(getattr(reflection_engine, "api_key", "") or reflection_api_key),
             "api_ready": bool(getattr(reflection_engine, "api_key", "") or reflection_api_key),
-        },
-        "portrait": {
-            "enabled": bool(portrait_cfg.get("enabled", getattr(portrait_engine, "enabled", True))),
-            "auto_enabled": bool(portrait_cfg.get("auto_enabled", getattr(portrait_engine, "auto_enabled", True))),
-            "auto_initial_enabled": bool(
-                portrait_cfg.get(
-                    "auto_initial_enabled",
-                    getattr(portrait_engine, "auto_initial_enabled", False),
-                )
-            ),
-            "daily_enabled": bool(portrait_cfg.get("daily_enabled", getattr(portrait_engine, "daily_enabled", True))),
-            "model": getattr(portrait_engine, "model", portrait_cfg.get("model", "")),
-            "base_url": getattr(portrait_engine, "base_url", portrait_cfg.get("base_url", "")),
-            "api_key_masked": _mask_key(getattr(portrait_engine, "api_key", "") or portrait_cfg.get("api_key", "")),
-            "api_ready": bool(getattr(portrait_engine, "api_key", "") or portrait_cfg.get("api_key", "")),
-            "state_path": getattr(portrait_engine, "state_path", ""),
-            "daily_hour": portrait_cfg.get("daily_hour", getattr(portrait_engine, "daily_hour", 4)),
-            "check_interval_minutes": portrait_cfg.get(
-                "check_interval_minutes",
-                getattr(portrait_engine, "check_interval_minutes", 60),
-            ),
-            "material_limit": portrait_cfg.get("material_limit", getattr(portrait_engine, "material_limit", 18)),
-            "first_run_material_limit": portrait_cfg.get(
-                "first_run_material_limit",
-                getattr(portrait_engine, "first_run_material_limit", 160),
-            ),
-            "persona_events_limit": portrait_cfg.get(
-                "persona_events_limit",
-                getattr(portrait_engine, "persona_events_limit", 24),
-            ),
-            "user_rewrite_evidence_delta": portrait_cfg.get(
-                "user_rewrite_evidence_delta",
-                getattr(portrait_engine, "user_rewrite_evidence_delta", 10),
-            ),
-            "manual_suppress_days": portrait_cfg.get(
-                "manual_suppress_days",
-                getattr(portrait_engine, "manual_suppress_days", 14),
-            ),
         },
         "merge_threshold": config.get("merge_threshold", 90),
         "transport": config.get("transport", "stdio"),
@@ -15163,7 +14204,7 @@ async def api_config_update(request):
     """Hot-update runtime config. Optionally persist to config.yaml."""
     from starlette.responses import JSONResponse
     import yaml
-    global dream_engine, persona_engine, portrait_engine, reflection_engine, metadata_enricher, reranker_engine
+    global dream_engine, persona_engine, reflection_engine, metadata_enricher, reranker_engine
     err = _require_dashboard_auth(request)
     if err:
         return err
@@ -15248,9 +14289,6 @@ async def api_config_update(request):
             "max_tokens": dehy.get("max_tokens", 1024),
             "temperature": dehy.get("temperature", 0.1),
         }
-        if getattr(portrait_engine, "model_source", "dehydration") == "dehydration":
-            portrait_engine = DailyPortraitMaintainer(config)
-
     # --- Embedding config ---
     if "embedding" in body:
         e = body["embedding"]
@@ -15492,27 +14530,6 @@ async def api_config_update(request):
             gateway_cfg["recall_fusion_mode"] = _normalize_recall_fusion_mode(g["recall_fusion_mode"])
             gateway_hot_update_body["recall_fusion_mode"] = gateway_cfg["recall_fusion_mode"]
             updated.append("gateway.recall_fusion_mode")
-        if "portrait_memory_enabled" in g:
-            gateway_cfg["portrait_memory_enabled"] = _bool_value(g["portrait_memory_enabled"], False)
-            gateway_hot_update_body["portrait_memory_enabled"] = gateway_cfg["portrait_memory_enabled"]
-            updated.append("gateway.portrait_memory_enabled")
-        if "portrait_memory_budget" in g:
-            gateway_cfg["portrait_memory_budget"] = _int_between(g["portrait_memory_budget"], 360, 120, 2000)
-            gateway_hot_update_body["portrait_memory_budget"] = gateway_cfg["portrait_memory_budget"]
-            updated.append("gateway.portrait_memory_budget")
-        if "portrait_memory_max_sources" in g:
-            gateway_cfg["portrait_memory_max_sources"] = _int_between(g["portrait_memory_max_sources"], 8, 1, 20)
-            gateway_hot_update_body["portrait_memory_max_sources"] = gateway_cfg["portrait_memory_max_sources"]
-            updated.append("gateway.portrait_memory_max_sources")
-        if "portrait_memory_include_anchors" in g:
-            gateway_cfg["portrait_memory_include_anchors"] = _bool_value(
-                g["portrait_memory_include_anchors"],
-                False,
-            )
-            gateway_hot_update_body["portrait_memory_include_anchors"] = gateway_cfg[
-                "portrait_memory_include_anchors"
-            ]
-            updated.append("gateway.portrait_memory_include_anchors")
         if "query_planner_enabled" in g:
             gateway_cfg["query_planner_enabled"] = _bool_value(g["query_planner_enabled"], True)
             gateway_hot_update_body["query_planner_enabled"] = gateway_cfg["query_planner_enabled"]
@@ -15638,25 +14655,6 @@ async def api_config_update(request):
                 80,
             )
             updated.append("reflection.daily_conversation_turn_limit")
-        if "daily_activity_summary_enabled" in r:
-            reflection_cfg["daily_activity_summary_enabled"] = bool(r.get("daily_activity_summary_enabled"))
-            updated.append("reflection.daily_activity_summary_enabled")
-        if "daily_activity_summary_turn_limit" in r:
-            reflection_cfg["daily_activity_summary_turn_limit"] = _int_between(
-                r.get("daily_activity_summary_turn_limit"),
-                0,
-                0,
-                10000,
-            )
-            updated.append("reflection.daily_activity_summary_turn_limit")
-        if "daily_activity_summary_max_tokens" in r:
-            reflection_cfg["daily_activity_summary_max_tokens"] = _int_between(
-                r.get("daily_activity_summary_max_tokens"),
-                320,
-                80,
-                1000,
-            )
-            updated.append("reflection.daily_activity_summary_max_tokens")
         if "thinking_mode" in r:
             thinking_mode = str(r.get("thinking_mode") or "").strip().lower()
             if thinking_mode not in {"", "enabled", "disabled"}:
@@ -15674,56 +14672,6 @@ async def api_config_update(request):
             os.environ["OMBRE_REFLECTION_MODEL"] = reflection_cfg["model"]
         reflection_engine = ReflectionEngine(config)
         metadata_enricher = reflection_engine
-
-    # --- Portrait maintainer config ---
-    if "portrait" in body:
-        p = body["portrait"]
-        portrait_cfg = config.setdefault("portrait", {})
-        for key in (
-            "enabled",
-            "auto_enabled",
-            "auto_initial_enabled",
-            "daily_enabled",
-        ):
-            if key in p:
-                portrait_cfg[key] = bool(p[key])
-                updated.append(f"portrait.{key}")
-        for key in (
-            "model",
-            "base_url",
-            "state_path",
-            "thinking_mode",
-        ):
-            if key in p:
-                portrait_cfg[key] = str(p[key] or "").strip()
-                updated.append(f"portrait.{key}")
-        for key in (
-            "temperature",
-            "max_tokens",
-            "daily_hour",
-            "check_interval_minutes",
-            "material_limit",
-            "first_run_material_limit",
-            "persona_events_limit",
-            "recent_buffer_max",
-            "staging_pool_max",
-            "candidate_max",
-            "user_rewrite_evidence_delta",
-            "manual_suppress_days",
-        ):
-            if key in p:
-                portrait_cfg[key] = p[key]
-                updated.append(f"portrait.{key}")
-        if "api_key" in p and p["api_key"]:
-            portrait_cfg["api_key"] = str(p["api_key"])
-            os.environ["OMBRE_PORTRAIT_API_KEY"] = portrait_cfg["api_key"]
-            env_updates["OMBRE_PORTRAIT_API_KEY"] = portrait_cfg["api_key"]
-            updated.append("portrait.api_key")
-        if "base_url" in p and portrait_cfg.get("base_url"):
-            os.environ["OMBRE_PORTRAIT_BASE_URL"] = portrait_cfg["base_url"]
-        if "model" in p and portrait_cfg.get("model"):
-            os.environ["OMBRE_PORTRAIT_MODEL"] = portrait_cfg["model"]
-        portrait_engine = DailyPortraitMaintainer(config)
 
     # --- Dream config ---
     if "dream" in body:
@@ -15933,30 +14881,6 @@ async def api_config_update(request):
                     sc_gateway["recall_fusion_mode"] = _normalize_recall_fusion_mode(
                         body["gateway"]["recall_fusion_mode"]
                     )
-                if "portrait_memory_enabled" in body["gateway"]:
-                    sc_gateway["portrait_memory_enabled"] = _bool_value(
-                        body["gateway"]["portrait_memory_enabled"],
-                        False,
-                    )
-                if "portrait_memory_budget" in body["gateway"]:
-                    sc_gateway["portrait_memory_budget"] = _int_between(
-                        body["gateway"]["portrait_memory_budget"],
-                        360,
-                        120,
-                        2000,
-                    )
-                if "portrait_memory_max_sources" in body["gateway"]:
-                    sc_gateway["portrait_memory_max_sources"] = _int_between(
-                        body["gateway"]["portrait_memory_max_sources"],
-                        8,
-                        1,
-                        20,
-                    )
-                if "portrait_memory_include_anchors" in body["gateway"]:
-                    sc_gateway["portrait_memory_include_anchors"] = _bool_value(
-                        body["gateway"]["portrait_memory_include_anchors"],
-                        False,
-                    )
                 if "query_planner_enabled" in body["gateway"]:
                     sc_gateway["query_planner_enabled"] = _bool_value(
                         body["gateway"]["query_planner_enabled"],
@@ -16064,65 +14988,11 @@ async def api_config_update(request):
                         0,
                         80,
                     )
-                if "daily_activity_summary_enabled" in body["reflection"]:
-                    sc_reflection["daily_activity_summary_enabled"] = bool(
-                        body["reflection"].get("daily_activity_summary_enabled")
-                    )
-                if "daily_activity_summary_turn_limit" in body["reflection"]:
-                    sc_reflection["daily_activity_summary_turn_limit"] = _int_between(
-                        body["reflection"].get("daily_activity_summary_turn_limit"),
-                        0,
-                        0,
-                        10000,
-                    )
-                if "daily_activity_summary_max_tokens" in body["reflection"]:
-                    sc_reflection["daily_activity_summary_max_tokens"] = _int_between(
-                        body["reflection"].get("daily_activity_summary_max_tokens"),
-                        320,
-                        80,
-                        1000,
-                    )
                 if "thinking_mode" in body["reflection"]:
                     thinking_mode = str(body["reflection"].get("thinking_mode") or "").strip().lower()
                     if thinking_mode not in {"", "enabled", "disabled"}:
                         thinking_mode = ""
                     sc_reflection["thinking_mode"] = thinking_mode
-                # Never persist api_key to yaml (use env var)
-
-            if "portrait" in body:
-                sc_portrait = save_config.setdefault("portrait", {})
-                for key in (
-                    "enabled",
-                    "auto_enabled",
-                    "auto_initial_enabled",
-                    "daily_enabled",
-                ):
-                    if key in body["portrait"]:
-                        sc_portrait[key] = bool(body["portrait"][key])
-                for key in (
-                    "model",
-                    "base_url",
-                    "state_path",
-                    "thinking_mode",
-                ):
-                    if key in body["portrait"]:
-                        sc_portrait[key] = str(body["portrait"][key] or "").strip()
-                for key in (
-                    "temperature",
-                    "max_tokens",
-                    "daily_hour",
-                    "check_interval_minutes",
-                    "material_limit",
-                    "first_run_material_limit",
-                    "persona_events_limit",
-                    "recent_buffer_max",
-                    "staging_pool_max",
-                    "candidate_max",
-                    "user_rewrite_evidence_delta",
-                    "manual_suppress_days",
-                ):
-                    if key in body["portrait"]:
-                        sc_portrait[key] = body["portrait"][key]
                 # Never persist api_key to yaml (use env var)
 
             if "dream" in body:
@@ -16475,7 +15345,6 @@ if __name__ == "__main__":
             local_embedding_engine = EmbeddingEngine(config)
             local_persona_engine = PersonaStateEngine(config)
             local_reflection_engine = ReflectionEngine(config)
-            local_portrait_engine = DailyPortraitMaintainer(config)
             local_memory_edge_store = MemoryEdgeStore(config)
             local_gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
             while True:
@@ -16511,51 +15380,12 @@ if __name__ == "__main__":
                         0,
                         80,
                     )
-                    local_reflection_engine.daily_activity_summary_enabled = bool(
-                        reflection_cfg.get("daily_activity_summary_enabled", True)
-                    )
-                    local_reflection_engine.daily_activity_summary_turn_limit = _int_between(
-                        reflection_cfg.get("daily_activity_summary_turn_limit"),
-                        getattr(local_reflection_engine, "daily_activity_summary_turn_limit", 0),
-                        0,
-                        10000,
-                    )
-                    local_reflection_engine.daily_activity_summary_max_tokens = _int_between(
-                        reflection_cfg.get("daily_activity_summary_max_tokens"),
-                        getattr(local_reflection_engine, "daily_activity_summary_max_tokens", 320),
-                        80,
-                        1000,
-                    )
                     results = await local_reflection_engine.run_due(
                         local_bucket_mgr,
                         local_persona_engine,
                         local_embedding_engine,
                         local_gateway_state_store,
                     )
-                    now_local = local_reflection_engine._local_now()
-                    if (
-                        getattr(local_reflection_engine, "daily_activity_summary_enabled", True)
-                        and now_local.hour >= local_reflection_engine.daily_hour
-                    ):
-                        activity_date = (now_local - timedelta(days=1)).date().isoformat()
-                        timeline_id = f"daily_activity_summary:{activity_date}"
-                        if not local_portrait_engine.has_recent_timeline_item(
-                            date_key=activity_date,
-                            source="daily_activity_summary",
-                            timeline_id=timeline_id,
-                        ):
-                            activity_result = await local_reflection_engine.run_daily_activity_summary(
-                                conversation_turn_store=local_gateway_state_store,
-                                raw_event_store=raw_event_store,
-                                persona_engine=local_persona_engine,
-                                key=activity_date,
-                            )
-                            stored_activity = _store_daily_activity_summary_result(
-                                activity_result,
-                                portrait_engine_arg=local_portrait_engine,
-                            )
-                            if stored_activity.get("status") not in {"disabled", "skipped"}:
-                                results.append(stored_activity)
                     if results:
                         logger.info("Reflection run-due results / 反思定时结果: %s", results)
                     if reflection_cfg.get("enrich_backfill_enabled", True):
@@ -16583,32 +15413,6 @@ if __name__ == "__main__":
             rt = threading.Thread(target=_start_reflection_scheduler, daemon=True)
             rt.start()
             logger.info("Reflection scheduler enabled / 反思定时器已启用")
-
-        async def _portrait_loop():
-            await asyncio.sleep(25)
-            local_bucket_mgr = BucketManager(config)
-            local_persona_engine = PersonaStateEngine(config)
-            local_portrait_engine = DailyPortraitMaintainer(config)
-            while True:
-                try:
-                    results = await local_portrait_engine.run_due(
-                        local_bucket_mgr,
-                        local_persona_engine,
-                    )
-                    if results:
-                        logger.info("Portrait run-due results / 画像定时结果: %s", results)
-                except Exception as e:
-                    logger.warning("Portrait scheduler failed / 画像定时器失败: %s", e)
-                await asyncio.sleep(local_portrait_engine.check_interval_minutes * 60)
-
-        def _start_portrait_scheduler():
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(_portrait_loop())
-
-        if portrait_engine.enabled and portrait_engine.auto_enabled:
-            pt = threading.Thread(target=_start_portrait_scheduler, daemon=True)
-            pt.start()
-            logger.info("Portrait scheduler enabled / 画像定时器已启用")
 
         async def _word_map_daily_rebuild_loop():
             await asyncio.sleep(35)
