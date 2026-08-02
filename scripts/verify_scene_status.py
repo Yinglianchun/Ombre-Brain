@@ -190,7 +190,7 @@ async def main() -> None:
         assert exact["metadata"]["scene_revision_history"] == original_history
         assert exact["metadata"]["comments"] == original_comments
         assert exact["metadata"]["window_shadow_id"] == "window_scene_status"
-        assert moments.deleted == ["scene_status_contract"]
+        assert moments.deleted == []
         assert embeddings.deleted == ["scene_status_contract"]
         assert entities.deleted == ["scene_status_contract"]
         assert nodes.deleted == ["scene_status_contract"]
@@ -220,7 +220,7 @@ async def main() -> None:
         assert reloaded["metadata"]["comments"] == original_comments
         assert reloaded["metadata"]["window_shadow_id"] == "window_scene_status"
         assert len(reloaded["metadata"]["scene_status_history"]) == 2
-        assert moments.upserted == ["scene_status_contract"]
+        assert moments.upserted == []
         assert nodes.upserted == ["scene_status_contract"]
 
     print("authored Scene archive/restore contract verified")

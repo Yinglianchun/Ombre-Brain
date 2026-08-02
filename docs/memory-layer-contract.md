@@ -79,13 +79,13 @@ Examples:
 
 ## Direct And Related Rules
 
-Direct means the current query has reliable evidence in the bucket body/title/summary/tags or a high-confidence admitted moment.
+Direct means the current query has reliable evidence in one authored Scene body/title/cues.
 
 Direct return:
 
-- Short bucket: return original bucket body.
-- Long bucket: return matched moment plus nearby original window. Prefer `source_ref` line windows when available; otherwise use the inline original text/window.
-- High-value bucket or detail query: return dehydrated bucket capsule.
+- Return the selected Scene body as one object.
+- Do not create or return independent memory fragments from a long Scene, and do not generate a rewritten index card. The embedding index may keep deterministic verbatim spans with only the owner Scene ID, source offsets, and source hash; a span hit must resolve back to the whole authored Scene.
+- If one authored Scene contains two independent core events, correct the authoring boundary instead of adding a derived slice.
 
 Related means the bucket was reached from a reliable direct seed.
 
@@ -96,10 +96,7 @@ Related return:
 - Never let related memory pretend to be the current fact.
 - When reliable chain walk is enabled and the path has at least two steps, Gateway and MCP breath may render a compact `Chain Bundle`: seed, chain path, target summary, and 1-2 temperature context items. This is still summary-only related memory, not raw bucket injection.
 
-Retrieval mode:
-
-- `graph` is the default runtime: direct recall uses admitted moments and related memory can diffuse through approved edges.
-- `bucket` is an opt-in comparison mode: direct recall uses reliable bucket candidates and the same direct render rules, but skips moment graph refresh and does not inject related memory.
+Runtime retrieval is permanently Scene-level. Old `graph`/`bucket` configuration values are accepted only so cached clients keep working; they cannot reactivate moment indexing or moment-graph recall. Related Scenes may be reached only through reviewed Scene edges.
 
 Context-only sections:
 
@@ -113,16 +110,16 @@ These can color a reliable memory, but they cannot prove a direct hit by themsel
 
 The runtime answers "which layer is this?" with `memory_layers.py`, then applies three separate gates:
 
-- Direct seed gate: only admitted bucket body/title moments can prove a direct recall. Dream resonance, source records, relationship weather, and context-only sections cannot.
+- Direct seed gate: only an admitted authored Scene can prove a direct recall. Dream resonance, source records, relationship weather, and attached annotations cannot.
 - Recall context gate: comments, affect anchors, and favorite reasons may stay indexed as context for their parent bucket, so they can appear beside a reliable direct hit.
 - Related target gate: diffused memory must be summary-only and must pass the target layer policy. Archive/resolved/digested buckets stay hidden in normal related recall, but can return as old-memory summary when the query explicitly asks for old, archived, conflict, or resolved material.
 - Recent context gate: automatic `Recent Context` only uses dynamic memory. Writer-classified stable boundaries and relationship lessons do not appear just because they were written recently; they can still appear when directly recalled or when the user explicitly asks for recent memory.
 
 Query-level gates are planned once by `RecallPolicy.plan_query()`. The plan carries whether the query wants a body chain, whether topic evidence is enforced, whether old/archive material is explicitly requested, and whether cautious diffusion is allowed by repair context.
 
-This separation is important. A moment can be searchable context without being allowed to prove the current topic.
+This separation is important. An attached Annotation can color its Scene without becoming an independent recall object.
 
-Debug surfaces should expose the same runtime decision. `inspect_moments`, `/api/moments`, `inspect_diffusion`, `/api/diffusion-debug`, `/api/recall-debug`, `/api/breath-debug`, and Gateway injection debug include:
+Debug surfaces should expose the same runtime decision. `/api/recall-debug`, `/api/breath-debug`, and Gateway injection debug include:
 
 - `layer_debug`: the inferred layer, writer hint, and static layer policy.
 - `runtime_gate`: the per-query decision for direct seed, related injection, recent context, topic evidence, and the reason an item would or would not appear.

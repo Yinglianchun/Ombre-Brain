@@ -130,7 +130,7 @@ async def main() -> None:
     ]
     assert len(manager.bucket["metadata"]["scene_revision_history"]) == 2
     assert manager.bucket["metadata"]["scene_revision_history"][1]["title"] == "小雨亲自改的标题"
-    assert moments.ids == ["scene_edit_contract", "scene_edit_contract"]
+    assert moments.ids == []
     assert server._window_shadow_scene_source_valid(manager.bucket) is True
 
     stale_retry = await server._edit_scene_memory(

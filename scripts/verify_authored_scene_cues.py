@@ -38,8 +38,10 @@ async def main() -> None:
     close_description = str(tools["close_window"].description or "")
 
     assert "cues" in write_schema["required"]
+    assert "一个可独立召回的核心事件" in write_description
+    assert "不再拆片或生成索引卡" in write_description
+    assert "能独立理解的完整经历" in write_description
     for description in (write_description, close_description):
-        assert "能独立理解的具体场景" in description
         assert "实际发生的细节" in description
         assert "也可以写下当时的情绪、欲望与犹豫" in description
         assert "摘要或说明" in description

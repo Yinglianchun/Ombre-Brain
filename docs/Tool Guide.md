@@ -44,7 +44,8 @@
 - 已有 Scene 的标题、正文或 cues 要修订时，先精确读取取得 scene_id 与 metadata.updated_at，再调用 edit_scene；只传需要改变的字段。版本冲突时重新读取，不拿 Annotation 或新 Scene 冒充编辑。
 - 不想让某条 Scene 继续参加普通召回时，先读后调用 set_scene_status(status="archived")；它不删除正文。需要恢复时用最新的 metadata.updated_at 调用 status="active"。
 - content 用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要写成摘要或说明；不把正文里的“我”改成名字、AI、assistant 或第三人称；不加 `## Scene`、`### scene`、`### moment` 或固定模板。
-- 每次只写一个 Scene；多个场景分别写。
+- 每条 Scene 只记录一个可独立召回的核心事件；可以保留理解它所必需的背景、过程与结果，但不能并列第二件事。多个事件分别写。
+- Scene 本身就是最小记忆，不再从 Scene 生成、拆分或召回 moment/索引卡。
 - 工具不调用模型改写、不脱水、不合并；当前作者必须亲自写 1～8 个“以后提到什么时希望它回来”的 cues 入口。cues 不是摘要，系统不从 title、引句或正文生成。
 - 旧 feel、whisper、日印象和 ProfileFact 仍可被读取，但不再通过 MCP 新建。
 

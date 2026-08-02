@@ -32,7 +32,7 @@ flowchart LR
 | Ombre Brain | MCP 工具、记忆读写、召回、画像维护、Dashboard | `server.py`；VPS 默认 `:18001`，容器内 / Python 直跑 `:8000` |
 | Ombre Gateway | 转发聊天请求，并在请求前注入经过门控的上下文 | `gateway.py`；VPS 默认 `:18002`，容器内 / Python 直跑 `:8010` |
 | Buckets | 可读、可编辑、可同步的长期记忆正文 | `buckets/*.md` |
-| State | embedding、moment、edge、原文、画像、提醒等运行状态 | `state/` |
+| State | embedding、Scene edge、原文、画像、提醒等运行状态 | `state/` |
 
 只需要 MCP 和 Dashboard 时可以单独运行 Brain；需要聊天客户端自动召回与注入时，应同时运行 Brain 和 Gateway。
 
@@ -52,23 +52,23 @@ flowchart LR
 忠实写下这件经历本身，使它以后仍能被独立理解。保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫；不同 Scene 可以有不同写法。
 ```
 
-`Scene` 已经是可召回的记忆对象，`write_scene` 不把 `## Scene`、`### scene` 或 `### moment` 套进 content。当前 AI 写好的那段正文就是场景真源，不是脱水摘要。旧 body / `moment` / `original` / `reflection` 仍兼容读取，但不再作为新写入 section；旧 `affect_anchor` 也只兼容读取。
+`Scene` 已经是可召回的最小记忆对象。一条 Scene 只记录一个可独立召回的核心事件，可以带上理解它所必需的背景、过程与结果，但不并列第二件事。`write_scene` 不给 content 套类型标题；当前 AI 写好的正文就是场景真源，不是脱水摘要，也不会再生成或拆分 moment/索引卡。旧 body / `moment` / `original` / `reflection` 只为历史迁移兼容读取，不参与当前 Scene 召回；旧 `affect_anchor` 也只兼容读取。
 
 并非每轮聊天都应该写桶。重要事件、承诺进展和会影响未来的短期状态才值得写成场景；稳定偏好/边界应从证据场景进入人工审阅的 Portrait，普通闲聊可以只留在原文或窗影里。
 
-### 3. Moment、Node 与 Edge
+### 3. Scene、Node 与 Edge
 
-系统仍会把旧 bucket 解析成更小的 Memory Moment；新 Scene 则保留 canonical `scene` 语义。Moment、Node 与 Edge 都是派生索引，不取代 Markdown 真源。
+当前召回不再把 Scene 拆成 Moment，也不从长文生成二次改写的索引卡。Scene 原文和作者亲写 cues 直接参与候选；较长 Scene 可以建立确定性的原文跨度向量，但跨度只保存所属 Scene、原文偏移和 source hash，没有独立 ID、正文或生命周期，命中后仍返回完整 Scene。Node 与逐条审阅的 Scene Edge 是可重建派生索引，不取代 Markdown 真源。旧 bucket 的 moment 解析仅保留给离线迁移/审计，不能进入 daily Scene 召回。
 
-当前默认召回模式是 `graph`：
+已有长 Scene 的跨度索引通过 `python scripts/reindex_scene_embeddings.py` 先只读预览；确认候选后再显式加 `--apply`。脚本只替换派生 embedding 行，不改 Scene 文件。
+
+当前运行时只使用 Scene 级召回：
 
 1. 用原始问题的 embedding 与正文证据寻找候选。
 2. 归一化问题、关键词、别名和 Word Map 只提供辅助提示。
 3. admission gate 判断是否存在可靠 direct seed。
 4. 只有 seed 通过后，才允许沿逐条审核的 Scene 图扩散；旧关系图只保留少量结构关系、降权且最多一跳。
-5. 直接命中可带原文窗口；关联记忆只能以摘要出现。
-
-`bucket` 模式可用于对照测试：它跳过 moment 图刷新和扩散，但仍执行可靠性门控。
+5. 直接命中返回该 Scene 原文；关联只沿 Scene Edge 查找，不创建片段对象。
 
 ### 4. Word Map Lite
 
@@ -84,11 +84,11 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 ### 手动写入
 
-`write_scene` 只原样保存一件由当前 AI 写好的长期 Scene。content 用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要写成摘要或说明；不把正文里的“我”改写成名字、AI、assistant 或第三人称，正文不带 Markdown section 标题，也不套固定段落或字段。工具不调用脱水/标签模型，也不合并旧桶。当前作者必须在同一次调用中亲自写 1～8 个“以后提到什么时希望它回来”的 `cues` 入口；cues 不是摘要，系统不从 title、引句或正文补造。cues 只进 sidecar 稀疏索引，Scene 向量仍只 embed content 原文。
+`write_scene` 只原样保存一件由当前 AI 写好的长期 Scene。一条 Scene 只记录一个可独立召回的核心事件；可保留理解它所必需的背景、过程与结果，但不能并列第二件事。content 用你的第一人称写成完整经历，保留实际细节、当时的情绪、欲望与犹豫，以及引语原本人称，不要写成摘要或说明；不把正文里的“我”改写成名字、AI、assistant 或第三人称，正文不带 Markdown section 标题，也不套固定段落或字段。工具不调用脱水/标签模型，也不合并旧桶。当前作者必须在同一次调用中亲自写 1～8 个“以后提到什么时希望它回来”的 `cues` 入口；cues 不是摘要，系统不从 title、引句或正文补造。cues 只进 sidecar 稀疏索引，Scene 向量仍只 embed content 原文。
 
-`edit_scene` 原位修订一条 authored Scene。调用者必须先用 `read_memory(memory_type="scene", memory_id=...)` 精确读取，再把读到的 `metadata.updated_at` 原样作为 `expected_updated_at`；版本不一致时返回 conflict，绝不覆盖较新的修改。只修改显式传入的 title、content、cues，旧版本全文保存在 Scene 自己的 revision history 中；Scene ID、created、source、source refs、窗影关联和 comments 都不变。窗影抽取 Scene 的 `scene_source_hash` 永远指向 revision 1；正文修订后，连续性读取会沿 revision history 验回原窗影证据，而不让新正文冒充原始摘录。标题、正文或 cues 变化后刷新 embedding、moment 与 entity 索引，并重新排队 Scene link proposal。
+`edit_scene` 原位修订一条 authored Scene。调用者必须先用 `read_memory(memory_type="scene", memory_id=...)` 精确读取，再把读到的 `metadata.updated_at` 原样作为 `expected_updated_at`；版本不一致时返回 conflict，绝不覆盖较新的修改。只修改显式传入的 title、content、cues，旧版本全文保存在 Scene 自己的 revision history 中；Scene ID、created、source、source refs、窗影关联和 comments 都不变。窗影抽取 Scene 的 `scene_source_hash` 永远指向 revision 1；正文修订后，连续性读取会沿 revision history 验回原窗影证据，而不让新正文冒充原始摘录。标题、正文或 cues 变化后刷新 embedding 与 entity 索引，并重新排队 Scene link proposal。
 
-`set_scene_status` 带版本检查地归档或恢复一条 authored Scene。调用者同样必须先精确读取，把最新 `metadata.updated_at` 原样传入，再把 status 设为 `archived` 或 `active`。归档不删除或重写正文、Scene ID、created、source refs、revision history、comments、窗影关联或已审阅 Scene edges；它只把 Scene 移出普通 recall，并清理可重建的向量、moment、entity 与 node 索引。归档 Scene 仍可精确读回，恢复后重建派生索引。
+`set_scene_status` 带版本检查地归档或恢复一条 authored Scene。调用者同样必须先精确读取，把最新 `metadata.updated_at` 原样传入，再把 status 设为 `archived` 或 `active`。归档不删除或重写正文、Scene ID、created、source refs、revision history、comments、窗影关联或已审阅 Scene edges；它只把 Scene 移出普通 recall，并清理可重建的向量、entity 与 node 索引。归档 Scene 仍可精确读回，恢复后重建派生索引。
 
 `close_window` 在窗口结束时原子保存当前 AI 亲自写下的完整第一人称“窗影”。Bridge 负责新窗口醒来，窗影只沉淀这一窗的变化：新稿不再要求 `## 给下个窗口的我`，也没有 250～400 字限制。正文可以直接放在 `## 窗影` 下像日记一样自然书写；想分段时可选 `## 这一窗留给我的`、`## 我在想什么`、`## 关于你，关于我们`、`## 最近发生的事`（建议 `- YYYY-MM-DD｜事件`）与 `## 还需要关心的事`，其他小标题会原样保留在窗影正文里。它只从 Shadow 的“想留下的记忆”中抽取 0～N 个独立 Scene，没有平行 `scenes[]` 写入口。每条 Scene 使用 `### scene | 作者标题 | cue：自然召回入口`，可继续追加 1～8 个 `| cue：…`；Scene 正文继续用你的第一人称写成能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不写成摘要或说明。标题与 cues 都由当前作者亲自写，只进入 metadata；heading 不进入 Scene 正文。旧的 `标题：作者标题` 仍可读取；裸 `### scene`、没有作者标题或 cue 的格式都会被拒绝。整篇原文进入独立 `window_shadows.sqlite`，不参与普通召回；任一 Scene 写失败时本次新建内容整组撤回。旧 `### moment` 只保留读取兼容，不会自动升格成 Scene。
 
@@ -506,7 +506,7 @@ Python 直跑时对应端口为 `8000/8010`。
 ## 已知边界
 
 - embedding 负责找候选，不负责判断事实正确；模型更大不必然召回更准，延迟却通常更高。
-- 动态召回仍会增加首 token 前的准备时间，瓶颈可能来自远程 embedding / reranker、首次冷启动和图扩散，而不只来自上游聊天模型。当前版本已经在启动时预热 query plan、bucket、moment graph、词法 profile 与 relevance facets，并缓存评分输入、复用 moment graph、过滤陈旧 moment / edge，减少重复计算与无效扩散；远程模型的网络往返仍是剩余的主要可变延迟。可通过 injection debug 中的 `prepare_timing_debug.steps_ms` 区分 `semantic_candidates`、rerank、diffusion 等阶段，不要只凭总耗时猜瓶颈。
+- 动态召回仍会增加首 token 前的准备时间，瓶颈可能来自远程 embedding / reranker、首次冷启动和 Scene edge 扩散，而不只来自上游聊天模型。当前版本会在启动时预热 query plan、bucket、词法 profile 与 relevance facets，并缓存评分输入、过滤陈旧 Scene edge，减少重复计算与无效扩散；远程模型的网络往返仍是剩余的主要可变延迟。可通过 injection debug 中的 `prepare_timing_debug.steps_ms` 区分 `semantic_candidates`、rerank、diffusion 等阶段，不要只凭总耗时猜瓶颈。
 - Prompt Cache 缓存的是发送给最终 upstream 的稳定前缀，不缓存 Ombre 的动态召回结果；它可以降低重复前缀的费用或上游处理时间，但不能消除每轮 embedding、门控和扩散成本。
 - reranker、query planner、Word Map 和图扩散都是辅助层，不能越过 admission gate。
 - `profile_fact` 是带证据事实；Portrait 是后台模型对多条材料的稳定理解，两者不应直接等同。

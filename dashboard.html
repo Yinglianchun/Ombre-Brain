@@ -7002,127 +7002,17 @@ async function showDetail(id) {
           '</div>' +
         '</form>' +
       '</div>' +
-      '<div id="bucket-moments-block" class="detail-moments" data-bucket-id="' + escAttr(id) + '">' +
-        '<h3>Moments</h3>' +
-        '<div class="loading">解析 moments…</div>' +
-      '</div>' +
       commentsHtml +
       commentFormHtml;
-    loadBucketMoments(id);
   } catch (e) {
     content.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
   }
-}
-
-async function loadBucketMoments(bucketId) {
-  var block = document.getElementById('bucket-moments-block');
-  if (!block) return;
-  try {
-    var res = await authFetch(BASE + '/api/moments?bucket_id=' + encodeURIComponent(bucketId) + '&limit=40');
-    if (!res) return;
-    var data = await res.json();
-    if (!block || block.getAttribute('data-bucket-id') !== bucketId) return;
-    block.innerHTML = renderBucketMoments(data);
-  } catch (e) {
-    if (block && block.getAttribute('data-bucket-id') === bucketId) {
-      block.innerHTML = '<h3>Moments</h3><div class="loading">加载失败: ' + esc(e.message) + '</div>';
-    }
-  }
-}
-
-function renderBucketMoments(data) {
-  if (!data || data.status !== 'ok') {
-    return '<h3>Moments</h3><div class="loading">无 moment 诊断数据</div>';
-  }
-  var layer = data.bucket_layer_debug || {};
-  var moments = Array.isArray(data.moments) ? data.moments : [];
-  var edges = Array.isArray(data.edges) ? data.edges : [];
-  var chips = [
-    { text: 'bucket layer ' + (layer.layer || 'unknown') },
-    { text: 'direct ' + (layer.can_direct_seed ? 'yes' : 'no'), state: layer.can_direct_seed ? 'allow' : 'block' },
-    { text: 'diffuse ' + (layer.can_diffuse ? 'yes' : 'no'), state: layer.can_diffuse ? 'allow' : 'block' },
-    { text: 'related ' + (layer.can_related_target ? 'yes' : 'no'), state: layer.can_related_target ? 'allow' : 'block' },
-    { text: moments.length + ' moments' },
-  ];
-  if (data.edge_count != null) chips.push({ text: data.edge_count + ' edges' });
-  var body = moments.length
-    ? '<div class="moment-list">' + moments.map(renderMomentItem).join('') + '</div>'
-    : '<div class="loading">这条 bucket 暂时没有拆出 moment。</div>';
-  return '<h3>Moments</h3>' + renderMomentChips(chips) + body + renderMomentEdges(edges);
-}
-
-function renderMomentItem(moment, index) {
-  var m = moment || {};
-  var layer = m.layer_debug || {};
-  var gate = m.runtime_gate || {};
-  var direct = gate.direct_seed || {};
-  var related = gate.related_target || {};
-  var recall = gate.recall_context || {};
-  var chips = [
-    { text: 'layer ' + (layer.layer || gate.layer || 'unknown') },
-    { text: 'section ' + (m.section || 'moment') },
-    { text: 'direct ' + (direct.allowed ? 'yes' : 'no') + (direct.reason ? ' · ' + direct.reason : ''), state: direct.allowed ? 'allow' : 'block' },
-    { text: 'related ' + (related.allowed ? 'yes' : 'no') + (related.reason ? ' · ' + related.reason : ''), state: related.allowed ? 'allow' : 'block' },
-    { text: 'context ' + (recall.allowed ? 'yes' : 'no'), state: recall.allowed ? 'allow' : 'block' },
-  ];
-  if (layer.context_only) chips.push({ text: 'context-only', state: 'block' });
-  var source = formatMomentSource(m.metadata && m.metadata.source_ref);
-  var text = m.text || m.text_preview || '';
-  var sourceWindow = m.source_window
-    ? '<div class="moment-source-window"><div class="moment-source-window-title">原文窗口</div><pre>' + esc(m.source_window) + '</pre></div>'
-    : '';
-  return '<div class="moment-item">' +
-    '<div class="moment-head">' +
-      '<div class="moment-title">#' + (index + 1) + ' ' + esc(m.moment_id || '') + '</div>' +
-      (source ? '<div class="moment-source">' + esc(source) + '</div>' : '') +
-    '</div>' +
-    renderMomentChips(chips) +
-    '<div class="moment-body">' + esc(text) + '</div>' +
-    sourceWindow +
-  '</div>';
 }
 
 function renderMomentChips(chips) {
   return '<div class="moment-summary">' + chips.map(function(chip) {
     return '<span class="score-chip ' + (chip.state || '') + '">' + esc(chip.text) + '</span>';
   }).join('') + '</div>';
-}
-
-function renderMomentEdges(edges) {
-  if (!edges.length) {
-    return '<div class="moment-edge-list"><div class="moment-edge-title">Moment Edges</div><div class="loading">无 edge</div></div>';
-  }
-  return '<div class="moment-edge-list">' +
-    '<div class="moment-edge-title">Moment Edges</div>' +
-    edges.map(renderMomentEdge).join('') +
-  '</div>';
-}
-
-function renderMomentEdge(edge) {
-  var e = edge || {};
-  var chips = [
-    { text: e.relation_type || 'relates_to' },
-  ];
-  if (e.confidence != null) chips.push({ text: 'confidence ' + Number(e.confidence).toFixed(2) });
-  if (e.reason) chips.push({ text: String(e.reason).slice(0, 80) });
-  var line = (e.source || 'unknown') + ' → ' + (e.target || 'unknown');
-  return '<div class="moment-item">' +
-    '<div class="moment-head">' +
-      '<div class="moment-title">' + esc(line) + '</div>' +
-      '<div class="moment-source">' + esc(e.created_at || '') + '</div>' +
-    '</div>' +
-    renderMomentChips(chips) +
-  '</div>';
-}
-
-function formatMomentSource(ref) {
-  if (!ref || typeof ref !== 'object') return '';
-  var path = ref.path ? String(ref.path).split(/[\\/]/).pop() : '';
-  var source = ref.source || 'bucket_content';
-  var start = ref.start_line || ref.content_start_line || '';
-  var end = ref.end_line || '';
-  var line = start ? ':' + start + (end && end !== start ? '-' + end : '') : '';
-  return (path ? path + ' · ' : '') + source + line;
 }
 
 function startBucketTitleEdit() {
@@ -8225,8 +8115,8 @@ async function runBreathDebug() {
   if (recall) {
     recall.style.display = '';
     recall.innerHTML = query
-      ? '<h3>Moment 命中</h3><div class="loading">读取 recall debug…</div>'
-      : '<h3>Moment 命中</h3><div class="loading">输入 query 后查看 moment candidates。</div>';
+      ? '<h3>Scene 命中</h3><div class="loading">读取 recall debug…</div>'
+      : '<h3>Scene 命中</h3><div class="loading">输入 query 后查看 Scene candidates。</div>';
   }
   if (diffusion) {
     diffusion.style.display = '';
@@ -8338,13 +8228,13 @@ async function loadRecallDebug(query) {
     var data = await res.json();
     target.innerHTML = renderRecallDebug(data);
   } catch (e) {
-    target.innerHTML = '<h3>Moment 命中</h3><div class="loading">加载失败: ' + esc(e.message) + '</div>';
+    target.innerHTML = '<h3>Scene 命中</h3><div class="loading">加载失败: ' + esc(e.message) + '</div>';
   }
 }
 
 function renderRecallDebug(data) {
   if (!data || data.status !== 'ok') {
-    return '<h3>Moment 命中</h3><div class="loading">无 recall 诊断数据</div>';
+    return '<h3>Scene 命中</h3><div class="loading">无 recall 诊断数据</div>';
   }
   var candidates = Array.isArray(data.candidates) ? data.candidates : [];
   var thresholds = data.recall_thresholds || {};
@@ -8364,8 +8254,8 @@ function renderRecallDebug(data) {
   }
   var body = candidates.length
     ? '<div class="moment-list">' + candidates.map(renderRecallCandidate).join('') + '</div>'
-    : '<div class="loading">没有 moment candidates。</div>';
-  return '<h3>Moment 命中</h3>' + renderMomentChips(chips) + body;
+    : '<div class="loading">没有 Scene candidates。</div>';
+  return '<h3>Scene 命中</h3>' + renderMomentChips(chips) + body;
 }
 
 function renderRecallCandidate(candidate) {
@@ -8380,7 +8270,7 @@ function renderRecallCandidate(candidate) {
     { text: 'pre #' + rankText(c.pre_rank) },
     { text: 'gate ' + (c.gate_rank == null ? 'filtered' : '#' + rankText(c.gate_rank)), state: c.gate === 'filtered' ? 'block' : 'allow' },
     { text: 'final ' + (c.final_rank == null ? '—' : '#' + rankText(c.final_rank)) },
-    { text: 'section ' + (c.section || 'moment') },
+    { text: 'section ' + (c.section || 'scene') },
   ];
   if (c.admission_reason) chips.push({ text: c.admission_reason, state: admitted ? 'allow' : 'block' });
   if (c.rerank_score != null) chips.push({ text: 'rerank ' + Number(c.rerank_score).toFixed(2) });
@@ -8397,7 +8287,7 @@ function renderRecallCandidate(candidate) {
   return '<div class="moment-item">' +
     '<div class="moment-head">' +
       '<div class="moment-title">' + esc(c.bucket_name || c.bucket_id || 'unknown') + '</div>' +
-      '<div class="moment-source">' + esc(c.moment_id || '') + '</div>' +
+      '<div class="moment-source">' + esc(c.bucket_id || '') + '</div>' +
     '</div>' +
     renderMomentChips(chips) +
     (c.annotation_summary ? '<div class="diffusion-path">summary: ' + esc(c.annotation_summary) + '</div>' : '') +
@@ -8523,12 +8413,9 @@ function renderGatewayInjectionItem(item) {
   var recalled = payload.recalled_bucket_ids || [];
   var diffused = payload.diffused_bucket_ids || [];
   var injected = payload.injected_bucket_ids || [];
-  var recalledMoments = payload.recalled_moment_ids || [];
-  var diffusedMoments = payload.diffused_moment_ids || [];
   var directRender = gatewayDirectRenderSummaries(payload);
   var chainDebug = gatewayChainDebugSummaries(payload);
   var memoryEdgeActivation = gatewayMemoryEdgeActivationSummary(payload);
-  var momentChunkShadow = gatewayMomentChunkShadowSummary(payload);
   var dynamicAnchor = gatewayDynamicAnchorSummary(payload);
   var semanticRescue = gatewaySemanticRescueSummary(payload);
   var dreamStatus = payload.dream_context_status || {};
@@ -8559,11 +8446,9 @@ function renderGatewayInjectionItem(item) {
     '<div class="gateway-injection-lines">' +
       '<div class="gateway-injection-line"><span class="label">query:</span> ' + esc(payload.query_preview || '') + '</div>' +
       '<div class="gateway-injection-line"><span class="label">buckets:</span> ' + esc(injected.slice(0, 8).join(', ') || '—') + '</div>' +
-      '<div class="gateway-injection-line"><span class="label">moments:</span> ' + esc(recalledMoments.concat(diffusedMoments).slice(0, 8).join(', ') || '—') + '</div>' +
       (directRender ? '<div class="gateway-injection-line"><span class="label">direct render:</span> ' + esc(directRender) + '</div>' : '') +
       (chainDebug ? '<div class="gateway-injection-line"><span class="label">diffused chain:</span> ' + esc(chainDebug) + '</div>' : '') +
       (memoryEdgeActivation ? '<div class="gateway-injection-line"><span class="label">memory edge shadow:</span> ' + esc(memoryEdgeActivation) + '</div>' : '') +
-      (momentChunkShadow ? '<div class="gateway-injection-line"><span class="label">moment chunk shadow:</span> ' + esc(momentChunkShadow) + '</div>' : '') +
       (dynamicAnchor ? '<div class="gateway-injection-line"><span class="label">anchor gate:</span> ' + esc(dynamicAnchor) + '</div>' : '') +
       (semanticRescue ? '<div class="gateway-injection-line"><span class="label">semantic rescue:</span> ' + esc(semanticRescue) + '</div>' : '') +
     '</div>' +
@@ -8621,26 +8506,6 @@ function gatewayMemoryEdgeActivationSummary(payload) {
       ' [' + decision + ']';
   }).slice(0, 4).join(' / ');
   return edges.status + ' · ' + summary;
-}
-
-function gatewayMomentChunkShadowSummary(payload) {
-  var shadow = payload.moment_chunk_shadow_debug || {};
-  var buckets = Array.isArray(shadow.buckets) ? shadow.buckets : [];
-  if (!shadow.enabled || shadow.status === 'no_candidates') return '';
-  var changed = buckets.filter(function(bucket) { return !!bucket.changed; });
-  if (!changed.length) {
-    return buckets.length + ' candidate bucket' + (buckets.length === 1 ? '' : 's') + ' · unchanged';
-  }
-  return changed.map(function(bucket) {
-    var chunks = Array.isArray(bucket.shadow_moments)
-      ? bucket.shadow_moments.filter(function(chunk) { return !!chunk.split; })
-      : [];
-    var sizes = chunks.map(function(chunk) { return chunk.chars || 0; }).join('/');
-    return (bucket.bucket_name || bucket.bucket_id || 'bucket') +
-      ' ' + (bucket.current_content_moment_count || 0) +
-      ' → ' + (bucket.shadow_content_moment_count || 0) +
-      (sizes ? ' [' + sizes + ']' : '');
-  }).slice(0, 4).join(' / ');
 }
 
 function gatewayDynamicAnchorSummary(payload) {

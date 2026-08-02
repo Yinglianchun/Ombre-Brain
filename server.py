@@ -104,7 +104,6 @@ from memory_edges import (
     legacy_moment_edges_for_recall,
 )
 from entity_edges import EntityEdgeStore, extract_entity_edges_from_bucket
-from memory_cards import ShadowMemoryCardStore
 from memory_moments import MemoryMomentStore, parse_bucket_moments
 from memory_relevance import (
     active_facets,
@@ -202,7 +201,6 @@ setup_logging(config.get("log_level", "INFO"))
 logger = logging.getLogger("ombre_brain")
 
 MEMORY_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-MEMORY_CARD_SHADOW_VERSION = "shadow-card-v1"
 HANDOFF_RECENT_CONTINUITY_MAX_AGE_HOURS = 72
 
 
@@ -241,8 +239,7 @@ persona_engine = PersonaStateEngine(config)           # Persona state engine / �
 memory_edge_store = MemoryEdgeStore(config)            # Explicit memory relationship edges / 显式记忆关系边
 entity_edge_store = EntityEdgeStore(config)            # Person/object hint edges / 人物对象轻边
 memory_node_store = MemoryNodeStore(config)            # Computable memory node index / 可计算记忆节点
-memory_moment_store = MemoryMomentStore(config)        # Structured bucket body/comment moment index / 记忆片段索引
-shadow_memory_card_store = ShadowMemoryCardStore(config) # Non-authoritative primary/cue/evidence previews / 影子记忆卡
+memory_moment_store = MemoryMomentStore(config)        # Legacy migration compatibility only; never used by daily Scene recall
 window_shadow_store = WindowShadowStore(config)         # Append-only full-window self narratives / 整窗第一人称窗影
 window_shadow_rejected_draft_store = WindowShadowRejectedDraftStore(config) # Non-canonical rejected retry drafts / 非 canonical 失败重试稿
 reflection_engine = ReflectionEngine(config)           # Daily/weekly reflection worker / 关系天气
@@ -2810,325 +2807,6 @@ def _leading_body_text(content: str) -> str:
     return (raw[: match.start()] if match else raw).strip()
 
 
-def _fallback_moment_from_body(body_text: str) -> str:
-    text = re.sub(r"\s+", " ", str(body_text or "").strip())
-    if not text:
-        return ""
-    sentences = [part.strip() for part in re.findall(r"[^。！？!?]+[。！？!?]?", text) if part.strip()]
-    selected: list[str] = []
-    for sentence in sentences:
-        candidate = "".join(selected + [sentence])
-        if selected and len(candidate) > 240:
-            break
-        selected.append(sentence)
-        if len(selected) >= 3 or len(candidate) >= 120:
-            break
-    summary = "".join(selected) or text
-    return _clip_text(summary, 240).strip()
-
-
-def _insert_moment_after_leading_body(content: str, moment: str) -> str:
-    raw = str(content or "").strip()
-    text = str(moment or "").strip()
-    if not raw or not text:
-        return raw
-    moment_block = f"### moment\n{text}"
-    match = re.search(r"(?m)^\s{0,3}#{2,6}\s+\S.*$", raw)
-    if not match:
-        return f"{raw}\n\n{moment_block}"
-    body = raw[: match.start()].strip()
-    rest = raw[match.start():].lstrip()
-    if body:
-        return f"{body}\n\n{moment_block}\n\n{rest}"
-    return f"{moment_block}\n\n{rest}"
-
-
-def _section_text_for_auto_moment(content: str) -> str:
-    sections = _profile_fact_sections(content)
-    for key in (
-        SELF_ANCHOR_TAG,
-        "self_anchor",
-        "first_person_anchor",
-        "anchor",
-        "fact",
-    ):
-        text = str(sections.get(_profile_key(key, ""), "") or "").strip()
-        if text:
-            return text
-    return ""
-
-
-def _reflection_text_for_auto_moment(content: str) -> str:
-    raw = strip_wikilinks(str(content or "")).strip()
-    if not raw:
-        return ""
-    matches = list(re.finditer(r"(?m)^\s{0,3}#{2,6}\s+(.+?)\s*$", raw))
-    for index, match in enumerate(matches):
-        heading = _normalize_section_heading(match.group(1))
-        if heading not in {"reflection", "assistantreflection", "havenreflection"}:
-            continue
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
-        return raw[match.end():end].strip()
-    return ""
-
-
-async def _auto_generate_moment_if_missing(content: str, *, section_fallback: bool = False) -> str:
-    raw = str(content or "").strip()
-    if not raw or _has_memory_section(raw, "moment"):
-        return raw
-    body_text = _leading_body_text(raw)
-    if (not body_text or len(body_text) < 10) and section_fallback:
-        body_text = _section_text_for_auto_moment(raw)
-    if not body_text or len(body_text) < 10:
-        return raw
-
-    reflection_text = _reflection_text_for_auto_moment(raw)
-    generated_moment = ""
-    generator = getattr(dehydrator, "generate_moment", None)
-    if callable(generator):
-        try:
-            generated_moment = await generator(body_text, reflection_text)
-        except Exception as e:
-            logger.warning("Auto moment generation failed / 自动 moment 生成失败: %s", e)
-
-    generated_moment = str(generated_moment or "").strip() or _fallback_moment_from_body(body_text)
-    return _insert_moment_after_leading_body(raw, generated_moment) if generated_moment else raw
-
-
-def _is_self_anchor_write_content(
-    self_anchor: object = False,
-    domain: list | tuple | set | str | None = None,
-) -> bool:
-    return is_self_anchor_metadata({"self_anchor": self_anchor, "domain": domain or []})
-
-
-async def _auto_generate_write_moment_if_needed(
-    content: str,
-    tags: list | tuple | set | None = None,
-    *,
-    self_anchor: object = False,
-    domain: list | tuple | set | str | None = None,
-) -> str:
-    _ = tags
-    if _is_self_anchor_write_content(self_anchor, domain):
-        return str(content or "").strip()
-    return await _auto_generate_moment_if_missing(content)
-
-
-_SHADOW_CUE_KINDS = {
-    "paraphrase",
-    "entity",
-    "event",
-    "time",
-    "relationship",
-    "protected_phrase",
-}
-_GENERIC_SHADOW_CUE_KEYS = {
-    "以前",
-    "之前",
-    "当时",
-    "后来",
-    "关系",
-    "记忆",
-    "事情",
-    "开心",
-    "难过",
-}
-
-
-def _generic_shadow_cue_keys() -> set[str]:
-    keys = set(_GENERIC_SHADOW_CUE_KEYS)
-    keys.update(
-        re.sub(r"[\s\W_]+", "", str(term or "").lower())
-        for term in _identity().get("relationship_terms") or []
-        if str(term or "").strip()
-    )
-    return {key for key in keys if key}
-
-
-def _shadow_memory_card_source_hash(bucket: dict) -> str:
-    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-    payload = {
-        "content": str(bucket.get("content") or ""),
-        "name": str(meta.get("name") or bucket.get("name") or ""),
-        "tags": sorted(str(tag) for tag in meta.get("tags", []) or []),
-        "domain": sorted(str(domain) for domain in meta.get("domain", []) or []),
-        "date": str(meta.get("date") or ""),
-    }
-    raw = _json_lib.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def _shadow_memory_card_parts(bucket: dict) -> dict:
-    moments = parse_bucket_moments(bucket)
-
-    def first_text(*sections: str) -> str:
-        for section in sections:
-            for moment in moments:
-                if str(moment.get("section") or "") == section:
-                    text = str(moment.get("text") or "").strip()
-                    if text:
-                        return text
-        return ""
-
-    current_moment = first_text("moment")
-    body = first_text("body", "fact", "evidence_context", "context")
-    reflection = first_text("reflection", "feeling")
-    if not body:
-        body = _leading_body_text(str(bucket.get("content") or ""))
-    if not body:
-        body = current_moment
-
-    evidence_refs = []
-    for moment in moments:
-        section = str(moment.get("section") or "")
-        if section not in {
-            "body",
-            "fact",
-            "moment",
-            "original",
-            "evidence_context",
-            "context",
-            "reflection",
-        }:
-            continue
-        item = {
-            "moment_id": str(moment.get("moment_id") or ""),
-            "section": section,
-            "source": str(moment.get("source") or ""),
-            "source_id": str(moment.get("source_id") or ""),
-        }
-        meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
-        source_ref = meta.get("source_ref")
-        if isinstance(source_ref, dict):
-            item["source_ref"] = dict(source_ref)
-        evidence_refs.append(item)
-        if len(evidence_refs) >= 12:
-            break
-    return {
-        "moments": moments,
-        "body": body,
-        "reflection": reflection,
-        "current_moment": current_moment,
-        "evidence_refs": evidence_refs,
-    }
-
-
-def _shadow_memory_card_needs_primary_candidate(parts: dict) -> bool:
-    current = " ".join(str(parts.get("current_moment") or "").split())
-    body = " ".join(str(parts.get("body") or "").split())
-    reflection = " ".join(str(parts.get("reflection") or "").split())
-    if not current:
-        return True
-    if len(current) >= 60:
-        return False
-    return len(body) >= len(current) + 30 or bool(reflection)
-
-
-def _normalize_shadow_cue_anchors(value: object, limit: int = 8) -> list[dict]:
-    if not isinstance(value, list):
-        return []
-    anchors: list[dict] = []
-    seen = set()
-    generic_keys = _generic_shadow_cue_keys()
-    for raw in value:
-        if isinstance(raw, str):
-            cue = raw
-            kind = "paraphrase"
-            why = ""
-        elif isinstance(raw, dict):
-            cue = raw.get("cue")
-            kind = str(raw.get("kind") or "paraphrase").strip().lower()
-            why = raw.get("why")
-        else:
-            continue
-        cue = re.sub(r"\s+", " ", str(cue or "")).strip(" \t\r\n\"'“”‘’")
-        cue = _clip_text(cue, 80)
-        cue_key = re.sub(r"[\s\W_]+", "", cue.lower())
-        if len(cue_key) < 2 or cue_key in generic_keys or cue_key in seen:
-            continue
-        seen.add(cue_key)
-        anchors.append(
-            {
-                "cue": cue,
-                "kind": kind if kind in _SHADOW_CUE_KINDS else "paraphrase",
-                "why": _clip_text(re.sub(r"\s+", " ", str(why or "")).strip(), 120),
-            }
-        )
-        if len(anchors) >= max(1, int(limit)):
-            break
-    return anchors
-
-
-def _shadow_memory_card_eligible(bucket: dict | None) -> bool:
-    if not isinstance(bucket, dict) or is_self_anchor_bucket(bucket):
-        return False
-    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-    if meta.get("type") == "feel" or meta.get("protected"):
-        return False
-    return bool(str(bucket.get("content") or "").strip())
-
-
-async def _build_shadow_memory_card(bucket: dict) -> dict:
-    bucket_id = str(bucket.get("id") or "").strip()
-    parts = _shadow_memory_card_parts(bucket)
-    body = str(parts.get("body") or "").strip()
-    current_moment = str(parts.get("current_moment") or "").strip()
-    reflection = str(parts.get("reflection") or "").strip()
-    needs_candidate = _shadow_memory_card_needs_primary_candidate(parts)
-    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-    generated = {}
-    generator = getattr(dehydrator, "generate_memory_card", None)
-    if body and callable(generator):
-        try:
-            generated = await generator(
-                body=body,
-                reflection=reflection,
-                current_moment=current_moment,
-                title=str(meta.get("name") or bucket.get("name") or ""),
-                tags=list(meta.get("tags", []) or []),
-                needs_primary_candidate=needs_candidate,
-            )
-        except Exception as e:
-            logger.warning("Shadow memory card generation failed / 影子记忆卡生成失败: %s: %s", bucket_id, e)
-
-    if not isinstance(generated, dict):
-        generated = {}
-    generated_primary = re.sub(
-        r"^#{1,6}\s*moment\s*\n+",
-        "",
-        str(generated.get("primary_abstraction") or "").strip(),
-        flags=re.IGNORECASE,
-    ).strip()
-    if needs_candidate:
-        primary = generated_primary or _fallback_moment_from_body(body)
-        primary_source = "generated_candidate" if generated_primary else "body_fallback_candidate"
-    else:
-        primary = current_moment
-        primary_source = "existing_moment"
-
-    cue_anchors = _normalize_shadow_cue_anchors(generated.get("cue_anchors"), limit=8)
-    if not primary:
-        status = "skipped_no_primary"
-    elif not cue_anchors:
-        status = "partial_no_cues"
-    else:
-        status = "ready"
-    return {
-        "bucket_id": bucket_id,
-        "source_hash": _shadow_memory_card_source_hash(bucket),
-        "generation_version": MEMORY_CARD_SHADOW_VERSION,
-        "primary_abstraction": _clip_text(primary, 360),
-        "existing_moment": _clip_text(current_moment, 360),
-        "primary_source": primary_source,
-        "candidate_only": bool(needs_candidate),
-        "cue_anchors": cue_anchors,
-        "evidence_refs": parts.get("evidence_refs", []),
-        "status": status,
-        "model": str(getattr(dehydrator, "model", "") or ""),
-    }
-
-
 def _bucket_read_payload(bucket: dict) -> dict:
     meta = bucket.get("metadata", {})
     metadata_view = normalize_memory_metadata(bucket)
@@ -4440,7 +4118,10 @@ async def _refresh_bucket_embedding(bucket_id: str) -> bool:
     bucket = await bucket_mgr.get(bucket_id)
     if not bucket:
         return False
-    return await embedding_engine.generate_and_store(bucket_id, bucket_text_for_embedding(bucket))
+    content = bucket_text_for_embedding(bucket)
+    if _is_canonical_scene_bucket(bucket):
+        return await embedding_engine.generate_and_store_scene(bucket_id, content)
+    return await embedding_engine.generate_and_store(bucket_id, content)
 
 
 def _delete_bucket_indexes(bucket_id: str) -> tuple[dict, list[str]]:
@@ -4459,12 +4140,6 @@ def _delete_bucket_indexes(bucket_id: str) -> tuple[dict, list[str]]:
     except Exception as e:
         logger.warning("Failed to delete moment index for bucket / 删除桶 moment 索引失败: %s: %s", bucket_id, e)
         errors.append("moments")
-
-    try:
-        cleanup["shadow_memory_card"] = shadow_memory_card_store.delete(bucket_id)
-    except Exception as e:
-        logger.warning("Failed to delete shadow memory card / 删除影子记忆卡失败: %s: %s", bucket_id, e)
-        errors.append("shadow_memory_card")
 
     try:
         cleanup["edges"] = memory_edge_store.delete_for_bucket(bucket_id)
@@ -4656,129 +4331,6 @@ async def _backfill_memory_enrichment(
 async def enrich_backfill(limit: int = 10) -> dict:
     """后台生成待审核的 tags/cues/importance/edge sidecar 提案；不会修改记忆或召回权重。"""
     return await _backfill_memory_enrichment(limit=limit)
-
-
-async def _shadow_memory_card_candidates(
-    *,
-    limit: int,
-    bucket_id: str = "",
-    query: str = "",
-    include_archive: bool = False,
-    bucket_mgr_arg=None,
-) -> list[dict]:
-    mgr = bucket_mgr_arg or bucket_mgr
-    bucket_id = str(bucket_id or "").strip()
-    query = str(query or "").strip()
-    if bucket_id:
-        bucket = await mgr.get(bucket_id)
-        return [bucket] if _shadow_memory_card_eligible(bucket) else []
-    if query:
-        try:
-            buckets = await mgr.search(
-                query,
-                limit=max(limit, 20),
-                include_archive=include_archive,
-            )
-        except TypeError:
-            buckets = await mgr.search(query, limit=max(limit, 20))
-    else:
-        buckets = await mgr.list_all(include_archive=include_archive)
-        buckets.sort(
-            key=lambda item: str(
-                item.get("metadata", {}).get("updated_at")
-                or item.get("metadata", {}).get("created")
-                or ""
-            ),
-            reverse=True,
-        )
-    return [bucket for bucket in buckets if _shadow_memory_card_eligible(bucket)][:limit]
-
-
-async def memory_card_shadow_backfill(
-    limit: int = 10,
-    bucket_id: str = "",
-    query: str = "",
-    dry_run: bool = True,
-    force: bool = False,
-    include_archive: bool = False,
-) -> dict:
-    """生成 primary_abstraction/cue_anchors/evidence_refs 影子卡；默认只预览，不改 bucket，也不参与召回。"""
-    limit = _int_between(limit, 10, 1, 25)
-    bucket_id = str(bucket_id or "").strip()
-    if bucket_id and not MEMORY_ID_RE.fullmatch(bucket_id):
-        return {"status": "invalid", "reason": "invalid_bucket_id", "bucket_id": bucket_id}
-    candidates = await _shadow_memory_card_candidates(
-        limit=limit,
-        bucket_id=bucket_id,
-        query=query,
-        include_archive=bool(include_archive),
-    )
-    results = []
-    written = 0
-    cached = 0
-    errors = []
-    for bucket in candidates:
-        current_id = str(bucket.get("id") or "").strip()
-        source_hash = _shadow_memory_card_source_hash(bucket)
-        existing = shadow_memory_card_store.get(current_id)
-        if (
-            existing
-            and not force
-            and existing.get("source_hash") == source_hash
-            and existing.get("generation_version") == MEMORY_CARD_SHADOW_VERSION
-        ):
-            item = dict(existing)
-            item["action"] = "cached"
-            results.append(item)
-            cached += 1
-            continue
-        try:
-            card = await _build_shadow_memory_card(bucket)
-            card["action"] = "preview" if dry_run else "written"
-            if not dry_run:
-                stored = shadow_memory_card_store.upsert(card)
-                stored["action"] = "written"
-                card = stored
-                written += 1
-            results.append(card)
-        except Exception as e:
-            logger.warning("Shadow memory card backfill failed / 影子记忆卡补建失败: %s: %s", current_id, e)
-            errors.append(f"{current_id}: {e}")
-    return {
-        "status": "ok",
-        "mode": "shadow_only",
-        "generation_version": MEMORY_CARD_SHADOW_VERSION,
-        "dry_run": bool(dry_run),
-        "processed": len(results),
-        "written": written,
-        "cached": cached,
-        "errors": errors,
-        "cards": results,
-        "injection_enabled": False,
-        "bucket_mutation": False,
-    }
-
-
-async def memory_card_shadow_read(bucket_id: str = "", limit: int = 20) -> dict:
-    """读取已保存的影子记忆卡；这些卡不参与候选、gate、扩散或注入。"""
-    bucket_id = str(bucket_id or "").strip()
-    if bucket_id:
-        if not MEMORY_ID_RE.fullmatch(bucket_id):
-            return {"status": "invalid", "reason": "invalid_bucket_id", "bucket_id": bucket_id}
-        card = shadow_memory_card_store.get(bucket_id)
-        return {
-            "status": "ok" if card else "not_found",
-            "mode": "shadow_only",
-            "card": card,
-            "injection_enabled": False,
-        }
-    return {
-        "status": "ok",
-        "mode": "shadow_only",
-        "stats": shadow_memory_card_store.stats(),
-        "cards": shadow_memory_card_store.list(limit=_int_between(limit, 20, 1, 200)),
-        "injection_enabled": False,
-    }
 
 
 async def _search_edge_backfill_buckets(mgr, query: str, limit: int) -> list[dict]:
@@ -5741,6 +5293,11 @@ async def _format_direct_bucket(
     original = _rendered_bucket_content(bucket)
     header = _direct_bucket_header(bucket, moment)
     attached_year_ring = _format_attached_year_ring(bucket, query_text)
+    if _is_canonical_scene_bucket(bucket):
+        block = f"{header}\n{original}" if original else header
+        if attached_year_ring:
+            block += "\n\n" + attached_year_ring
+        return _trim_text_to_token_budget(block, token_budget)
     if _is_source_record_synthetic_moment(moment):
         return await _format_source_record_direct_bucket(
             bucket,
@@ -5950,8 +5507,10 @@ def _normalize_direct_render_mode(value: object) -> str:
 
 
 def _normalize_retrieval_mode(value: object) -> str:
-    mode = str(value or "graph").strip().lower()
-    return mode if mode in {"graph", "bucket"} else "graph"
+    # Moment-graph recall is retired. Keep accepting the old argument so cached
+    # clients do not fail, but route every request through whole-Scene recall.
+    _ = value
+    return "bucket"
 
 
 def _normalize_recall_fusion_mode(value: object) -> str:
@@ -5976,6 +5535,37 @@ def _bucket_relevance_node(bucket: dict, score: float = 0.0) -> dict:
             "bucket_domain": meta.get("domain") or [],
             "annotation_summary": meta.get("annotation_summary") or meta.get("summary") or "",
             "evidence_spans": meta.get("evidence_spans") or [],
+        },
+    }
+
+
+def _canonical_scene_recall_item(bucket: dict) -> dict | None:
+    """Build one ephemeral recall item for one Scene without creating a slice."""
+    if not _is_canonical_scene_bucket(bucket):
+        return None
+    bucket_id = str(bucket.get("id") or "")
+    if not bucket_id:
+        return None
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    return {
+        "moment_id": "",  # retired compatibility field; never exposed for Scenes
+        "bucket_id": bucket_id,
+        "node_kind": "scene",
+        "section": "scene",
+        "text": bucket_content_for_recall(bucket),
+        "ordinal": 0,
+        "source": "canonical_scene",
+        "source_id": bucket_id,
+        "score": _score_to_unit(bucket.get("score", 0.0)),
+        "metadata": {
+            "bucket_name": meta.get("name") or bucket_id,
+            "bucket_type": meta.get("type") or "dynamic",
+            "bucket_tags": list(meta.get("tags") or []),
+            "bucket_domain": list(meta.get("domain") or []),
+            "bucket_importance": meta.get("importance"),
+            "bucket_date": meta.get("date"),
+            "bucket_created": meta.get("created"),
+            "bucket_updated_at": meta.get("updated_at") or meta.get("last_active"),
         },
     }
 
@@ -6234,12 +5824,9 @@ def _bucket_date_meta_parts(bucket: dict | None = None, moment: dict | None = No
 def _direct_bucket_header(bucket: dict, moment: dict) -> str:
     bucket_id = str(bucket.get("id") or moment.get("bucket_id") or "")
     title = _moment_bucket_title(moment) or str((bucket.get("metadata", {}) or {}).get("name") or bucket_id)
-    section = str(moment.get("section") or "body")
     date_part = " ".join(_bucket_date_meta_parts(bucket, moment))
-    return (
-        f"[bucket_id:{bucket_id}] [moment_id:{moment.get('moment_id') or ''}] "
-        f"{date_part} {section} {title}"
-    ).strip()
+    object_label = "Scene" if _is_canonical_scene_bucket(bucket) else "legacy_memory"
+    return f"[bucket_id:{bucket_id}] {date_part} {object_label} {title}".strip()
 
 
 def _rendered_bucket_content(bucket: dict) -> str:
@@ -8188,7 +7775,7 @@ async def _recall_memory(
     debug: bool = False,
     surface: str = "manual",
     direct_render_mode: str = "auto",
-    retrieval_mode: str = "graph",
+    retrieval_mode: str = "bucket",
     mode: str = "",
     session_id: str = "",
     previous_session_id: str = "",
@@ -8569,8 +8156,10 @@ async def _recall_memory(
         returned_moments: list[dict] = []
         suppressed_buckets = []
         seen_bucket_ids: set[str] = set()
+        displayed_buckets: list[dict] = []
+        direct_limit = 1 if include_related else max_results
         for bucket in matches:
-            if len(direct_results) >= max_results or token_used >= max_tokens:
+            if len(direct_results) >= direct_limit or token_used >= max_tokens:
                 break
             bucket_id = str(bucket.get("id") or "")
             if not bucket_id or bucket_id in seen_bucket_ids:
@@ -8596,8 +8185,9 @@ async def _recall_memory(
                     }
                 )
                 continue
-            bucket_moments = _direct_moments_for_bucket(bucket, query)
-            moment = _representative_moment(bucket_moments)
+            scene_item = _canonical_scene_recall_item(bucket)
+            bucket_moments = [scene_item] if scene_item else _direct_moments_for_bucket(bucket, query)
+            moment = scene_item or _representative_moment(bucket_moments)
             if not moment:
                 moment = _source_record_synthetic_moment_for_bucket(
                     bucket,
@@ -8625,20 +8215,37 @@ async def _recall_memory(
             returned_moments.append(moment)
             displayed_moment_ids.append(str(moment.get("moment_id") or ""))
             seen_bucket_ids.add(bucket_id)
+            displayed_buckets.append(bucket)
             token_used += entry_tokens
 
-        dream_block = "" if auto_surface else await dream_engine.surface_for_breath(
-            query=query,
-            valence=valence,
-            arousal=arousal,
-            is_session_start=is_session_start,
-            embedding_engine=embedding_engine,
-        )
+        related_block = ""
+        related_source_bucket_ids: list[str] = []
+        if include_related and displayed_buckets and token_used < max_tokens:
+            related_block = await _build_mcp_diffused_memory_block(
+                displayed_buckets,
+                all_buckets,
+                max(0, max_tokens - token_used),
+                related_per_memory,
+                edge_min_confidence,
+                query,
+                exclude_bucket_ids=seen_bucket_ids,
+            )
+            if related_block:
+                related_source_bucket_ids = [str(bucket.get("id") or "") for bucket in displayed_buckets]
+
+        # Explicit recall returns one evidence route. Dream surfacing remains a
+        # separate lifecycle and must not be mixed into a Scene result.
+        dream_block = ""
         response_parts = []
         response_sections = []
         if direct_results:
-            response_parts.append("=== 直接命中记忆 ===\n" + "\n---\n".join(direct_results))
+            scene_result = "=== Scene ===\n" + "\n---\n".join(direct_results)
+            if related_block:
+                scene_result += "\n\n关联 Scene：\n" + related_block
+            response_parts.append(scene_result)
             response_sections.append("direct")
+            if related_block:
+                response_sections.append("related")
         if dream_block:
             response_sections.append("dream")
         _write_breath_recall_diagnostics(
@@ -8656,8 +8263,8 @@ async def _recall_memory(
             suppressed_candidates=[],
             displayed_moment_ids=displayed_moment_ids,
             secondary_moment_ids=[],
-            related_source_bucket_ids=[],
-            related_included=False,
+            related_source_bucket_ids=related_source_bucket_ids,
+            related_included=bool(related_block),
             drift_included=False,
             dream_included=bool(dream_block),
             response_sections=response_sections,
@@ -9686,7 +9293,7 @@ async def hold(
     domain: str = "",
     cues: str = "",
 ) -> str:
-    """原样保存一件由当前 AI 写好的长期 Scene，不调用模型脱水、改写、命名或同步打标。普通 content 直接写一段完整原文经历，不要添加 `## Scene`、`### scene`、`### moment` 或 sibling section。Scene 对象本身就是类型和普通召回单位。多个场景分别调用 hold。cues 必须由当前作者亲自写 1～8 个未来可能自然出现的召回入口，回答“以后提到什么时希望这段记忆回来”；可传数组，字符串可用逗号、竖线或换行分隔；系统不从 title、引句或正文补造。它们只写入稀疏 sidecar 索引，不进入正文或 Scene 原文向量，也不会彼此扩散。若部署启用 Scene linker，写入返回后可异步生成待审关系边提案；提案必须引用两端 content 原句，不改正文、不自动写正式边。有来源的新理解用 comment_bucket/annotate 挂回来源。feel、whisper、daily impression 与 ProfileFact 默认拒绝新增；旧数据仍可读取。date/title/domain、valence/arousal 仅为旧客户端兼容。"""
+    """原样保存一件由当前 AI 写好的长期 Scene，不调用模型脱水、改写、命名或同步打标。一条 Scene 只记录一个可独立召回的核心事件；可保留理解它所必需的背景、过程与结果，但不要并列第二件事。普通 content 直接写完整原文经历，不要添加类型标题或 sibling section。Scene 对象本身就是最小记忆与普通召回单位；多件事分别调用。cues 必须由当前作者亲自写 1～8 个未来可能自然出现的召回入口，回答“以后提到什么时希望这段记忆回来”；可传数组，字符串可用逗号、竖线或换行分隔；系统不从 title、引句或正文补造。它们只写入稀疏 sidecar 索引，不进入正文或 Scene 原文向量，也不会彼此扩散。若部署启用 Scene linker，写入返回后可异步生成待审关系边提案；提案必须引用两端 content 原句，不改正文、不自动写正式边。有来源的新理解用 comment_bucket/annotate 挂回来源。feel、whisper、daily impression 与 ProfileFact 默认拒绝新增；旧数据仍可读取。date/title/domain、valence/arousal 仅为旧客户端兼容。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -12099,12 +11706,6 @@ async def _edit_scene_memory(
         before_bucket,
         updated_bucket,
     )
-    moment_reindexed = False
-    try:
-        memory_moment_store.upsert_bucket(updated_bucket)
-        moment_reindexed = True
-    except Exception as exc:
-        logger.warning("Edited Scene moment reindex failed / Scene 修订后 moment 重建失败: %s", exc)
     entity_edges_refreshed = False
     try:
         _refresh_entity_edges_for_bucket(updated_bucket)
@@ -12122,7 +11723,6 @@ async def _edit_scene_memory(
             (updated_bucket.get("metadata") or {}).get("updated_at")
         ),
         "embedding_refresh": "queued" if embedding_queued else "skipped",
-        "moment_reindexed": moment_reindexed,
         "entity_edges_refreshed": entity_edges_refreshed,
         "scene_linking_queued": _queue_scene_linking(scene_id),
         "scene": _bucket_read_payload(updated_bucket),
@@ -12155,11 +11755,6 @@ def _archive_scene_indexes(scene_id: str) -> tuple[dict, list[str]]:
         logger.warning("Archived Scene embedding cleanup failed / 归档 Scene 向量清理失败: %s", exc)
         errors.append("embedding")
     try:
-        cleanup["moments"] = memory_moment_store.delete_bucket(scene_id)
-    except Exception as exc:
-        logger.warning("Archived Scene moment cleanup failed / 归档 Scene moment 清理失败: %s", exc)
-        errors.append("moments")
-    try:
         cleanup["entity_edges"] = entity_edge_store.delete_for_bucket(scene_id)
     except Exception as exc:
         logger.warning("Archived Scene entity cleanup failed / 归档 Scene 实体边清理失败: %s", exc)
@@ -12183,11 +11778,6 @@ def _restore_scene_indexes(bucket: dict) -> tuple[dict, list[str]]:
     except Exception as exc:
         logger.warning("Restored Scene embedding refresh failed / 恢复 Scene 向量刷新失败: %s", exc)
         errors.append("embedding")
-    try:
-        restored["moments"] = memory_moment_store.upsert_bucket(bucket)
-    except Exception as exc:
-        logger.warning("Restored Scene moment reindex failed / 恢复 Scene moment 重建失败: %s", exc)
-        errors.append("moments")
     try:
         restored["entity_edges"] = _refresh_entity_edges_for_bucket(bucket)
     except Exception as exc:
@@ -12461,7 +12051,7 @@ async def write_scene(
     date: str = "",
     domain: str = "",
 ) -> str:
-    """保存一条 Scene。content 用你的第一人称写成一个能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要写成摘要或说明；cues 由你写 1～8 个“以后提到什么时希望它回来”的入口，不是摘要，可传数组，字符串可用逗号、竖线或换行分隔；title、date、domain 可选。"""
+    """保存一条 Scene。一条只记录一个可独立召回的核心事件；可保留理解它所必需的背景、过程与结果，但不要并列第二件事。content 用你的第一人称写成能独立理解的完整经历，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要写成摘要或说明；Scene 本身就是最小记忆，不再拆片或生成索引卡。cues 由你写 1～8 个“以后提到什么时希望它回来”的入口，不是摘要，可传数组，字符串可用逗号、竖线或换行分隔；title、date、domain 可选。"""
     return await _write_scene_memory(
         content,
         title=title,
@@ -14402,23 +13992,6 @@ async def api_bucket_detail(request):
     return JSONResponse(_bucket_read_payload(bucket))
 
 
-@mcp.custom_route("/api/moments", methods=["GET"])
-async def api_moments(request):
-    """Return dashboard diagnostics for indexed memory moments."""
-    from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
-    if err:
-        return err
-
-    bucket_id = str(request.query_params.get("bucket_id", "") or "").strip()
-    limit = _int_between(request.query_params.get("limit"), 20, 1, 200)
-    payload = await inspect_moments(bucket_id=bucket_id, limit=limit)
-    if payload.get("status") == "error":
-        status_code = 404 if payload.get("error") == "not_found" else 400
-        return JSONResponse(payload, status_code=status_code)
-    return JSONResponse(payload)
-
-
 @mcp.custom_route("/api/todos", methods=["GET"])
 async def api_todos(request):
     """Deprecated: derived followup/todo items are disabled."""
@@ -15394,7 +14967,7 @@ async def api_config_get(request):
             "domain_sentinel_max_tokens": gateway_cfg.get("domain_sentinel_max_tokens", 260),
             "current_inner_state_interval_rounds": gateway_cfg.get("current_inner_state_interval_rounds", 0),
             "direct_render_mode": _normalize_direct_render_mode(gateway_cfg.get("direct_render_mode", "auto")),
-            "retrieval_mode": _normalize_retrieval_mode(gateway_cfg.get("retrieval_mode", "graph")),
+            "retrieval_mode": _normalize_retrieval_mode(gateway_cfg.get("retrieval_mode", "bucket")),
             "operit_context_rewrite_enabled": _bool_value(
                 gateway_cfg.get("operit_context_rewrite_enabled"),
                 False,

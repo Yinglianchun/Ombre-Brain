@@ -47,7 +47,6 @@ from memory_moments import (
     MemoryMomentStore,
     build_bucket_recall_item,
     parse_bucket_moments,
-    preview_bucket_moment_chunks,
 )
 from memory_relevance import (
     active_facets,
@@ -319,9 +318,6 @@ TASK_ONLY_MOMENT_SECTIONS = {"followup", "followup_log"}
 MOMENT_TEMPERATURE_SECTIONS = CONTEXT_ONLY_SECTIONS - TASK_ONLY_MOMENT_SECTIONS
 DIRECT_AUX_CONTEXT_SECTIONS = MOMENT_TEMPERATURE_SECTIONS - {"comment"}
 PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feeling", "comment")
-MOMENT_CHUNK_SHADOW_TARGET_CHARS = 320
-MOMENT_CHUNK_SHADOW_MAX_CHARS = 520
-MOMENT_CHUNK_SHADOW_MIN_TAIL_CHARS = 100
 class GatewayService:
     """
     OpenAI-compatible gateway that injects Ombre memory before forwarding
@@ -356,6 +352,8 @@ class GatewayService:
         self.memory_edge_store = MemoryEdgeStore(config)
         self.scene_edge_store = SceneEdgeStore(config, create=False)
         self.memory_node_store = memory_node_store or MemoryNodeStore(config)
+        # Read-only compatibility for stale explicit IDs and offline migration
+        # diagnostics. Whole-Scene runtime never refreshes or searches it.
         self.memory_moment_store = MemoryMomentStore(config)
         self._moment_graph_cache_signature = ""
         self._moment_graph_cache_value: tuple[list[dict], dict[str, list[dict]], list[dict]] | None = None
@@ -415,9 +413,9 @@ class GatewayService:
             self.dynamic_top_k,
             min(200, int(self.gateway_cfg.get("semantic_candidate_top_k", max(50, self.dynamic_top_k)))),
         )
-        self.moment_search_limit = max(
+        self.scene_candidate_limit = max(
             1,
-            min(200, int(self.gateway_cfg.get("moment_search_limit", max(50, self.dynamic_top_k * 2)))),
+            min(200, int(self.gateway_cfg.get("scene_candidate_limit", max(50, self.dynamic_top_k * 2)))),
         )
         self.inject_max_cards = max(0, min(2, int(self.gateway_cfg.get("inject_max_cards", 2))))
         self.skip_recent_rounds = max(0, int(self.gateway_cfg.get("skip_recent_rounds", 5)))
@@ -446,7 +444,7 @@ class GatewayService:
             self.gateway_cfg.get("direct_render_mode", "auto")
         )
         self.retrieval_mode = self._normalize_retrieval_mode(
-            self.gateway_cfg.get("retrieval_mode", "graph")
+            self.gateway_cfg.get("retrieval_mode", "bucket")
         )
         self.relationship_weather_budget = int(self.gateway_cfg.get("relationship_weather_budget", 220))
         self.relationship_weather_include_weekly = bool(
@@ -645,31 +643,22 @@ class GatewayService:
         all_buckets = await self._list_gateway_buckets(include_archive=False)
         list_buckets_ms = max(0, int((time.perf_counter() - stage_started_at) * 1000))
         stage_started_at = time.perf_counter()
-        moments, _grouped, edges = self._refresh_moment_graph(all_buckets)
-        moment_graph_ms = max(0, int((time.perf_counter() - stage_started_at) * 1000))
-        stage_started_at = time.perf_counter()
         lexical_buckets = self.bucket_mgr.warm_lexical_profiles(all_buckets)
         lexical_profiles_ms = max(0, int((time.perf_counter() - stage_started_at) * 1000))
         stage_started_at = time.perf_counter()
         for bucket in all_buckets:
             facets_for_node(self._bucket_relevance_node(bucket), self.relevance_options)
-        for moment in moments:
-            facets_for_node(moment, self.relevance_options)
         relevance_facets_ms = max(0, int((time.perf_counter() - stage_started_at) * 1000))
         logger.info(
             "Gateway recall runtime warmed | latency_ms=%s query_plan_ms=%s list_buckets_ms=%s "
-            "moment_graph_ms=%s lexical_profiles_ms=%s relevance_facets_ms=%s buckets=%s "
-            "lexical_buckets=%s moments=%s edges=%s",
+            "lexical_profiles_ms=%s relevance_facets_ms=%s buckets=%s lexical_buckets=%s",
             max(0, int((time.perf_counter() - started_at) * 1000)),
             query_plan_ms,
             list_buckets_ms,
-            moment_graph_ms,
             lexical_profiles_ms,
             relevance_facets_ms,
             len(all_buckets),
             lexical_buckets,
-            len(moments),
-            len(edges),
         )
 
     def _narrative_roll_shadow_debug(
@@ -786,7 +775,7 @@ class GatewayService:
                 "related_memory_budget": self.related_memory_budget,
                 "operit_context_rewrite_enabled": self.operit_context_rewrite_enabled,
                 "semantic_candidate_top_k": self.semantic_candidate_top_k,
-                "moment_search_limit": self.moment_search_limit,
+                "scene_candidate_limit": self.scene_candidate_limit,
                 "diffusion_inject_max_items": self.diffusion_inject_max_items,
                 "diffusion_inject_min_confidence": self.diffusion_inject_min_confidence,
                 "diffusion_explore_multiplier": self.diffusion_explore_multiplier,
@@ -858,7 +847,7 @@ class GatewayService:
             "related_memory_budget": self.related_memory_budget,
             "operit_context_rewrite_enabled": self.operit_context_rewrite_enabled,
             "semantic_candidate_top_k": self.semantic_candidate_top_k,
-            "moment_search_limit": self.moment_search_limit,
+            "scene_candidate_limit": self.scene_candidate_limit,
             "diffusion_inject_max_items": self.diffusion_inject_max_items,
             "diffusion_inject_min_confidence": self.diffusion_inject_min_confidence,
             "diffusion_explore_multiplier": self.diffusion_explore_multiplier,
@@ -1252,10 +1241,10 @@ class GatewayService:
             )
             self.gateway_cfg["semantic_candidate_top_k"] = self.semantic_candidate_top_k
             updated.append("gateway.semantic_candidate_top_k")
-        if "moment_search_limit" in payload:
-            self.moment_search_limit = max(1, min(200, int(payload["moment_search_limit"])))
-            self.gateway_cfg["moment_search_limit"] = self.moment_search_limit
-            updated.append("gateway.moment_search_limit")
+        if "scene_candidate_limit" in payload:
+            self.scene_candidate_limit = max(1, min(200, int(payload["scene_candidate_limit"])))
+            self.gateway_cfg["scene_candidate_limit"] = self.scene_candidate_limit
+            updated.append("gateway.scene_candidate_limit")
         if "diffusion_inject_max_items" in payload:
             self.diffusion_inject_max_items = max(0, min(2, int(payload["diffusion_inject_max_items"])))
             self.gateway_cfg["diffusion_inject_max_items"] = self.diffusion_inject_max_items
@@ -2759,22 +2748,12 @@ class GatewayService:
                             if isinstance(bucket.get("_recall_signal"), dict)
                             else {}
                         )
-                        context_moments = self._context_moments_for_bucket(bucket)
-                        bucket_moments = self._direct_moments_for_bucket(bucket, current_user_query)
-                        moment = self._representative_moment(bucket_moments)
-                        if not moment:
-                            moment = self._source_record_synthetic_moment_for_bucket(
-                                bucket,
-                                current_user_query,
-                                selected_reason="selected_bucket",
-                            )
-                        if not moment:
+                        scene_item = self._canonical_scene_recall_item(bucket)
+                        if not scene_item:
                             continue
-                        moment = self._moment_with_bucket_recall_signal(moment, signal)
-                        # Keep context-only comments available for YearRing attachment;
-                        # only the representative seed is constrained to direct moments.
-                        grouped_moments[bucket_id] = context_moments
-                        recalled_moments.append(moment)
+                        scene_item = self._moment_with_bucket_recall_signal(scene_item, signal)
+                        grouped_moments[bucket_id] = [scene_item]
+                        recalled_moments.append(scene_item)
                     moment_candidates = list(recalled_moments)
                     suppressed_moments = []
                     mark_step("dynamic_recall_bucket_format", stage_started_at)
@@ -9855,7 +9834,7 @@ class GatewayService:
                 moment_search_queries.append(raw_moment_query)
             seen_moment_ids: set[str] = set()
             for moment_query in moment_search_queries:
-                search_limit = max(self.moment_search_limit, self.inject_max_cards * 8)
+                search_limit = max(self.scene_candidate_limit, self.inject_max_cards * 8)
                 if all_moments is None:
                     query_planner_debug["moment_search_source"] = "sqlite_store"
                     searched_moments = self.memory_moment_store.search_moments(
@@ -10445,6 +10424,9 @@ class GatewayService:
         mode = self.direct_render_mode
         original = self._rendered_bucket_content(bucket)
         header = self._direct_bucket_header(bucket, moment)
+        if self._is_canonical_scene_bucket(bucket):
+            block = f"{header}\n{original}" if original else header
+            return self._trim_text(block, budget)
         if self._is_source_record_synthetic_moment(moment):
             return await self._format_source_record_direct_bucket(
                 bucket,
@@ -10921,8 +10903,10 @@ class GatewayService:
 
     @staticmethod
     def _normalize_retrieval_mode(value: object) -> str:
-        mode = str(value or "bucket").strip().lower()
-        return mode if mode in {"graph", "bucket"} else "bucket"
+        # Moment-graph recall is retired. Old config values are accepted as a
+        # compatibility input but can no longer reactivate that runtime path.
+        _ = value
+        return "bucket"
 
     @staticmethod
     def _normalize_recall_fusion_mode(value: object) -> str:
@@ -11090,20 +11074,16 @@ class GatewayService:
         title = self._moment_bucket_title(moment) or str(
             (bucket.get("metadata", {}) or {}).get("name") or bucket_id
         )
-        section = str(moment.get("section") or "body")
         date_part = " ".join(self._bucket_date_meta_parts(bucket, moment))
-        return (
-            f"[bucket_id:{bucket_id}] [moment_id:{moment.get('moment_id') or ''}] "
-            f"{date_part} {section} {title}"
-        ).strip()
+        object_label = "Scene" if self._is_canonical_scene_bucket(bucket) else "legacy_memory"
+        return f"[bucket_id:{bucket_id}] {date_part} {object_label} {title}".strip()
 
     def _direct_bucket_brief_header(self, bucket: dict, moment: dict) -> str:
         bucket_id = str(bucket.get("id") or moment.get("bucket_id") or "")
-        moment_id = str(moment.get("moment_id") or "")
         title = self._moment_bucket_title(moment) or str(
             (bucket.get("metadata", {}) or {}).get("name") or bucket_id
         )
-        parts = [f"[bucket_id:{bucket_id}]", f"[moment_id:{moment_id}]"]
+        parts = [f"[bucket_id:{bucket_id}]"]
         parts.extend(self._bucket_date_meta_parts(bucket, moment))
         if title:
             parts.append(title)
@@ -13061,61 +13041,6 @@ class GatewayService:
         else:
             payload.update(status="no_path", reason="scene_edges_below_activation")
         return payload
-
-    def _moment_chunk_shadow_debug(
-        self,
-        bucket_map: dict[str, dict],
-        bucket_ids: list[str],
-    ) -> dict[str, Any]:
-        candidate_ids = list(
-            dict.fromkeys(
-                str(bucket_id or "")
-                for bucket_id in bucket_ids or []
-                if str(bucket_id or "") and str(bucket_id or "") in bucket_map
-            )
-        )[:12]
-        previews: list[dict[str, Any]] = []
-        errors: list[dict[str, str]] = []
-        for bucket_id in candidate_ids:
-            bucket = bucket_map[bucket_id]
-            try:
-                preview = preview_bucket_moment_chunks(
-                    bucket,
-                    target_chars=MOMENT_CHUNK_SHADOW_TARGET_CHARS,
-                    max_chars=MOMENT_CHUNK_SHADOW_MAX_CHARS,
-                    min_tail_chars=MOMENT_CHUNK_SHADOW_MIN_TAIL_CHARS,
-                )
-            except Exception as exc:
-                logger.warning("Gateway moment chunk shadow preview failed for %s: %s", bucket_id, exc)
-                errors.append({"bucket_id": bucket_id, "reason": type(exc).__name__})
-                continue
-            metadata = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
-            previews.append(
-                {
-                    "bucket_id": bucket_id,
-                    "bucket_name": str(metadata.get("name") or bucket_id),
-                    **preview,
-                }
-            )
-        changed_ids = [
-            str(preview.get("bucket_id") or "")
-            for preview in previews
-            if preview.get("changed") and preview.get("bucket_id")
-        ]
-        return {
-            "enabled": True,
-            "mode": "shadow",
-            "strategy": "line_aware_v1",
-            "affects_recall": False,
-            "status": "previewed" if previews else ("error" if errors else "no_candidates"),
-            "target_chars": MOMENT_CHUNK_SHADOW_TARGET_CHARS,
-            "max_chars": MOMENT_CHUNK_SHADOW_MAX_CHARS,
-            "min_tail_chars": MOMENT_CHUNK_SHADOW_MIN_TAIL_CHARS,
-            "candidate_bucket_ids": candidate_ids,
-            "changed_bucket_ids": changed_ids,
-            "buckets": previews,
-            "errors": errors,
-        }
 
     @staticmethod
     def _recall_query_plan_debug(plan) -> dict[str, Any]:
@@ -16850,30 +16775,6 @@ class GatewayService:
                 )
                 for moment in (suppressed_moments or [])[:20]
             ]
-        moment_chunk_shadow_bucket_ids = list(
-            dict.fromkeys(
-                recalled_bucket_ids
-                + [
-                    str(row.get("bucket_id") or "")
-                    for row in suppressed_bucket_debug_rows
-                    if row.get("bucket_id")
-                ]
-                + diffused_candidate_bucket_ids
-            )
-        )
-        moment_chunk_shadow_debug = (
-            {
-                "enabled": False,
-                "status": "skipped",
-                "reason": "compact_debug",
-                "bucket_ids": moment_chunk_shadow_bucket_ids,
-            }
-            if compact_debug
-            else self._moment_chunk_shadow_debug(
-                bucket_map,
-                moment_chunk_shadow_bucket_ids,
-            )
-        )
         recall_why_summary = self._build_recall_why_summary(
             injected_bucket_ids=injected_bucket_ids,
             direct_rows=recalled_moment_debug_rows,
@@ -16927,7 +16828,6 @@ class GatewayService:
             "active_reminder_ids": active_reminder_ids,
             "query_planner_debug": query_planner_debug or self._query_planner_debug_base(query),
             "structural_activation_debug": structural_activation_debug,
-            "moment_chunk_shadow_debug": moment_chunk_shadow_debug,
             "semantic_recall_debug": semantic_recall_debug
             or self.semantic_recall_router.debug_base(query),
             "narrative_recall_debug": narrative_recall_debug
@@ -18620,6 +18520,39 @@ class GatewayService:
             "content": bucket_content_for_recall(bucket),
             "name": meta.get("name") or bucket.get("id") or "",
             "metadata": meta,
+        }
+
+    def _canonical_scene_recall_item(self, bucket: dict) -> dict | None:
+        """Build one ephemeral recall item for one Scene without slicing it."""
+        if not self._is_canonical_scene_bucket(bucket):
+            return None
+        bucket_id = str(bucket.get("id") or "")
+        if not bucket_id:
+            return None
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        score = self._safe_float(bucket.get("score"), 0.0)
+        if score > 1.0:
+            score /= 100.0
+        return {
+            "moment_id": "",  # retired compatibility field; never exposed for Scenes
+            "bucket_id": bucket_id,
+            "node_kind": "scene",
+            "section": "scene",
+            "text": bucket_content_for_recall(bucket),
+            "ordinal": 0,
+            "source": "canonical_scene",
+            "source_id": bucket_id,
+            "score": max(0.0, min(1.0, score)),
+            "metadata": {
+                "bucket_name": meta.get("name") or bucket_id,
+                "bucket_type": meta.get("type") or "dynamic",
+                "bucket_tags": list(meta.get("tags") or []),
+                "bucket_domain": list(meta.get("domain") or []),
+                "bucket_importance": meta.get("importance"),
+                "bucket_date": meta.get("date"),
+                "bucket_created": meta.get("created"),
+                "bucket_updated_at": meta.get("updated_at") or meta.get("last_active"),
+            },
         }
 
     def _is_relevance_suppressed(self, query: str, bucket: dict) -> bool:

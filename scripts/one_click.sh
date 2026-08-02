@@ -493,12 +493,6 @@ identity_semantics:
     - "ai_favorite"
     - "favorite_memory"
 
-moment_annotations:
-  enabled: true
-  max_summary_chars: 160
-  max_evidence_spans: 3
-  max_evidence_chars: 120
-
 gateway:
   host: "0.0.0.0"
   port: 8010
@@ -524,7 +518,7 @@ gateway:
   date_persona_trace_include_daily: true
   recalled_memory_budget: 400
   direct_render_mode: "auto"
-  retrieval_mode: "graph"
+  retrieval_mode: "bucket"
   portrait_memory_enabled: false
   portrait_memory_budget: 360
   portrait_memory_max_sources: 8

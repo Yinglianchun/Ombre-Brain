@@ -142,6 +142,9 @@ embedding:
   model: "Qwen/Qwen3-Embedding-4B"  # Embedding model / 向量化模型
   base_url: "https://api.siliconflow.cn/v1"
   max_chars: 6000                 # Max chars sent per embedding request / 单次向量化最多字符数
+  scene_chunk_chars: 900          # Long Scene raw-span size; spans are not memory objects
+  scene_chunk_overlap: 160        # Verbatim overlap between adjacent Scene spans
+  scene_chunk_min_chars: 120      # Do not index tiny trailing spans
   query_timeout_seconds: 3         # Gateway recall query timeout / Gateway 召回查询向量超时秒数
   query_instruction: "Given a memory search query, retrieve relevant long-term memory passages."
   document_instruction: ""
@@ -272,16 +275,6 @@ identity_semantics:
   min_confidence: 0.78
   evidence_tags: ["profile_fact", "ai_favorite", "favorite_memory"]
 
-# --- Moment annotations / 记忆片段标注 ---
-# Stores lightweight summary/facets/evidence_spans in moment metadata.
-# The current built-in annotator is a deterministic fallback; future workers can
-# overwrite annotation_facets/evidence_spans with model-produced evidence.
-moment_annotations:
-  enabled: true
-  max_summary_chars: 160
-  max_evidence_spans: 3
-  max_evidence_chars: 120
-
 # --- Gateway / 网关注入配置 ---
 # Exposes OpenAI-compatible /v1/chat/completions and Anthropic-compatible
 # /v1/messages endpoints that inject Core Memory + Recent Context + Recalled Memory
@@ -385,8 +378,7 @@ gateway:
   date_persona_trace_include_daily: true
   recalled_memory_budget: 900
   direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
-  retrieval_mode: graph       # default: direct Scene recall plus bounded Scene-edge diffusion
-  scene_native_recall_enabled: false # opt-in/reversible: true enables native Scene + legacy bridge dual graph
+  retrieval_mode: bucket      # compatibility key; runtime is permanently whole-Scene recall
   operit_context_rewrite_enabled: false # Operit-only text turn cleanup: split stable/activity attachment context before forwarding
   bucket_list_cache_ttl_seconds: 300 # cache active bucket list inside Gateway; 0 disables
   portrait_memory_enabled: false # retired compatibility key; Gateway ignores raw profile_fact/anchor injection
@@ -410,7 +402,7 @@ gateway:
   relationship_weather_interval_rounds: 0
   favorite_memory_interval_rounds: 0
   semantic_candidate_top_k: 50       # internal embedding candidate pool; visible injection stays gated
-  moment_search_limit: 50            # internal moment candidate pool for graph retrieval
+  scene_candidate_limit: 50          # whole-Scene candidate pool; no derived fragments
   recall_fusion_mode: dynamic        # dynamic | legacy; legacy uses the weights below as the main score
   semantic_weight: 0.45
   keyword_weight: 0.35               # explicit lexical evidence only (authored cue / exact anchor), not body keywords
