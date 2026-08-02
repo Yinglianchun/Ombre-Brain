@@ -14338,6 +14338,26 @@ class GatewayService:
         )
         return key not in generic_keys
 
+    @staticmethod
+    def _bucket_scene_cues_are_reviewed(meta: dict) -> bool:
+        if str(meta.get("scene_cues_reviewed_at") or "").strip():
+            return True
+        if str(meta.get("last_edit_source") or "") != "edit_scene":
+            return False
+        history = meta.get("scene_revision_history")
+        if not isinstance(history, list) or not history:
+            return False
+        cue_revisions = [
+            normalize_scene_cues(item.get("cues"))
+            for item in history
+            if isinstance(item, dict)
+        ]
+        cue_revisions.append(normalize_scene_cues(meta.get("scene_cues")))
+        return any(
+            previous != current
+            for previous, current in zip(cue_revisions, cue_revisions[1:])
+        )
+
     def _bucket_authored_cue_terms(self, query: str, bucket: dict) -> list[str]:
         if not query or not isinstance(bucket, dict):
             return []
@@ -14345,6 +14365,7 @@ class GatewayService:
         if str(meta.get("memory_value_source") or "") != "authored_scene":
             return []
         cues = normalize_scene_cues(meta.get("scene_cues"))
+        cues_are_reviewed = self._bucket_scene_cues_are_reviewed(meta)
         tag_derived_cue_keys = {
             self._compact_lookup_key(value)
             for value in normalize_scene_cues(
@@ -14353,7 +14374,7 @@ class GatewayService:
             )
             if self._compact_lookup_key(value)
         }
-        if tag_derived_cue_keys:
+        if tag_derived_cue_keys and not cues_are_reviewed:
             cues = [
                 cue
                 for cue in cues
@@ -14384,6 +14405,10 @@ class GatewayService:
             paraphrase_match = (
                 any(len(key) >= 4 for key in shared_keys)
                 or len({key for key in shared_keys if len(key) >= 2}) >= 2
+                or (
+                    cues_are_reviewed
+                    and any(len(key) >= 2 for key in shared_keys)
+                )
             )
             if cue_key in query_key or paraphrase_match:
                 matched.append(cue)
@@ -17281,7 +17306,6 @@ class GatewayService:
     ) -> str:
         """Return recall evidence only; Bridge owns reminders and care state."""
         _stable_context, dynamic_context = self._build_injected_context_messages(
-            "",
             "",
             "",
             just_now_context=str(debug_payload.get("just_now_context") or ""),

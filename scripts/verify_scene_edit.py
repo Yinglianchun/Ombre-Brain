@@ -128,6 +128,7 @@ async def main() -> None:
         "提到第一人称修订",
         "问 Scene 原位编辑",
     ]
+    assert manager.bucket["metadata"]["scene_cues_reviewed_at"]
     assert len(manager.bucket["metadata"]["scene_revision_history"]) == 2
     assert manager.bucket["metadata"]["scene_revision_history"][1]["title"] == "小雨亲自改的标题"
     assert moments.ids == []
@@ -141,9 +142,21 @@ async def main() -> None:
     assert stale_retry["status"] == "conflict"
     assert manager.bucket["metadata"]["name"] == "小雨亲自改的标题"
 
-    blank_title = await server._edit_scene_memory(
+    reviewed_unchanged_cues = copy.deepcopy(manager.bucket)
+    reviewed_unchanged_cues["metadata"].pop("scene_cues_reviewed_at")
+    manager.bucket = reviewed_unchanged_cues
+    cue_review = await server._edit_scene_memory(
         "scene_edit_contract",
         expected_updated_at=revised["updated_at"],
+        cues=["提到第一人称修订", "问 Scene 原位编辑"],
+    )
+    assert cue_review["status"] == "updated"
+    assert cue_review["changed_fields"] == ["cues_review"]
+    assert manager.bucket["metadata"]["scene_cues_reviewed_at"]
+
+    blank_title = await server._edit_scene_memory(
+        "scene_edit_contract",
+        expected_updated_at=cue_review["updated_at"],
         title="",
     )
     assert blank_title["reason"] == "scene_title_required"

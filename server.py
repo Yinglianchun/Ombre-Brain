@@ -11197,6 +11197,10 @@ async def _edit_scene_memory(
         if authored_cues != current_cues:
             changed_fields.append("cues")
             updates.setdefault("extra_metadata", {})["scene_cues"] = authored_cues
+        if not str(meta.get("scene_cues_reviewed_at") or "").strip():
+            if authored_cues == current_cues:
+                changed_fields.append("cues_review")
+            updates.setdefault("extra_metadata", {})["scene_cues_reviewed_at"] = now_iso()
 
     if not changed_fields:
         return {

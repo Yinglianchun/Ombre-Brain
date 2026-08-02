@@ -143,6 +143,22 @@ def verify_authored_cues_are_explicit_evidence() -> None:
         "那次人工写下的答辩称呼",
         migrated_scene,
     ) == ["人工写下的答辩称呼"]
+    reviewed_migrated_scene = {
+        **migrated_scene,
+        "metadata": {
+            **migrated_scene["metadata"],
+            "scene_cues": ["我们的心事", "老公"],
+            "last_edit_source": "edit_scene",
+            "scene_revision_history": [
+                {"revision": 1, "cues": ["心事", "老公"]},
+            ],
+        },
+    }
+    assert service._bucket_authored_cue_terms(
+        "我的心事是",
+        reviewed_migrated_scene,
+    ) == ["我们的心事"]
+    assert service._bucket_authored_cue_terms("老公", reviewed_migrated_scene) == ["老公"]
     assert service._explicit_lexical_score_basis(
         {"quoted-phrase": 0.88},
         {"scene-cue": ["提到黄色小花和名字的联系"]},
@@ -516,6 +532,21 @@ def verify_retired_scaffolding_is_gone() -> None:
         assert not hasattr(GatewayService, name), name
 
 
+def verify_full_hook_context_uses_keyword_arguments_once() -> None:
+    class Capture:
+        def _build_injected_context_messages(self, *args, **kwargs):
+            assert args == ("", "")
+            assert kwargs["just_now_context"] == "刚刚"
+            return "", "dynamic"
+
+    result = GatewayService._hook_recall_full_dynamic_context(
+        Capture(),
+        {"just_now_context": "刚刚"},
+        include_diffused=False,
+    )
+    assert result == "dynamic"
+
+
 def main() -> int:
     verify_original_query_retrieval_path()
     verify_ambiguous_query_is_not_suppressed_twice()
@@ -530,6 +561,7 @@ def main() -> int:
     verify_year_ring_cannot_promote_scene_during_ordinary_recall()
     verify_date_topic_can_live_in_either_role()
     verify_retired_scaffolding_is_gone()
+    verify_full_hook_context_uses_keyword_arguments_once()
     print("recall entry evidence verification passed")
     return 0
 
