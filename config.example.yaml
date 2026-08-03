@@ -367,7 +367,7 @@ gateway:
     mode: "off"                     # off | shadow | active; active only skips high-confidence no-recall routes
     shadow_enabled: false           # legacy compatibility; used only when mode is omitted
     scene_evidence_veto:
-      mode: "shadow"                # off | shadow | active; switch active only after labeled replay calibration
+      mode: "off"                   # off | shadow | active; use shadow only for a bounded labeled replay experiment
       body_min_score: 0.48          # calibrated absolute body/chunk cosine floor; rank alone never vetoes
       body_min_margin: 0.03         # best eligible Scene must also lead the second-best by this amount
       debug_candidate_limit: 3

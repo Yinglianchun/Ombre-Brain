@@ -420,7 +420,7 @@ class GatewayService:
         scene_veto_cfg = semantic_router_cfg.get("scene_evidence_veto", {})
         if not isinstance(scene_veto_cfg, dict):
             scene_veto_cfg = {}
-        scene_veto_mode = str(scene_veto_cfg.get("mode") or "shadow").strip().lower()
+        scene_veto_mode = str(scene_veto_cfg.get("mode") or "off").strip().lower()
         if scene_veto_cfg.get("enabled") is not None:
             scene_veto_mode = (
                 scene_veto_mode
@@ -15485,7 +15485,7 @@ class GatewayService:
         This probe never admits or injects a Scene. It only decides whether the
         normal retrieval/admission pipeline should get a chance to run.
         """
-        mode = str(getattr(self, "semantic_scene_evidence_veto_mode", "shadow") or "shadow")
+        mode = str(getattr(self, "semantic_scene_evidence_veto_mode", "off") or "off")
         enabled = mode in {"shadow", "active"}
         body_threshold = self._clamp(
             self._safe_float(
