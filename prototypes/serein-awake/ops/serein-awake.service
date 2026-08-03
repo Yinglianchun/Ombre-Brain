@@ -1,0 +1,20 @@
+[Unit]
+Description=Serein Awake private prototype
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/serein-awake
+EnvironmentFile=-/etc/haven-bridge.env
+EnvironmentFile=/etc/serein-awake.env
+ExecStart=/usr/local/bin/npm run dev -- --host 127.0.0.1 --port 18103
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target
