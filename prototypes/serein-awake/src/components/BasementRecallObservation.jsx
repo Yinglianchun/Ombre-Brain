@@ -46,6 +46,12 @@ const verdicts = [
   { key: "uncertain", label: "不确定", icon: Question },
 ];
 
+const routeVerdicts = [
+  { key: "correct", label: "正确", icon: Check },
+  { key: "incorrect", label: "错误", icon: X },
+  { key: "uncertain", label: "不确定", icon: Question },
+];
+
 const candidateRelevances = [
   { key: "core", label: "核心相关" },
   { key: "weak", label: "弱相关" },
@@ -326,6 +332,42 @@ export function BasementRecallObservation() {
     saveRecallObservationReviews(nextReviews);
   };
 
+  const setRouteVerdict = (item, routeVerdict) => {
+    const currentReview = reviews[item.id] || {};
+    const nextReview = {
+      ...currentReview,
+      routeVerdict,
+      observedAt: item.createdAt,
+      query: item.query,
+      updatedAt: new Date().toISOString(),
+    };
+    if (routeVerdict !== "incorrect") delete nextReview.expectedRoute;
+    const nextReviews = { ...reviews, [item.id]: nextReview };
+    setReviews(nextReviews);
+    saveRecallObservationReviews(nextReviews);
+  };
+
+  const setExpectedRoute = (item, expectedRoute) => {
+    const currentReview = reviews[item.id] || {};
+    const nextReviews = {
+      ...reviews,
+      [item.id]: {
+        ...currentReview,
+        routeVerdict: "incorrect",
+        expectedRoute,
+        observedAt: item.createdAt,
+        query: item.query,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+    setReviews(nextReviews);
+    saveRecallObservationReviews(nextReviews);
+    setDraftForms((current) => ({
+      ...current,
+      [item.id]: { ...(current[item.id] || { role: "typical" }), routeName: expectedRoute },
+    }));
+  };
+
   const addDraft = async (item) => {
     const form = draftForms[item.id] || {};
     if (!form.routeName) {
@@ -527,7 +569,7 @@ export function BasementRecallObservation() {
                 </div>
 
                 <div className="observation-review">
-                  <span>人工判断</span>
+                  <span>召回动作</span>
                   <div role="group" aria-label={`判断：${item.query}`}>
                     {verdicts.map(({ key, label, icon: Icon }) => (
                       <button type="button" className={review.verdict === key ? "is-active" : ""} key={key} onClick={() => setVerdict(item, key)}>
@@ -535,6 +577,26 @@ export function BasementRecallObservation() {
                       </button>
                     ))}
                   </div>
+                </div>
+
+                <div className="observation-review observation-route-review">
+                  <span>路线判断</span>
+                  <div role="group" aria-label={`路线判断：${item.query}`}>
+                    {routeVerdicts.map(({ key, label, icon: Icon }) => (
+                      <button type="button" className={review.routeVerdict === key ? "is-active" : ""} key={key} onClick={() => setRouteVerdict(item, key)}>
+                        <Icon size={14} aria-hidden="true" />{label}
+                      </button>
+                    ))}
+                  </div>
+                  {review.routeVerdict === "incorrect" && (
+                    <label>
+                      应属路线
+                      <select value={review.expectedRoute || ""} onChange={(event) => setExpectedRoute(item, event.target.value)}>
+                        <option value="">选择路线</option>
+                        {draftRoutes.map((route) => <option value={route.name} key={route.name}>{route.label || route.name}</option>)}
+                      </select>
+                    </label>
+                  )}
                 </div>
 
                 {showDraft && (

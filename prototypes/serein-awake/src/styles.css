@@ -5772,6 +5772,26 @@ label:has(input:focus-visible) {
   cursor: pointer;
 }
 .observation-review button.is-active { border-color: rgba(66, 96, 86, 0.33); background: #eaf1ee; color: #35544b; }
+.observation-route-review { padding-top: 0; }
+.observation-route-review > label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  color: #7c8984;
+  font-size: 9px;
+}
+.observation-route-review select {
+  min-width: 150px;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid rgba(61, 80, 73, 0.17);
+  border-radius: 5px;
+  outline: 0;
+  background: rgba(255, 255, 255, 0.72);
+  color: #3f524b;
+  font-size: 10px;
+}
 .observation-draft {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -5889,6 +5909,8 @@ label:has(input:focus-visible) {
   .route-editor-footer > div:last-child { grid-template-columns: 1fr; }
   .observation-route-facts { grid-template-columns: 1fr; gap: 12px; }
   .observation-review { align-items: flex-start; flex-direction: column; }
+  .observation-route-review > label { align-items: flex-start; flex-direction: column; margin-left: 0; width: 100%; }
+  .observation-route-review select { width: 100%; }
   .observation-draft > div { grid-template-columns: 1fr; }
 }
 

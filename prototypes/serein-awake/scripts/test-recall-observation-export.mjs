@@ -73,13 +73,18 @@ const reviews = {
       "scene-unknown": "invalid",
     },
   },
-  "gateway-2": { verdict: "correct", updatedAt: "2026-08-03T04:02:00Z" },
+  "gateway-2": {
+    verdict: "correct",
+    routeVerdict: "incorrect",
+    expectedRoute: "present_chitchat",
+    updatedAt: "2026-08-03T04:02:00Z",
+  },
   "hook-3": { verdict: "uncertain", updatedAt: "2026-08-03T04:03:00Z" },
   "gateway-4": { verdict: "missed", updatedAt: "2026-08-03T04:04:00Z" },
 };
 
 const payload = buildRecallObservationTrainingExport(items, reviews, "2026-08-03T04:05:00Z");
-assert.equal(payload.schema_version, 2);
+assert.equal(payload.schema_version, 3);
 assert.equal(payload.export_type, "serein.basement.recall-observation-training-export");
 assert.deepEqual(payload.summary, {
   total_observations: 5,
@@ -96,6 +101,10 @@ assert.deepEqual(payload.observations[0].candidate_judgments, [
 ]);
 assert.equal(Object.hasOwn(payload.observations[0].candidate_judgments[0], "title"), false);
 assert.equal(payload.observations[1].observed_action, "skip");
+assert.equal(payload.observations[1].action_verdict, "correct");
+assert.equal(payload.observations[1].route_verdict, "incorrect");
+assert.equal(payload.observations[1].expected_route, "present_chitchat");
+assert.equal(payload.reviews["gateway-2"].route_verdict, "incorrect");
 assert.equal(payload.observations[3].query, "");
 assert.equal(payload.observations[4].verdict, null);
 assert.equal(Object.hasOwn(payload.observations[0], "injected"), false);

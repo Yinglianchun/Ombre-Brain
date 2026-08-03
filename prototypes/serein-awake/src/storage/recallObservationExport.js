@@ -1,4 +1,4 @@
-export const RECALL_OBSERVATION_EXPORT_SCHEMA_VERSION = 2;
+export const RECALL_OBSERVATION_EXPORT_SCHEMA_VERSION = 3;
 export const RECALL_OBSERVATION_EXPORT_TYPE = "serein.basement.recall-observation-training-export";
 
 const validActions = new Set(["skip", "recall"]);
@@ -71,6 +71,7 @@ export function classifyObservationReview(item, review) {
 function exportObservation(item, review) {
   const group = observationGroup(item);
   const verdict = cleanText(review?.verdict).toLowerCase();
+  const routeVerdict = cleanText(review?.routeVerdict).toLowerCase();
   const candidateReviews = review?.candidateReviews && typeof review.candidateReviews === "object"
     ? review.candidateReviews
     : {};
@@ -92,6 +93,9 @@ function exportObservation(item, review) {
     observation_id: cleanText(item?.id),
     query: cleanQuery(item),
     verdict: verdict || null,
+    action_verdict: verdict || null,
+    route_verdict: routeVerdict || null,
+    expected_route: routeVerdict === "incorrect" ? cleanText(review?.expectedRoute) || null : null,
     observed_action: cleanText(item?.observedAction || item?.action).toLowerCase() || null,
     observed_route: cleanText(item?.route) || null,
     session_id: cleanText(item?.sessionId || item?.session_id) || null,
@@ -106,8 +110,12 @@ function exportObservation(item, review) {
 
 function exportReview(review) {
   const verdict = cleanText(review?.verdict).toLowerCase();
+  const routeVerdict = cleanText(review?.routeVerdict).toLowerCase();
   return {
     verdict: verdict || null,
+    action_verdict: verdict || null,
+    route_verdict: routeVerdict || null,
+    expected_route: routeVerdict === "incorrect" ? cleanText(review?.expectedRoute) || null : null,
     query: cleanQuery(review) || null,
     observedAt: cleanText(review?.observedAt) || null,
     updatedAt: cleanText(review?.updatedAt) || null,
@@ -143,6 +151,7 @@ export function buildRecallObservationTrainingExport(
       includes: [
         "user_query",
         "human_verdict",
+        "separate_action_and_route_verdicts",
         "observed_route_and_action",
         "source_and_time_group",
         "reviewed_candidate_id_rank_score_and_relevance",
