@@ -14469,10 +14469,6 @@ class GatewayService:
             paraphrase_match = (
                 any(len(key) >= 4 for key in shared_keys)
                 or len({key for key in shared_keys if len(key) >= 2}) >= 2
-                or (
-                    cues_are_reviewed
-                    and any(len(key) >= 2 for key in shared_keys)
-                )
             )
             if cue_key in query_key or paraphrase_match:
                 matched.append(cue)

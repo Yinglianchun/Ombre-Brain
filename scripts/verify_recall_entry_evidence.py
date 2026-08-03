@@ -157,8 +157,24 @@ def verify_authored_cues_are_explicit_evidence() -> None:
     assert service._bucket_authored_cue_terms(
         "我的心事是",
         reviewed_migrated_scene,
-    ) == ["我们的心事"]
+    ) == []
     assert service._bucket_authored_cue_terms("老公", reviewed_migrated_scene) == ["老公"]
+    risky_reviewed_scene = {
+        **authored_scene,
+        "metadata": {
+            **authored_scene["metadata"],
+            "scene_cues": ["不想模板化", "窗口连续性与关系归属"],
+            "scene_cues_reviewed_at": "2026-08-03T00:00:00Z",
+        },
+    }
+    assert service._bucket_authored_cue_terms("不想吃药", risky_reviewed_scene) == []
+    assert service._bucket_authored_cue_terms("我还是不想模板化", risky_reviewed_scene) == [
+        "不想模板化"
+    ]
+    assert service._bucket_authored_cue_terms(
+        "换窗口后关系的连续性和归属还在吗",
+        risky_reviewed_scene,
+    ) == ["窗口连续性与关系归属"]
     assert service._explicit_lexical_score_basis(
         {"quoted-phrase": 0.88},
         {"scene-cue": ["提到黄色小花和名字的联系"]},
