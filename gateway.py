@@ -414,6 +414,33 @@ class GatewayService:
             self.dynamic_top_k,
             min(200, int(self.gateway_cfg.get("semantic_candidate_top_k", max(50, self.dynamic_top_k)))),
         )
+        semantic_router_cfg = self.gateway_cfg.get("semantic_recall_router", {})
+        if not isinstance(semantic_router_cfg, dict):
+            semantic_router_cfg = {}
+        scene_veto_cfg = semantic_router_cfg.get("scene_evidence_veto", {})
+        if not isinstance(scene_veto_cfg, dict):
+            scene_veto_cfg = {}
+        scene_veto_mode = str(scene_veto_cfg.get("mode") or "shadow").strip().lower()
+        if scene_veto_cfg.get("enabled") is not None:
+            scene_veto_mode = (
+                scene_veto_mode
+                if self._bool_config_value(scene_veto_cfg.get("enabled"), True)
+                else "off"
+            )
+        self.semantic_scene_evidence_veto_mode = (
+            scene_veto_mode if scene_veto_mode in {"off", "shadow", "active"} else "off"
+        )
+        self.semantic_scene_evidence_veto_enabled = self.semantic_scene_evidence_veto_mode != "off"
+        self.semantic_scene_evidence_veto_min_score = self._clamp(
+            self._safe_float(scene_veto_cfg.get("body_min_score"), 0.48)
+        )
+        self.semantic_scene_evidence_veto_min_margin = self._clamp(
+            self._safe_float(scene_veto_cfg.get("body_min_margin"), 0.03)
+        )
+        self.semantic_scene_evidence_veto_debug_limit = max(
+            1,
+            min(10, int(scene_veto_cfg.get("debug_candidate_limit", 3))),
+        )
         self.scene_candidate_limit = max(
             1,
             min(200, int(self.gateway_cfg.get("scene_candidate_limit", max(50, self.dynamic_top_k * 2)))),
@@ -738,6 +765,12 @@ class GatewayService:
                     "mode": self.semantic_recall_router.mode,
                     "enabled": self.semantic_recall_router.enabled,
                     "active": self.semantic_recall_router.active,
+                    "scene_evidence_veto": {
+                        "mode": self.semantic_scene_evidence_veto_mode,
+                        "enabled": self.semantic_scene_evidence_veto_enabled,
+                        "body_min_score": self.semantic_scene_evidence_veto_min_score,
+                        "body_min_margin": self.semantic_scene_evidence_veto_min_margin,
+                    },
                 },
                 "domain_recall_policy": self.domain_recall_policy.dataset_payload(),
                 "narrative_roll_recall": {
@@ -815,6 +848,12 @@ class GatewayService:
                 "mode": self.semantic_recall_router.mode,
                 "enabled": self.semantic_recall_router.enabled,
                 "active": self.semantic_recall_router.active,
+                "scene_evidence_veto": {
+                    "mode": self.semantic_scene_evidence_veto_mode,
+                    "enabled": self.semantic_scene_evidence_veto_enabled,
+                    "body_min_score": self.semantic_scene_evidence_veto_min_score,
+                    "body_min_margin": self.semantic_scene_evidence_veto_min_margin,
+                },
             },
             "date_persona_trace_enabled": self.date_persona_trace_enabled,
             "date_persona_trace_budget": self.date_persona_trace_budget,
@@ -1997,6 +2036,12 @@ class GatewayService:
         semantic_skip = self.semantic_recall_router.should_apply_skip(
             semantic_recall_debug
         )
+        semantic_skip = await self._apply_semantic_scene_evidence_veto(
+            query,
+            semantic_skip,
+            semantic_query_vector,
+            semantic_recall_debug,
+        )
         semantic_recall_debug["skip_applied"] = semantic_skip
         semantic_recall_debug["applied_action"] = (
             "skip" if semantic_skip else "recall"
@@ -2047,6 +2092,7 @@ class GatewayService:
                 include_context_debug=include_context_debug,
                 include_debug=include_debug,
                 include_recent_context=include_recent_context,
+                semantic_recall_result=(semantic_recall_debug, semantic_query_vector),
             )
 
         try:
@@ -2205,6 +2251,7 @@ class GatewayService:
         include_context_debug: bool,
         include_debug: bool,
         include_recent_context: bool,
+        semantic_recall_result: tuple[dict[str, Any], list[float] | None] | None = None,
     ) -> JSONResponse:
         """Run the normal Gateway recall pipeline without forwarding upstream."""
         try:
@@ -2218,6 +2265,7 @@ class GatewayService:
                 include_debug=True,
                 debug_detail="compact",
                 include_recent_context=include_recent_context,
+                semantic_recall_result=semantic_recall_result,
             )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
@@ -2480,6 +2528,7 @@ class GatewayService:
         manage_turn_snapshot: bool = False,
         debug_detail: str = "full",
         include_recent_context: bool = True,
+        semantic_recall_result: tuple[dict[str, Any], list[float] | None] | None = None,
     ) -> tuple[dict, list[str] | None] | tuple[dict, list[str] | None, dict[str, Any]]:
         prepare_started_at = time.perf_counter()
         prepare_steps_ms: dict[str, int] = {}
@@ -2594,12 +2643,16 @@ class GatewayService:
 
         if is_new_user_turn:
             stage_started_at = time.perf_counter()
-            (
-                semantic_recall_debug,
-                semantic_recall_query_vector,
-            ) = await self.semantic_recall_router.route_with_vector(
-                current_user_query
-            )
+            if semantic_recall_result is None:
+                (
+                    semantic_recall_debug,
+                    semantic_recall_query_vector,
+                ) = await self.semantic_recall_router.route_with_vector(
+                    current_user_query
+                )
+            else:
+                semantic_recall_debug = dict(semantic_recall_result[0] or {})
+                semantic_recall_query_vector = semantic_recall_result[1]
             mark_step("semantic_recall_shadow", stage_started_at)
             stage_started_at = time.perf_counter()
             skip_for_targeted_detail = self._query_should_skip_broad_for_targeted_memory_detail(
@@ -2610,6 +2663,16 @@ class GatewayService:
             semantic_skip_broad = self.semantic_recall_router.should_apply_skip(
                 semantic_recall_debug
             )
+            if semantic_recall_result is None:
+                semantic_skip_broad = await self._apply_semantic_scene_evidence_veto(
+                    current_user_query,
+                    semantic_skip_broad,
+                    semantic_recall_query_vector,
+                    semantic_recall_debug,
+                    all_buckets=all_buckets,
+                )
+            else:
+                semantic_skip_broad = bool(semantic_recall_debug.get("skip_applied"))
             semantic_recall_debug["skip_applied"] = semantic_skip_broad
             semantic_recall_debug["applied_action"] = (
                 "skip" if semantic_skip_broad else "recall"
@@ -15407,6 +15470,231 @@ class GatewayService:
                 continue
             semantic_scores[bucket_id] = self._clamp(similarity)
         return semantic_scores
+
+    async def _apply_semantic_scene_evidence_veto(
+        self,
+        query: str,
+        semantic_skip: bool,
+        query_embedding: list[float] | None,
+        semantic_recall_debug: dict[str, Any],
+        *,
+        all_buckets: list[dict] | None = None,
+    ) -> bool:
+        """Let trusted direct Scene evidence veto a tentative Router skip.
+
+        This probe never admits or injects a Scene. It only decides whether the
+        normal retrieval/admission pipeline should get a chance to run.
+        """
+        mode = str(getattr(self, "semantic_scene_evidence_veto_mode", "shadow") or "shadow")
+        enabled = mode in {"shadow", "active"}
+        body_threshold = self._clamp(
+            self._safe_float(
+                getattr(self, "semantic_scene_evidence_veto_min_score", 0.48),
+                0.48,
+            )
+        )
+        body_min_margin = self._clamp(
+            self._safe_float(
+                getattr(self, "semantic_scene_evidence_veto_min_margin", 0.03),
+                0.03,
+            )
+        )
+        debug_limit = max(
+            1,
+            min(10, int(getattr(self, "semantic_scene_evidence_veto_debug_limit", 3))),
+        )
+        veto_debug: dict[str, Any] = {
+            "enabled": enabled,
+            "mode": mode,
+            "shadow_only": mode == "shadow",
+            "called": False,
+            "candidate_count": 0,
+            "candidates": [],
+            "body_min_score": round(body_threshold, 4),
+            "body_min_margin": round(body_min_margin, 4),
+            "would_apply": False,
+            "applied": False,
+            "reason": "router_did_not_propose_skip",
+        }
+        semantic_recall_debug["scene_evidence_veto"] = veto_debug
+        if not semantic_skip:
+            return False
+        if not enabled:
+            veto_debug["reason"] = "disabled"
+            return True
+
+        veto_debug["called"] = True
+        buckets = all_buckets
+        if buckets is None:
+            buckets = await self._list_gateway_buckets(include_archive=False)
+        buckets = suppress_migrated_legacy_sources(buckets or [])
+        scene_map = {
+            str(bucket.get("id") or ""): bucket
+            for bucket in buckets
+            if (
+                str((bucket.get("metadata") or {}).get("object_kind") or "").strip().lower()
+                == "scene"
+                or str((bucket.get("metadata") or {}).get("memory_value_source") or "").strip()
+                == "authored_scene"
+            )
+            and self._is_canonical_scene_bucket(bucket)
+            and self._is_semantic_candidate_bucket(bucket)
+            and str(bucket.get("id") or "")
+        }
+        if not scene_map:
+            veto_debug["reason"] = "no_eligible_canonical_scenes"
+            return True
+
+        candidates: list[dict[str, Any]] = []
+        for scene_id, bucket in scene_map.items():
+            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+            cue_terms = self._bucket_authored_cue_terms(query, bucket)
+            reviewed_cue = bool(cue_terms and self._bucket_scene_cues_are_reviewed(meta))
+            title_terms = self._bucket_title_anchor_terms(query, bucket)
+            field = "authored_cue" if reviewed_cue else ("title" if title_terms else "")
+            if not field:
+                continue
+            direct_label = "authored_cue" if field == "authored_cue" else "title_anchor"
+            rejection = self._canonical_scene_domain_policy_rejection(
+                bucket,
+                direct_evidence=[direct_label],
+            )
+            candidates.append(
+                {
+                    "scene_id": scene_id,
+                    "title": str(meta.get("name") or ""),
+                    "field": field,
+                    "score": 1.0,
+                    "threshold": 1.0,
+                    "qualified": rejection is None,
+                    "reason": str((rejection or {}).get("reason") or "trusted_direct_scene_evidence"),
+                }
+            )
+
+        if query_embedding:
+            search_scene_evidence = getattr(
+                self.embedding_engine,
+                "search_scene_evidence_by_embedding",
+                None,
+            )
+            if callable(search_scene_evidence):
+                try:
+                    search = search_scene_evidence(
+                        query_embedding,
+                        scene_ids=set(scene_map),
+                        top_k=max(debug_limit, 8),
+                    )
+                    if self.embedding_query_timeout_seconds > 0:
+                        body_rows = await asyncio.wait_for(
+                            search,
+                            timeout=self.embedding_query_timeout_seconds,
+                        )
+                    else:
+                        body_rows = await search
+                except asyncio.TimeoutError:
+                    veto_debug["reason"] = "scene_body_probe_timeout"
+                    body_rows = []
+                except Exception as exc:
+                    logger.warning("Gateway Scene evidence veto probe failed: %s", exc)
+                    veto_debug["reason"] = "scene_body_probe_failed"
+                    body_rows = []
+                for row in body_rows or []:
+                    scene_id = str(row.get("scene_id") or "")
+                    bucket = scene_map.get(scene_id)
+                    if not bucket:
+                        continue
+                    rejection = self._canonical_scene_domain_policy_rejection(
+                        bucket,
+                        direct_evidence=[],
+                    )
+                    score = self._clamp(self._safe_float(row.get("score"), 0.0))
+                    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+                    candidates.append(
+                        {
+                            "scene_id": scene_id,
+                            "title": str(meta.get("name") or ""),
+                            "field": str(row.get("field") or "scene_body"),
+                            "score": round(score, 4),
+                            "threshold": round(body_threshold, 4),
+                            "qualified": False,
+                            "reason": (
+                                str((rejection or {}).get("reason"))
+                                if rejection
+                                else "pending_body_contract"
+                            ),
+                        }
+                    )
+            elif veto_debug["reason"] == "router_did_not_propose_skip":
+                veto_debug["reason"] = "scene_body_probe_unavailable"
+        elif veto_debug["reason"] == "router_did_not_propose_skip":
+            veto_debug["reason"] = "query_embedding_unavailable"
+
+        body_candidates = sorted(
+            (
+                item
+                for item in candidates
+                if item.get("field") in {"scene_body", "scene_body_chunk"}
+                and str(item.get("reason") or "") == "pending_body_contract"
+            ),
+            key=lambda item: (
+                -self._safe_float(item.get("score"), 0.0),
+                str(item.get("scene_id") or ""),
+            ),
+        )
+        if body_candidates:
+            best_body = body_candidates[0]
+            best_score = self._safe_float(best_body.get("score"), 0.0)
+            second_score = (
+                self._safe_float(body_candidates[1].get("score"), 0.0)
+                if len(body_candidates) > 1
+                else 0.0
+            )
+            margin = max(0.0, best_score - second_score)
+            veto_debug["body_top_score"] = round(best_score, 4)
+            veto_debug["body_second_score"] = round(second_score, 4)
+            veto_debug["body_margin"] = round(margin, 4)
+            for item in body_candidates:
+                if item is not best_body:
+                    item["reason"] = "not_top_body_candidate"
+                elif best_score < body_threshold:
+                    item["reason"] = "below_absolute_body_threshold"
+                elif margin < body_min_margin:
+                    item["reason"] = "below_body_margin"
+                else:
+                    item["qualified"] = True
+                    item["reason"] = "strong_scene_body_semantic"
+
+        candidates.sort(
+            key=lambda item: (
+                not bool(item.get("qualified")),
+                0 if item.get("field") in {"authored_cue", "title"} else 1,
+                -self._safe_float(item.get("score"), 0.0),
+                str(item.get("scene_id") or ""),
+            )
+        )
+        veto_debug["candidate_count"] = len(candidates)
+        veto_debug["candidates"] = candidates[:debug_limit]
+        winner = next((item for item in candidates if item.get("qualified")), None)
+        if winner:
+            veto_debug["would_apply"] = True
+            veto_debug["reason"] = str(winner.get("reason") or "trusted_scene_evidence")
+            veto_debug["candidate_id"] = str(winner.get("scene_id") or "")
+            veto_debug["candidate_title"] = str(winner.get("title") or "")
+            veto_debug["candidate_field"] = str(winner.get("field") or "")
+            veto_debug["candidate_score"] = self._safe_float(winner.get("score"), 0.0)
+            veto_debug["candidate_threshold"] = self._safe_float(winner.get("threshold"), 0.0)
+            if mode == "active":
+                veto_debug["applied"] = True
+                return False
+            veto_debug["reason"] = "shadow_would_veto"
+            return True
+        if veto_debug["reason"] in {
+            "router_did_not_propose_skip",
+            "query_embedding_unavailable",
+            "scene_body_probe_unavailable",
+        }:
+            veto_debug["reason"] = "no_strong_trusted_scene_evidence"
+        return True
 
     def _recall_search_query_terms(self, query: str, *, required_terms: list[str] | None = None) -> list[str]:
         text = str(query or "").strip()

@@ -389,6 +389,85 @@ class EmbeddingEngine:
         results = sorted(best_scores.items(), key=lambda x: x[1], reverse=True)
         return results[:top_k]
 
+    async def search_scene_evidence_by_embedding(
+        self,
+        query_embedding: list[float],
+        *,
+        scene_ids: set[str],
+        top_k: int = 10,
+    ) -> list[dict]:
+        """Return Scene scores with body-only index provenance.
+
+        Canonical Scene rows are written from ``bucket_text_for_embedding``
+        (the verbatim Scene body) and ``scene_embedding_chunks`` (verbatim body
+        spans). The caller supplies vetted canonical Scene ids, so legacy
+        bucket vectors, tags, aliases, graph edges, and Word Map data cannot
+        enter this result.
+        """
+        allowed = {str(scene_id) for scene_id in scene_ids if str(scene_id)}
+        if not self.enabled or not query_embedding or not allowed:
+            return []
+
+        placeholders = ",".join("?" for _ in allowed)
+        params = tuple(sorted(allowed))
+        conn = sqlite3.connect(self.db_path)
+        rows = conn.execute(
+            f"SELECT bucket_id, embedding, model, dimension FROM embeddings "
+            f"WHERE bucket_id IN ({placeholders})",
+            params,
+        ).fetchall()
+        chunk_rows = conn.execute(
+            f"SELECT scene_id, ordinal, start_offset, end_offset, embedding, model, dimension "
+            f"FROM scene_embedding_chunks WHERE scene_id IN ({placeholders})",
+            params,
+        ).fetchall()
+        conn.close()
+
+        best: dict[str, dict] = {}
+
+        def consider(scene_id: str, embedding_json: str, model, dimension, evidence: dict) -> None:
+            try:
+                stored = json.loads(embedding_json)
+                if not self._row_matches_current_model(model, dimension, stored):
+                    return
+                score = self._cosine_similarity(query_embedding, stored)
+            except Exception:
+                return
+            current = best.get(str(scene_id))
+            if current is None or score > float(current["score"]):
+                best[str(scene_id)] = {
+                    "scene_id": str(scene_id),
+                    "score": score,
+                    **evidence,
+                }
+
+        for scene_id, embedding_json, model, dimension in rows:
+            consider(
+                str(scene_id),
+                embedding_json,
+                model,
+                dimension,
+                {"field": "scene_body", "chunk_ordinal": None},
+            )
+        for scene_id, ordinal, start_offset, end_offset, embedding_json, model, dimension in chunk_rows:
+            consider(
+                str(scene_id),
+                embedding_json,
+                model,
+                dimension,
+                {
+                    "field": "scene_body_chunk",
+                    "chunk_ordinal": int(ordinal),
+                    "start_offset": int(start_offset),
+                    "end_offset": int(end_offset),
+                },
+            )
+
+        return sorted(
+            best.values(),
+            key=lambda item: (-float(item["score"]), str(item["scene_id"])),
+        )[: max(1, int(top_k))]
+
     def _prepare_embedding_input(self, text: str, *, kind: str) -> str:
         raw = str(text or "")
         if kind == "query" and self.query_instruction:

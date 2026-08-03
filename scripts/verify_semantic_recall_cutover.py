@@ -145,6 +145,7 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
     service.upstream_default_model = ""
     service.upstream_models = []
     service.semantic_recall_router = HookRouterStub(skip=True)
+    service.semantic_scene_evidence_veto_mode = "off"
 
     skipped = await service.handle_hook_recall(
         RequestStub({"query": "回来看看你", "include_debug": True})
