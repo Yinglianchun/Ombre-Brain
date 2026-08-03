@@ -2783,6 +2783,11 @@ class GatewayService:
                         selected_buckets,
                         all_buckets,
                     )
+                    selected_buckets, cooldown_suppressed_selected = self._filter_cooldown_selected_buckets(
+                        session_id,
+                        selected_buckets,
+                    )
+                    suppressed_buckets.extend(cooldown_suppressed_selected)
                     for bucket in selected_buckets:
                         bucket_id = str(bucket.get("id") or "")
                         if not bucket_id:
@@ -9418,6 +9423,60 @@ class GatewayService:
         }
         return marked
 
+    def _cooldown_active_item(self, item: dict) -> bool:
+        return self._safe_float(item.get("cooldown_multiplier"), 1.0) < 1.0
+
+    def _bucket_cooldown_active(self, session_id: str, bucket_id: str) -> bool:
+        clean_bucket_id = str(bucket_id or "").strip()
+        if not clean_bucket_id:
+            return False
+        return (
+            self._safe_float(
+                self.state_store.get_cooldown_multiplier(
+                    session_id=session_id,
+                    bucket_id=clean_bucket_id,
+                    cooldown_hours=self.cooldown_hours,
+                    cooldown_floor=self.cooldown_floor,
+                ),
+                1.0,
+            )
+            < 1.0
+        )
+
+    @staticmethod
+    def _mark_cooldown_suppressed_item(item: dict, *, kind: str) -> dict:
+        marked = dict(item)
+        debug = marked.get("recall_policy_debug")
+        marked["admission_reason"] = "cooldown"
+        marked["cooldown_suppressed"] = True
+        marked["recall_policy_debug"] = {
+            **(debug if isinstance(debug, dict) else {}),
+            "cooldown_active": True,
+            "candidate_kind": kind,
+            "auto": True,
+        }
+        return marked
+
+    def _filter_cooldown_selected_buckets(
+        self,
+        session_id: str,
+        buckets: list[dict],
+    ) -> tuple[list[dict], list[dict]]:
+        kept: list[dict] = []
+        suppressed: list[dict] = []
+        for bucket in buckets or []:
+            bucket_id = str((bucket or {}).get("id") or "")
+            if bucket_id and self._bucket_cooldown_active(session_id, bucket_id):
+                suppressed.append(
+                    self._mark_cooldown_suppressed_item(
+                        {"bucket": bucket},
+                        kind="bucket",
+                    )
+                )
+                continue
+            kept.append(bucket)
+        return kept, suppressed
+
     def _filter_session_hard_excluded_bucket_items(
         self,
         query: str,
@@ -9841,6 +9900,12 @@ class GatewayService:
         self._add_timing_ms(timing_debug, "moment.source_record_extend", stage_started_at)
         stage_started_at = time.perf_counter()
         selected_bucket_ids = [bucket["id"] for bucket in selected_buckets if bucket.get("id")]
+        cooldown_suppressed_bucket_ids = {
+            str((item.get("bucket") or {}).get("id") or "")
+            for item in suppressed_buckets or []
+            if item.get("cooldown_suppressed")
+            and str((item.get("bucket") or {}).get("id") or "")
+        }
         selected_bucket_signals = {
             str(bucket.get("id") or ""): bucket.get("_recall_signal", {})
             for bucket in selected_buckets
@@ -9851,13 +9916,17 @@ class GatewayService:
         for item in suppressed_buckets or []:
             bucket = item.get("bucket") if isinstance(item, dict) else None
             bucket_id = str((bucket or {}).get("id") or "")
-            if bucket_id:
+            if bucket_id and bucket_id not in cooldown_suppressed_bucket_ids:
                 candidate_bucket_signals.setdefault(bucket_id, self._bucket_candidate_recall_signal(item))
         bucket_boosts = {bucket_id: 1.0 for bucket_id in selected_bucket_ids}
         for item in suppressed_buckets or []:
             bucket = item.get("bucket") if isinstance(item, dict) else None
             bucket_id = str((bucket or {}).get("id") or "")
-            if not bucket_id or bucket_id in bucket_boosts:
+            if (
+                not bucket_id
+                or bucket_id in bucket_boosts
+                or bucket_id in cooldown_suppressed_bucket_ids
+            ):
                 continue
             boost = self._suppressed_bucket_moment_search_boost(query, item)
             if boost > 0:
@@ -9923,10 +9992,22 @@ class GatewayService:
                     seen_candidate_ids.add(moment_id)
         explicit_lookup = self._query_explicitly_requests_caution_memory(query)
         admitted_bucket_ids = set(selected_bucket_ids)
-        eligible_candidates = [
-            moment for moment in candidates
-            if str(moment.get("bucket_id") or "") in eligible_ids
-        ]
+        cooldown_suppressed_moments: list[dict] = []
+        eligible_candidates = []
+        for moment in candidates:
+            bucket_id = str(moment.get("bucket_id") or "")
+            if bucket_id not in eligible_ids:
+                continue
+            if (
+                bucket_id in cooldown_suppressed_bucket_ids
+                or self._bucket_cooldown_active(session_id, bucket_id)
+            ):
+                cooldown_suppressed_bucket_ids.add(bucket_id)
+                cooldown_suppressed_moments.append(
+                    self._mark_cooldown_suppressed_item(moment, kind="moment")
+                )
+                continue
+            eligible_candidates.append(moment)
         non_direct_candidates = []
         candidates = []
         for moment in eligible_candidates:
@@ -9961,7 +10042,7 @@ class GatewayService:
         self._add_timing_ms(timing_debug, "moment.rerank_candidates", stage_started_at)
         stage_started_at = time.perf_counter()
         admitted_candidates = []
-        suppressed_candidates = non_direct_candidates
+        suppressed_candidates = cooldown_suppressed_moments + non_direct_candidates
         for moment in candidates:
             item = dict(moment)
             bucket_id = str(item.get("bucket_id") or "")
@@ -10084,7 +10165,7 @@ class GatewayService:
         active_candidates = [
             moment for moment in candidates
             if str(moment.get("bucket_id") or "") not in recent_ids
-        ] or candidates
+        ]
         if relevance_query:
             active_candidates.sort(key=lambda moment: self._recall_rank(query, moment))
         for moment in active_candidates:
@@ -14104,6 +14185,22 @@ class GatewayService:
             mark("session_hard_exclude", stage_started_at)
             return [], session_suppressed_candidates
         mark("session_hard_exclude", stage_started_at)
+
+        cooldown_suppressed_candidates: list[dict] = []
+        active_scored_candidates: list[dict] = []
+        for item in scored_candidates:
+            if self._cooldown_active_item(item):
+                cooldown_suppressed_candidates.append(
+                    self._mark_cooldown_suppressed_item(item, kind="bucket")
+                )
+            else:
+                active_scored_candidates.append(item)
+        scored_candidates = active_scored_candidates
+        if not scored_candidates:
+            mark("cooldown", stage_started_at)
+            return [], session_suppressed_candidates + cooldown_suppressed_candidates
+        mark("cooldown", stage_started_at)
+
         stage_started_at = time.perf_counter()
         filtered = [
             item
@@ -14115,7 +14212,7 @@ class GatewayService:
                 self._safe_float(item.get("semantic_score"), 0.0)
             )
         ]
-        active_pool = filtered or scored_candidates
+        active_pool = filtered
         required_terms = required_terms or []
 
         def admit_candidate_pool(pool: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -14139,14 +14236,11 @@ class GatewayService:
             return admitted, suppressed
 
         admitted_pool, suppressed_candidates = admit_candidate_pool(active_pool)
-        suppressed_candidates = session_suppressed_candidates + suppressed_candidates
-        if (
-            not admitted_pool
-            and filtered
-            and len(filtered) < len(scored_candidates)
-        ):
-            admitted_pool, retry_suppressed = admit_candidate_pool(scored_candidates)
-            suppressed_candidates = session_suppressed_candidates + retry_suppressed
+        suppressed_candidates = (
+            session_suppressed_candidates
+            + cooldown_suppressed_candidates
+            + suppressed_candidates
+        )
         mark("admit_candidates", stage_started_at)
         stage_started_at = time.perf_counter()
         if allow_semantic_session_dedupe:
@@ -14273,6 +14367,11 @@ class GatewayService:
             all_buckets,
         )
         planner_debug["year_ring_routes"] = year_ring_routes
+        selected_buckets, cooldown_suppressed_selected = self._filter_cooldown_selected_buckets(
+            session_id,
+            selected_buckets,
+        )
+        suppressed_candidates.extend(cooldown_suppressed_selected)
         planner_debug["final_bucket_ids"] = [
             str(bucket.get("id") or "")
             for bucket in selected_buckets
@@ -17251,6 +17350,11 @@ class GatewayService:
             selected_buckets,
             all_buckets,
         )
+        selected_buckets, cooldown_suppressed_selected = self._filter_cooldown_selected_buckets(
+            session_id,
+            selected_buckets,
+        )
+        suppressed_buckets.extend(cooldown_suppressed_selected)
         direct_scene_ids = [
             str(bucket.get("id") or "")
             for bucket in selected_buckets
