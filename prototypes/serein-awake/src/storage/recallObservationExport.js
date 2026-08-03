@@ -1,7 +1,8 @@
-export const RECALL_OBSERVATION_EXPORT_SCHEMA_VERSION = 1;
+export const RECALL_OBSERVATION_EXPORT_SCHEMA_VERSION = 2;
 export const RECALL_OBSERVATION_EXPORT_TYPE = "serein.basement.recall-observation-training-export";
 
 const validActions = new Set(["skip", "recall"]);
+const validCandidateRelevances = new Set(["core", "weak", "irrelevant"]);
 const placeholderQueries = new Set(["旧记录未保留原句", "原句未记录"]);
 
 function cleanText(value) {
@@ -70,6 +71,22 @@ export function classifyObservationReview(item, review) {
 function exportObservation(item, review) {
   const group = observationGroup(item);
   const verdict = cleanText(review?.verdict).toLowerCase();
+  const candidateReviews = review?.candidateReviews && typeof review.candidateReviews === "object"
+    ? review.candidateReviews
+    : {};
+  const candidateJudgments = (Array.isArray(item?.injected) ? item.injected : [])
+    .map((memory, index) => {
+      const score = memory?.scoreValue;
+      return {
+        memory_id: cleanText(memory?.id),
+        rank: index + 1,
+        observed_score: score !== null && score !== undefined && score !== "" && Number.isFinite(Number(score))
+          ? Number(score)
+          : null,
+        relevance: cleanText(candidateReviews[memory?.id]).toLowerCase(),
+      };
+    })
+    .filter((candidate) => candidate.memory_id && validCandidateRelevances.has(candidate.relevance));
   return {
     id: cleanText(item?.id),
     observation_id: cleanText(item?.id),
@@ -83,6 +100,7 @@ function exportObservation(item, review) {
     group_basis: group.basis,
     source: cleanText(item?.source) || "unknown",
     review_updated_at: cleanText(review?.updatedAt) || null,
+    candidate_judgments: candidateJudgments,
   };
 }
 
@@ -127,6 +145,7 @@ export function buildRecallObservationTrainingExport(
         "human_verdict",
         "observed_route_and_action",
         "source_and_time_group",
+        "reviewed_candidate_id_rank_score_and_relevance",
       ],
       excludes: ["full_prompt", "developer_context", "injected_memory_body", "additional_context"],
     },
@@ -138,4 +157,3 @@ export function buildRecallObservationTrainingExport(
     reviews: alignedReviews,
   };
 }
-

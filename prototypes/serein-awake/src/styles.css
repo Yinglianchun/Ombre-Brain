@@ -5715,7 +5715,7 @@ label:has(input:focus-visible) {
 .observation-route-facts dd { margin: 5px 0 0; color: #435850; font-family: var(--font-editorial-cjk); font-size: 13px; overflow-wrap: anywhere; }
 .observation-injections { display: grid; gap: 8px; padding: 17px 22px; }
 .observation-injections > span, .observation-review > span { color: #7c8984; font-size: 10px; }
-.observation-injections > div {
+.observation-injections > .observation-memory-row {
   display: grid;
   grid-template-columns: minmax(160px, 1fr) minmax(180px, 1.5fr) auto;
   align-items: center;
@@ -5729,6 +5729,27 @@ label:has(input:focus-visible) {
 .observation-injections code { overflow: hidden; color: #82908b; font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .observation-injections em { color: #60766e; font-family: var(--font-editorial); font-size: 11px; font-style: normal; }
 .observation-injections p { margin: 2px 0 0; color: #89948f; font-family: var(--font-editorial-cjk); font-size: 12px; }
+.observation-memory-review {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(67, 85, 79, 0.07);
+}
+.observation-memory-review > span { margin-right: 3px; color: #8a9691; font-size: 9px; }
+.observation-memory-review button {
+  min-height: 27px;
+  padding: 0 8px;
+  border: 1px solid rgba(61, 80, 73, 0.13);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.58);
+  color: #74817c;
+  font-size: 9px;
+  cursor: pointer;
+}
+.observation-memory-review button.is-active { border-color: rgba(66, 96, 86, 0.33); background: #eaf1ee; color: #35544b; }
 .observation-review {
   display: flex;
   align-items: center;
@@ -5853,7 +5874,7 @@ label:has(input:focus-visible) {
   .observation-export-summary { grid-template-columns: 1fr; gap: 12px; padding: 14px 20px; }
   .observation-export-summary dl { justify-content: space-between; }
   .observation-list { padding: 20px; }
-  .observation-injections > div { grid-template-columns: 1fr auto; }
+  .observation-injections > .observation-memory-row { grid-template-columns: 1fr auto; }
   .observation-injections code { grid-column: 1 / -1; grid-row: 2; }
   .observation-draft { grid-template-columns: 1fr; }
   .observation-draft > button { width: 100%; }

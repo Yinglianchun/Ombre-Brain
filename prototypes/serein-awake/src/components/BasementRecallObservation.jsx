@@ -46,6 +46,12 @@ const verdicts = [
   { key: "uncertain", label: "不确定", icon: Question },
 ];
 
+const candidateRelevances = [
+  { key: "core", label: "核心相关" },
+  { key: "weak", label: "弱相关" },
+  { key: "irrelevant", label: "无关" },
+];
+
 function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -55,6 +61,12 @@ function normalizeScore(item) {
   const score = Number(raw);
   if (!Number.isFinite(score)) return "";
   return score <= 1 ? `${(score * 100).toFixed(1)}%` : score.toFixed(2);
+}
+
+function normalizeScoreValue(item) {
+  const raw = item?.score?.final ?? item?.score?.semantic ?? item?.score?.keyword ?? item?.score;
+  const score = Number(raw);
+  return Number.isFinite(score) ? score : null;
 }
 
 function normalizeObservation(row) {
@@ -72,8 +84,9 @@ function normalizeObservation(row) {
       id: item.bucket_id || item.id || "",
       title: item.bucket_name || item.title || item.bucket_id || item.id || "未命名记忆",
       score: normalizeScore(asArray(item.evidence)[0] || item),
+      scoreValue: normalizeScoreValue(asArray(item.evidence)[0] || item),
     }))
-    : injectedIds.map((id) => ({ id, title: id, score: "" }));
+    : injectedIds.map((id) => ({ id, title: id, score: "", scoreValue: null }));
   const action = String(semantic.applied_action || semantic.action || "").trim();
   const query = String(payload.query || payload.query_preview || payload.original_query || payload.user_query || "").trim();
   const outcome = action === "skip" ? "skip" : injected.length ? "injected" : "no_match";
@@ -106,6 +119,7 @@ function normalizeBridgeObservation(row, routeActions = snapshotRouteActions) {
       id,
       title: String(item.title || id),
       score: normalizeScore(item),
+      scoreValue: normalizeScoreValue(item),
     };
   });
   const hookOutcome = String(row?.hook_memory_outcome || "").trim();
@@ -292,6 +306,26 @@ export function BasementRecallObservation() {
     }
   };
 
+  const setCandidateRelevance = (item, memoryId, relevance) => {
+    if (!memoryId) return;
+    const currentReview = reviews[item.id] || {};
+    const candidateReviews = { ...(currentReview.candidateReviews || {}) };
+    if (candidateReviews[memoryId] === relevance) delete candidateReviews[memoryId];
+    else candidateReviews[memoryId] = relevance;
+    const nextReviews = {
+      ...reviews,
+      [item.id]: {
+        ...currentReview,
+        candidateReviews,
+        observedAt: item.createdAt,
+        query: item.query,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+    setReviews(nextReviews);
+    saveRecallObservationReviews(nextReviews);
+  };
+
   const addDraft = async (item) => {
     const form = draftForms[item.id] || {};
     if (!form.routeName) {
@@ -404,7 +438,7 @@ export function BasementRecallObservation() {
       <div className="observation-export-summary" aria-live="polite">
         <div className="observation-export-summary__copy">
           <span>训练标注导出</span>
-          <p>只含原句、人工判断、路线/动作、来源与时间分组；不含完整 prompt、注入正文或上下文。</p>
+          <p>只含原句、整轮判断、已评单卡的 ID/相关度、路线/动作、来源与时间分组；不含完整 prompt、注入正文或上下文。</p>
         </div>
         <dl>
           <div><dt>可用</dt><dd>{exportSummary.available}</dd></div>
@@ -469,10 +503,25 @@ export function BasementRecallObservation() {
                 <div className="observation-injections">
                   <span>{item.source === "hook" ? "真正送入模型" : "Gateway 准备注入"}</span>
                   {item.injected.length ? item.injected.map((memory) => (
-                    <div key={`${item.id}-${memory.id}`}>
+                    <div className="observation-memory-row" key={`${item.id}-${memory.id}`}>
                       <strong>{memory.title}</strong>
                       <code>{memory.id || "ID 未记录"}</code>
                       <em>{memory.score || "score 未记录"}</em>
+                      {item.source === "hook" && item.outcome === "injected" && memory.id && (
+                        <div className="observation-memory-review" role="group" aria-label={`记忆相关度：${memory.title}`}>
+                          <span>单卡相关度</span>
+                          {candidateRelevances.map(({ key, label }) => (
+                            <button
+                              type="button"
+                              className={review.candidateReviews?.[memory.id] === key ? "is-active" : ""}
+                              key={key}
+                              onClick={() => setCandidateRelevance(item, memory.id, key)}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )) : <p>没有记忆进入这一轮上下文。</p>}
                 </div>

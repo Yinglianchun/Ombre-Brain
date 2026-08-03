@@ -1,2 +1,6 @@
 .private/
 public/private/
+node_modules/
+dist/
+.playwright-cli/
+*.log
