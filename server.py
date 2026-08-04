@@ -587,6 +587,8 @@ async def _fetch_gateway_injection_debug(
     session_id: str = "",
     limit: int = 10,
     include_context: bool = False,
+    before_id: int = 0,
+    review_ids: list[int] | None = None,
 ) -> dict:
     debug_url = _gateway_debug_injections_url()
     token = os.environ.get("OMBRE_GATEWAY_TOKEN", "").strip()
@@ -599,6 +601,20 @@ async def _fetch_gateway_injection_debug(
     }
     if session_id:
         params["session_id"] = session_id
+    if before_id > 0:
+        params["before_id"] = int(before_id)
+    safe_review_ids = []
+    for raw_id in review_ids or []:
+        try:
+            item_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if item_id > 0 and item_id not in safe_review_ids:
+            safe_review_ids.append(item_id)
+        if len(safe_review_ids) >= 500:
+            break
+    if safe_review_ids:
+        params["review_ids"] = ",".join(str(item_id) for item_id in safe_review_ids)
     try:
         timeout_seconds = float(os.environ.get("OMBRE_GATEWAY_DEBUG_TIMEOUT_SECONDS", "30"))
     except (TypeError, ValueError):
@@ -629,7 +645,18 @@ async def _fetch_gateway_injection_debug(
         }
     if not isinstance(payload, dict):
         return {"status": "error", "error": "gateway_debug_invalid_payload", "items": []}
-    return {"status": "ok", "items": payload.get("items", []) if isinstance(payload.get("items"), list) else []}
+    return {
+        "status": "ok",
+        "items": payload.get("items", []) if isinstance(payload.get("items"), list) else [],
+        "reviewed_items": (
+            payload.get("reviewed_items", [])
+            if isinstance(payload.get("reviewed_items"), list)
+            else []
+        ),
+        "has_more": bool(payload.get("has_more")),
+        "next_before_id": payload.get("next_before_id"),
+        "next_cursor": payload.get("next_cursor"),
+    }
 
 
 DEFAULT_CHATGPT_OAUTH_REDIRECT_PREFIX = "https://chatgpt.com/connector/oauth/"
@@ -14109,6 +14136,17 @@ async def api_gateway_injections(request):
 
     session_id = str(request.query_params.get("session_id", "") or "").strip()
     limit = _int_between(request.query_params.get("limit"), 10, 1, 100)
+    before_id = _int_between(request.query_params.get("before_id"), 0, 0, 9_007_199_254_740_991)
+    review_ids = []
+    for raw_id in str(request.query_params.get("review_ids", "") or "").split(","):
+        try:
+            item_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if item_id > 0 and item_id not in review_ids:
+            review_ids.append(item_id)
+        if len(review_ids) >= 500:
+            break
     include_context = str(request.query_params.get("include_context", "0")).strip().lower() in {
         "1",
         "true",
@@ -14118,6 +14156,8 @@ async def api_gateway_injections(request):
         session_id=session_id,
         limit=limit,
         include_context=include_context,
+        before_id=before_id,
+        review_ids=review_ids,
     )
     status_code = 200 if payload.get("status") == "ok" else 502
     return JSONResponse(payload, status_code=status_code)

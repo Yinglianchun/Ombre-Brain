@@ -4,7 +4,16 @@ import {
   classifyObservationReview,
   observationGroup,
 } from "../src/storage/recallObservationExport.js";
+import {
+  mergeObservationRows,
+  normalizeObservationPage,
+  reviewedObservationIds,
+} from "../src/storage/recallObservationPagination.js";
 import { createRecallSimulationTrainingLabel } from "../src/storage/recallSimulationTraining.js";
+import {
+  readRecallObservationReviews,
+  saveRecallObservationReviews,
+} from "../src/storage/basementStore.js";
 
 const items = [
   {
@@ -109,9 +118,18 @@ assert.deepEqual(payload.summary, {
   total_observations: 5,
   total_manual_simulations: 1,
   total_cases: 6,
+  loaded_hook_observations: 3,
+  loaded_gateway_observations: 2,
   available: 3,
   rejected: 2,
   missing: 1,
+});
+assert.deepEqual(payload.scope, {
+  coverage: "currently_loaded_observation_window",
+  full_history: false,
+  loaded_hook_observations: 3,
+  loaded_gateway_observations: 2,
+  loaded_manual_simulations: 1,
 });
 assert.equal(payload.observations[0].observation_id, "hook-1");
 assert.equal(payload.observations[0].verdict, "false_positive");
@@ -146,4 +164,59 @@ assert.deepEqual(observationGroup({ id: "gateway-6", createdAt: "2026-08-03T04:0
   key: "date:2026-08-03",
   basis: "created_at_date",
 });
+
+const firstPage = normalizeObservationPage({
+  items: [{ id: 105 }, { id: 104 }],
+  reviewed_items: [{ id: 90 }],
+  has_more: true,
+  next_before_id: 104,
+});
+assert.equal(firstPage.hasMore, true);
+assert.equal(firstPage.nextBeforeId, 104);
+assert.deepEqual(firstPage.rows.map((item) => item.id), [105, 104, 90]);
+const secondPage = normalizeObservationPage({
+  items: [{ id: 103 }, { id: 102 }, { id: 90 }],
+  has_more: false,
+  next_before_id: 102,
+});
+const mergedPages = mergeObservationRows(firstPage.rows, secondPage.rows);
+assert.deepEqual(mergedPages.map((item) => item.id), [105, 104, 103, 102, 90]);
+assert.equal(new Set(mergedPages.map((item) => item.id)).size, mergedPages.length);
+
+const localStorageValues = new Map();
+globalThis.window = {
+  localStorage: {
+    getItem: (key) => localStorageValues.get(key) ?? null,
+    setItem: (key, value) => localStorageValues.set(key, String(value)),
+    removeItem: (key) => localStorageValues.delete(key),
+  },
+};
+const persistedReviews = {
+  "hook-90": { verdict: "false_positive", updatedAt: "2026-08-03T05:00:00Z" },
+  "77": { verdict: "correct", updatedAt: "2026-08-03T05:01:00Z" },
+};
+saveRecallObservationReviews(persistedReviews);
+assert.deepEqual(readRecallObservationReviews(), persistedReviews);
+assert.deepEqual(reviewedObservationIds(persistedReviews, "hook"), [90]);
+assert.deepEqual(reviewedObservationIds(persistedReviews, "gateway"), [77]);
+
+const restoredOldItem = {
+  id: "hook-90",
+  query: "滚出首屏后重新加载",
+  queryAvailable: true,
+  observedAction: "recall",
+  route: "recall_needed",
+  sessionId: "s-old",
+  createdAt: "2026-08-02T12:00:00Z",
+  source: "hook",
+  injected: [],
+};
+const multiPagePayload = buildRecallObservationTrainingExport(
+  [items[0], restoredOldItem],
+  readRecallObservationReviews(),
+  "2026-08-03T05:02:00Z",
+);
+assert.equal(multiPagePayload.summary.total_observations, 2);
+assert.equal(multiPagePayload.summary.loaded_hook_observations, 2);
+assert.equal(multiPagePayload.observations.find((item) => item.observation_id === "hook-90")?.verdict, "false_positive");
 console.log("recall observation export checks: PASS");

@@ -1920,21 +1920,56 @@ class GatewayService:
             limit = int(request.query_params.get("limit", "20"))
         except ValueError:
             limit = 20
+        limit = max(1, min(100, limit))
+        try:
+            before_id = max(0, int(request.query_params.get("before_id", "0") or 0))
+        except ValueError:
+            before_id = 0
+        review_ids: list[int] = []
+        for raw_id in str(request.query_params.get("review_ids", "") or "").split(","):
+            try:
+                item_id = int(raw_id)
+            except ValueError:
+                continue
+            if item_id > 0 and item_id not in review_ids:
+                review_ids.append(item_id)
+            if len(review_ids) >= 500:
+                break
         session_id = str(request.query_params.get("session_id", "") or "").strip()
         include_context = str(request.query_params.get("include_context", "1")).strip().lower() not in {
             "0",
             "false",
             "no",
         }
-        return JSONResponse(
-            {
-                "items": self.state_store.list_injection_debug(
-                    session_id=session_id,
-                    limit=limit,
-                    include_context=include_context,
-                )
-            }
+        page_rows = self.state_store.list_injection_debug(
+            session_id=session_id,
+            limit=limit + 1,
+            include_context=include_context,
+            before_id=before_id,
         )
+        has_more = len(page_rows) > limit
+        items = page_rows[:limit]
+        page_ids = {int(item.get("id") or 0) for item in items}
+        reviewed_items = []
+        if review_ids:
+            reviewed_items = [
+                item
+                for item in self.state_store.list_injection_debug(
+                    session_id=session_id,
+                    limit=len(review_ids),
+                    include_context=include_context,
+                    ids=review_ids,
+                )
+                if int(item.get("id") or 0) not in page_ids
+            ]
+        next_before_id = int(items[-1].get("id") or 0) if items else None
+        return JSONResponse({
+            "items": items,
+            "reviewed_items": reviewed_items,
+            "has_more": has_more,
+            "next_before_id": next_before_id,
+            "next_cursor": str(next_before_id) if next_before_id else None,
+        })
 
     async def handle_hook_recall(self, request: Request) -> JSONResponse:
         auth_result = self._authorize(request.headers.get("Authorization", ""))

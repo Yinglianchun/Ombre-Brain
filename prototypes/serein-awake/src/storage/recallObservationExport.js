@@ -179,6 +179,12 @@ export function buildRecallObservationTrainingExport(
     .map(manualSimulationEntry);
   const entries = [...observationEntries, ...manualEntries];
   const observations = entries.map((entry) => entry.observation);
+  const loadedSourceCounts = observationEntries.reduce((summary, entry) => {
+    const source = cleanText(entry.item?.source).toLowerCase();
+    if (source === "hook") summary.hook += 1;
+    if (source === "gateway") summary.gateway += 1;
+    return summary;
+  }, { hook: 0, gateway: 0 });
   const counts = entries.reduce((summary, entry) => {
     const classification = classifyObservationReview(entry.item, entry.review);
     summary[classification.kind] += 1;
@@ -206,10 +212,19 @@ export function buildRecallObservationTrainingExport(
       ],
       excludes: ["full_prompt", "developer_context", "injected_memory_body", "additional_context"],
     },
+    scope: {
+      coverage: "currently_loaded_observation_window",
+      full_history: false,
+      loaded_hook_observations: loadedSourceCounts.hook,
+      loaded_gateway_observations: loadedSourceCounts.gateway,
+      loaded_manual_simulations: manualEntries.length,
+    },
     summary: {
       total_observations: observationEntries.length,
       total_manual_simulations: manualEntries.length,
       total_cases: observations.length,
+      loaded_hook_observations: loadedSourceCounts.hook,
+      loaded_gateway_observations: loadedSourceCounts.gateway,
       ...counts,
     },
     observations,

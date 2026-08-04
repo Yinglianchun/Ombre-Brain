@@ -457,36 +457,63 @@ async function readLiveWindowShadows() {
   };
 }
 
-async function readHavenBridgeHookLedger(limit = 80) {
+export async function readHavenBridgeHookLedger(limit = 80, beforeId = 0, reviewIds = []) {
   const sshTarget = String(process.env.HAVEN_BRIDGE_VPS_SSH_TARGET || "root@168.119.228.217").trim();
   const identityFile = String(
     process.env.HAVEN_BRIDGE_VPS_IDENTITY_FILE || "C:\\Users\\86188\\.ssh\\id_ed25519",
   ).trim();
   const localDatabase = String(process.env.HAVEN_BRIDGE_LOCAL_DB || "").trim();
   const safeLimit = Math.max(1, Math.min(200, Number.parseInt(limit, 10) || 80));
+  const safeBeforeId = Math.max(0, Number.parseInt(beforeId, 10) || 0);
+  const safeReviewIds = [...new Set((Array.isArray(reviewIds) ? reviewIds : [])
+    .map((item) => Number.parseInt(item, 10))
+    .filter((item) => Number.isInteger(item) && item > 0))].slice(0, 500);
   const script = `
 import json, sqlite3
 
 conn = sqlite3.connect("/opt/haven_bridge/data/haven.db")
 conn.row_factory = sqlite3.Row
+where = [
+    "role='user'",
+    "CASE WHEN json_valid(metadata_json) THEN json_type(metadata_json, '$.hook_memory_outcome') ELSE NULL END IS NOT NULL",
+]
+params = []
+before_id = ${safeBeforeId}
+if before_id > 0:
+    where.append("id < ?")
+    params.append(before_id)
+params.append(${safeLimit + 1})
 rows = conn.execute(
     """
     SELECT id, session_id, created_at, content, metadata_json
     FROM messages
-    WHERE role='user'
+    WHERE """ + " AND ".join(where) + """
     ORDER BY id DESC
     LIMIT ?
     """,
-    (${Math.min(500, safeLimit * 5)},),
+    params,
 ).fetchall()
-items = []
-for row in rows:
+has_more = len(rows) > ${safeLimit}
+page_rows = rows[:${safeLimit}]
+page_ids = {int(row["id"]) for row in page_rows}
+review_ids = ${JSON.stringify(safeReviewIds)}
+review_rows = []
+if review_ids:
+    review_rows = conn.execute(
+        """
+        SELECT id, session_id, created_at, content, metadata_json
+        FROM messages
+        WHERE role='user'
+          AND CASE WHEN json_valid(metadata_json) THEN json_type(metadata_json, '$.hook_memory_outcome') ELSE NULL END IS NOT NULL
+          AND id IN (""" + ",".join("?" for _ in review_ids) + ") ORDER BY id DESC",
+        review_ids,
+    ).fetchall()
+
+def compact_row(row):
     try:
         metadata = json.loads(row["metadata_json"] or "{}")
     except Exception:
         metadata = {}
-    if "hook_memory_outcome" not in metadata:
-        continue
     raw_ids = metadata.get("gateway_memory_injected_ids")
     injected_ids = [str(item).strip() for item in raw_ids] if isinstance(raw_ids, list) else []
     injected_ids = list(dict.fromkeys(item for item in injected_ids if item))
@@ -505,7 +532,7 @@ for row in rows:
             compact["score"] = float(score)
         if compact:
             memory_items.append(compact)
-    items.append({
+    return {
         "id": int(row["id"]),
         "session_id": int(row["session_id"]) if row["session_id"] is not None else None,
         "created_at": str(row["created_at"] or ""),
@@ -516,15 +543,26 @@ for row in rows:
         "gateway_memory_route": str(metadata.get("gateway_memory_route") or ""),
         "gateway_memory_injected_ids": injected_ids,
         "gateway_memory_items": memory_items,
-    })
-    if len(items) >= ${safeLimit}:
-        break
+    }
+
+items = [compact_row(row) for row in page_rows]
+reviewed_items = [compact_row(row) for row in review_rows if int(row["id"]) not in page_ids]
+next_before_id = int(page_rows[-1]["id"]) if page_rows else None
 conn.close()
-print(json.dumps({"status": "ok", "items": items}, ensure_ascii=False))
+print(json.dumps({
+    "status": "ok",
+    "items": items,
+    "reviewed_items": reviewed_items,
+    "has_more": has_more,
+    "next_before_id": next_before_id,
+    "next_cursor": str(next_before_id) if next_before_id else None,
+}, ensure_ascii=False))
 `;
 
   return new Promise((resolve, reject) => {
-    const command = localDatabase ? "python3" : "ssh";
+    const command = localDatabase
+      ? String(process.env.SEREIN_PYTHON_BIN || "python3").trim()
+      : "ssh";
     const args = localDatabase
       ? ["-"]
       : ["-i", identityFile, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", sshTarget, "python3", "-"];
@@ -727,7 +765,11 @@ function sereinGatewayBridge() {
         try {
           const body = await readJsonBody(request);
           response.statusCode = 200;
-          response.end(JSON.stringify(await readHavenBridgeHookLedger(body.limit)));
+          response.end(JSON.stringify(await readHavenBridgeHookLedger(
+            body.limit,
+            body.beforeId,
+            body.reviewIds,
+          )));
         } catch (error) {
           response.statusCode = 502;
           response.end(JSON.stringify({
@@ -749,7 +791,14 @@ function sereinGatewayBridge() {
         try {
           const body = await readJsonBody(request);
           const limit = Math.max(1, Math.min(100, Number.parseInt(body.limit, 10) || 50));
-          const upstream = await callOmbreDashboard(`/api/gateway-injections?limit=${limit}&include_context=0`);
+          const beforeId = Math.max(0, Number.parseInt(body.beforeId, 10) || 0);
+          const reviewIds = [...new Set((Array.isArray(body.reviewIds) ? body.reviewIds : [])
+            .map((item) => Number.parseInt(item, 10))
+            .filter((item) => Number.isInteger(item) && item > 0))].slice(0, 500);
+          const params = new URLSearchParams({ limit: String(limit), include_context: "0" });
+          if (beforeId) params.set("before_id", String(beforeId));
+          if (reviewIds.length) params.set("review_ids", reviewIds.join(","));
+          const upstream = await callOmbreDashboard(`/api/gateway-injections?${params.toString()}`);
           response.statusCode = upstream.status;
           response.end(JSON.stringify(upstream.payload));
         } catch (error) {

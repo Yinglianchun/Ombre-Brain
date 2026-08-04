@@ -5829,7 +5829,7 @@ label:has(input:focus-visible) {
 .observation-export-summary__copy { min-width: 0; }
 .observation-export-summary__copy > span { color: #586e65; font-family: var(--font-editorial-cjk); font-size: 12px; }
 .observation-export-summary__copy > p { margin: 4px 0 0; color: #8a9691; font-size: 10px; line-height: 1.6; }
-.observation-export-summary dl { display: flex; align-items: center; gap: 17px; margin: 0; }
+.observation-export-summary dl { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px 17px; margin: 0; }
 .observation-export-summary dl div { display: grid; gap: 3px; min-width: 38px; }
 .observation-export-summary dt { color: #8a9691; font-size: 9px; }
 .observation-export-summary dd { margin: 0; color: #405b51; font-family: var(--font-editorial); font-size: 16px; }
@@ -5843,6 +5843,27 @@ label:has(input:focus-visible) {
   animation: observation-shimmer 1.4s ease-in-out infinite;
 }
 @keyframes observation-shimmer { to { background-position-x: -220%; } }
+.observation-pagination {
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px clamp(24px, 3.2vw, 42px) 20px;
+  color: #88938f;
+  font-size: 10px;
+}
+.observation-pagination button {
+  min-height: 34px;
+  padding: 0 13px;
+  border: 1px solid rgba(67, 93, 83, 0.18);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.76);
+  color: #526a61;
+  font-size: 10px;
+  cursor: pointer;
+}
+.observation-pagination button:disabled { cursor: default; opacity: 0.46; }
 .observation-list { display: grid; gap: 16px; padding: 24px clamp(24px, 3.2vw, 42px) 38px; }
 .observation-card {
   overflow: hidden;

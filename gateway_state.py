@@ -1057,30 +1057,49 @@ class GatewayStateStore:
         session_id: str = "",
         limit: int = 20,
         include_context: bool = True,
+        before_id: int = 0,
+        ids: list[int] | None = None,
     ) -> list[dict[str, Any]]:
-        limit = max(1, min(100, int(limit)))
+        safe_ids: list[int] = []
+        for raw_id in ids or []:
+            try:
+                item_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if item_id > 0 and item_id not in safe_ids:
+                safe_ids.append(item_id)
+            if len(safe_ids) >= 500:
+                break
+        limit_ceiling = 500 if safe_ids else 101
+        limit = max(1, min(limit_ceiling, int(limit)))
+        try:
+            safe_before_id = max(0, int(before_id))
+        except (TypeError, ValueError):
+            safe_before_id = 0
         conn = self._connect()
+        where: list[str] = []
+        params: list[Any] = []
         if session_id:
-            rows = conn.execute(
-                """
-                SELECT id, session_id, round_id, created_at, payload_json
-                FROM injection_debug
-                WHERE session_id = ?
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (session_id, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT id, session_id, round_id, created_at, payload_json
-                FROM injection_debug
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            where.append("session_id = ?")
+            params.append(session_id)
+        if safe_ids:
+            where.append(f"id IN ({','.join('?' for _ in safe_ids)})")
+            params.extend(safe_ids)
+        elif safe_before_id:
+            where.append("id < ?")
+            params.append(safe_before_id)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        params.append(limit)
+        rows = conn.execute(
+            f"""
+            SELECT id, session_id, round_id, created_at, payload_json
+            FROM injection_debug
+            {where_sql}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
         conn.close()
 
         items: list[dict[str, Any]] = []
