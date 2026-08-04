@@ -22,6 +22,13 @@ class EmbeddingStub:
     max_chars = 0
 
 
+class EnabledEmbeddingStub(EmbeddingStub):
+    enabled = True
+
+    async def embed_query(self, _text: str):
+        return [1.0, 0.0]
+
+
 class RequestStub:
     headers: dict[str, str] = {}
 
@@ -147,6 +154,16 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
     service.semantic_recall_router = HookRouterStub(skip=True)
     service.semantic_scene_evidence_veto_mode = "off"
 
+    recorded: list[tuple[str, list[str]]] = []
+
+    class StateStoreStub:
+        @staticmethod
+        def record_success(session_id: str, recalled_ids: list[str]):
+            recorded.append((session_id, list(recalled_ids)))
+
+    service.state_store = StateStoreStub()
+    service._record_hook_recall_injection = GatewayService._record_hook_recall_injection.__get__(service)
+
     skipped = await service.handle_hook_recall(
         RequestStub({"query": "回来看看你", "include_debug": True})
     )
@@ -193,8 +210,63 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
     assert recalled_body["ok"] is True
     assert captured["query_embedding"] == [0.1, 0.2]
     assert captured["allow_semantic"] is True
+    assert recorded == []
+
+    async def injected_cards(query: str, session_id: str, **kwargs):
+        return [{"bucket_id": "scene-one", "text": "memory"}], ["scene-one"], {
+            "hook_recall_debug": {"candidate_count": 1}
+        }
+
+    service._hook_recall_fast_cards = injected_cards
+    injected = await service.handle_hook_recall(
+        RequestStub(
+            {
+                "query": "还记得那件事吗",
+                "session_id": "haven_bridge:42",
+                "channel": "haven_bridge",
+            }
+        )
+    )
+    assert json.loads(injected.body)["recalled_ids"] == ["scene-one"]
+    assert recorded == [("haven_bridge:42", ["scene-one"])]
 
 
 asyncio.run(verify_hook_modes_use_the_same_semantic_entry())
+
+
+async def verify_skip_route_winner_is_the_action() -> None:
+    service = SemanticRecallRouter(
+        {"gateway": {"semantic_recall_router": {"mode": "active"}}},
+        EnabledEmbeddingStub(),
+    )
+    service._load_index = lambda: ({"embedding": {"dimension": 2}}, "")
+    service._score_routes = lambda _index, _vector: [
+        {"name": "present_chitchat", "action": "skip", "score": 0.51, "threshold": 0.60, "top_examples": []},
+        {"name": "recall_needed", "action": "recall", "score": 0.49, "threshold": 0.72, "top_examples": []},
+    ]
+    service._best_boundary_veto = lambda _index, _vector, _winner: None
+    debug, _vector = await service.route_with_vector("宝宝，看到你的回复了")
+    assert debug["route"] == "present_chitchat"
+    assert debug["would_skip"] is True
+    assert debug["recommended_action"] == "skip"
+    assert debug["reason"] == "matched_skip_route"
+    assert debug["threshold_met"] is False
+
+    service._best_boundary_veto = lambda _index, _vector, _winner: {
+        "route": "recall_needed",
+        "action": "recall",
+        "text": "边界正例",
+        "score": 0.63,
+        "passes_threshold": True,
+        "beats_skip": True,
+        "deficit": 0.0,
+        "within_deficit": True,
+    }
+    guarded, _vector = await service.route_with_vector("哥哥是我的宇宙")
+    assert guarded["would_skip"] is False
+    assert guarded["reason"] == "boundary_veto"
+
+
+asyncio.run(verify_skip_route_winner_is_the_action())
 
 print("semantic recall cutover verification passed")

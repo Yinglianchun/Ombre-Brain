@@ -435,13 +435,6 @@ class SemanticRecallRouter:
         if winner["action"] != "skip":
             debug["reason"] = "recall_route_won"
             return debug, query_vector
-        if winner["score"] < winner["threshold"]:
-            debug["reason"] = "below_threshold"
-            return debug, query_vector
-        if margin < self.min_margin:
-            debug["reason"] = "insufficient_margin"
-            return debug, query_vector
-
         boundary = self._best_boundary_veto(index, query_vector, winner)
         if boundary is not None:
             debug["boundary_veto"]["candidate"] = boundary
@@ -452,6 +445,8 @@ class SemanticRecallRouter:
 
         debug["recommended_action"] = "skip"
         debug["would_skip"] = True
+        debug["threshold_met"] = winner["score"] >= winner["threshold"]
+        debug["margin_met"] = margin >= self.min_margin
         debug["reason"] = "matched_skip_route"
         return debug, query_vector
 

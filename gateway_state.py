@@ -758,6 +758,27 @@ class GatewayStateStore:
         conn.close()
         return {row["bucket_id"] for row in rows}
 
+    def get_session_bucket_ids(self, session_id: str) -> set[str]:
+        """Return every bucket already injected in this exact session."""
+        clean_session_id = str(session_id or "").strip()
+        if not clean_session_id:
+            return set()
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT DISTINCT bucket_id
+            FROM injected_buckets
+            WHERE session_id = ?
+            """,
+            (clean_session_id,),
+        ).fetchall()
+        conn.close()
+        return {
+            str(row["bucket_id"])
+            for row in rows
+            if str(row["bucket_id"] or "").strip()
+        }
+
     def get_last_injected_at(self, session_id: str, bucket_id: str) -> datetime | None:
         conn = self._connect()
         row = conn.execute(

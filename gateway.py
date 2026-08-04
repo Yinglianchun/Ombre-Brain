@@ -2029,6 +2029,7 @@ class GatewayService:
             floor=400,
             ceiling=12000,
         )
+        record_hook_injection = str(body.get("channel") or "").strip().lower() == "haven_bridge"
 
         semantic_recall_debug, semantic_query_vector = (
             await self.semantic_recall_router.route_with_vector(query)
@@ -2093,6 +2094,7 @@ class GatewayService:
                 include_debug=include_debug,
                 include_recent_context=include_recent_context,
                 semantic_recall_result=(semantic_recall_debug, semantic_query_vector),
+                record_hook_injection=record_hook_injection,
             )
 
         try:
@@ -2129,6 +2131,8 @@ class GatewayService:
             "recalled_ids": list(recalled_ids or []),
             "debug": minimal_debug,
         }
+        if record_hook_injection and recalled_ids:
+            self._record_hook_recall_injection(session_id, recalled_ids)
         if include_debug:
             debug = dict(debug_payload)
             debug["semantic_recall_debug"] = semantic_recall_debug
@@ -2252,6 +2256,7 @@ class GatewayService:
         include_debug: bool,
         include_recent_context: bool,
         semantic_recall_result: tuple[dict[str, Any], list[float] | None] | None = None,
+        record_hook_injection: bool = False,
     ) -> JSONResponse:
         """Run the normal Gateway recall pipeline without forwarding upstream."""
         try:
@@ -2308,6 +2313,8 @@ class GatewayService:
             "recalled_ids": recalled_ids,
             "debug": minimal_debug,
         }
+        if record_hook_injection and recalled_ids:
+            self._record_hook_recall_injection(session_id, recalled_ids)
         if include_debug:
             debug = dict(debug_payload)
             if not include_context_debug:
@@ -9265,56 +9272,13 @@ class GatewayService:
         return enriched
 
     def _session_hard_exclude_bucket_ids(self, session_id: str) -> set[str]:
-        if not session_id or self.skip_recent_rounds <= 0:
+        if not session_id:
             return set()
         try:
-            rows = self.state_store.list_injection_debug(
-                session_id=session_id,
-                limit=max(1, self.skip_recent_rounds),
-                include_context=False,
-            )
+            return self.state_store.get_session_bucket_ids(session_id)
         except Exception as exc:
             logger.warning("Gateway session hard exclude lookup failed | session=%s error=%s", session_id, exc)
             return set()
-
-        excluded: set[str] = set()
-        for row in rows:
-            payload = row.get("payload") if isinstance(row, dict) else None
-            if not isinstance(payload, dict):
-                continue
-            for bucket_id in payload.get("diffused_bucket_ids") or []:
-                bucket_id = str(bucket_id or "").strip()
-                if bucket_id:
-                    excluded.add(bucket_id)
-            for item in payload.get("diffused_moment_debug") or []:
-                if not isinstance(item, dict) or not item.get("injected"):
-                    continue
-                bucket_id = str(item.get("bucket_id") or "").strip()
-                if bucket_id:
-                    excluded.add(bucket_id)
-
-            recalled_rows = [
-                item
-                for item in payload.get("recalled_moment_debug") or []
-                if isinstance(item, dict) and str(item.get("bucket_id") or "").strip()
-            ]
-            if not recalled_rows:
-                recalled_rows = [
-                    item
-                    for item in payload.get("recalled_bucket_debug") or []
-                    if isinstance(item, dict) and str(item.get("bucket_id") or "").strip()
-                ]
-            if recalled_rows:
-                for item in recalled_rows:
-                    if self._session_debug_row_has_strong_evidence(item):
-                        continue
-                    excluded.add(str(item.get("bucket_id") or "").strip())
-                continue
-            for bucket_id in payload.get("recalled_bucket_ids") or []:
-                bucket_id = str(bucket_id or "").strip()
-                if bucket_id:
-                    excluded.add(bucket_id)
-        return excluded
 
     def _session_debug_row_has_strong_evidence(self, row: dict[str, Any]) -> bool:
         if (
@@ -9354,61 +9318,13 @@ class GatewayService:
         )
 
     def _session_hard_exclude_bucket_bypass(self, query: str, item: dict) -> bool:
-        bucket = item.get("bucket") if isinstance(item, dict) else None
-        bucket_id = str((bucket or {}).get("id") or "")
-        if bucket_id and bucket_id in self._extract_explicit_bucket_ids_from_text(query):
-            return True
-        if self._query_requests_direct_detail(query):
-            return True
-        if (
-            item.get("exact_anchor_match")
-            or item.get("authored_cue_match")
-            or item.get("title_anchor_terms")
-        ):
-            return True
-        if self.recall_policy.has_strong_score(
-            semantic_score=item.get("semantic_score"),
-            rerank_score=item.get("rerank_score"),
-        ):
-            return True
-        return self._is_high_confidence_semantic_match(
-            self._safe_float(item.get("semantic_score"), 0.0)
-        )
+        return False
 
     def _session_hard_exclude_moment_bypass(self, query: str, moment: dict) -> bool:
-        bucket_id = str(moment.get("bucket_id") or "")
-        moment_id = str(moment.get("moment_id") or "")
-        if bucket_id and bucket_id in self._extract_explicit_bucket_ids_from_text(query):
-            return True
-        if moment_id and moment_id in self._extract_explicit_moment_ids_from_text(query):
-            return True
-        if self._query_requests_direct_detail(query):
-            return True
-        if self._is_source_record_fragment_seed(moment):
-            return True
-        if moment.get("exact_anchor_match"):
-            return True
-        if str(moment.get("admission_reason") or moment.get("_admission_reason") or "") in {
-            "strong_semantic",
-            "strong_rerank",
-            "high_confidence_direct_edge",
-        }:
-            return True
-        return self.recall_policy.has_strong_score(
-            semantic_score=moment.get("semantic_score"),
-            rerank_score=moment.get("rerank_score"),
-        )
+        return False
 
     def _session_hard_exclude_diffusion_bypass(self, query: str, moment: dict) -> bool:
-        bucket_id = str(moment.get("bucket_id") or "")
-        moment_id = str(moment.get("moment_id") or "")
-        if bucket_id and bucket_id in self._extract_explicit_bucket_ids_from_text(query):
-            return True
-        if moment_id and moment_id in self._extract_explicit_moment_ids_from_text(query):
-            return True
-        if self._query_requests_direct_detail(query):
-            return True
-        return self._is_source_record_fragment_seed(moment)
+        return False
 
     @staticmethod
     def _mark_session_hard_excluded_item(item: dict, *, kind: str) -> dict:
@@ -9430,28 +9346,42 @@ class GatewayService:
         clean_bucket_id = str(bucket_id or "").strip()
         if not clean_bucket_id:
             return False
-        return (
-            self._safe_float(
-                self.state_store.get_cooldown_multiplier(
-                    session_id=session_id,
-                    bucket_id=clean_bucket_id,
-                    cooldown_hours=self.cooldown_hours,
-                    cooldown_floor=self.cooldown_floor,
-                ),
-                1.0,
+        state_store = getattr(self, "state_store", None)
+        getter = getattr(state_store, "get_session_bucket_ids", None)
+        if not callable(getter):
+            return False
+        return clean_bucket_id in getter(session_id)
+
+    def _record_hook_recall_injection(self, session_id: str, bucket_ids: list[str]) -> None:
+        clean_ids = list(
+            dict.fromkeys(
+                str(bucket_id or "").strip()
+                for bucket_id in bucket_ids or []
+                if str(bucket_id or "").strip()
             )
-            < 1.0
         )
+        if not clean_ids:
+            return
+        try:
+            self.state_store.record_success(session_id, clean_ids)
+        except Exception as exc:
+            logger.warning(
+                "Gateway hook injection record failed | session=%s ids=%s error=%s",
+                session_id,
+                clean_ids,
+                exc,
+            )
 
     @staticmethod
     def _mark_cooldown_suppressed_item(item: dict, *, kind: str) -> dict:
         marked = dict(item)
         debug = marked.get("recall_policy_debug")
-        marked["admission_reason"] = "cooldown"
+        marked["admission_reason"] = "session_already_injected"
         marked["cooldown_suppressed"] = True
         marked["recall_policy_debug"] = {
             **(debug if isinstance(debug, dict) else {}),
             "cooldown_active": True,
+            "session_already_injected": True,
             "candidate_kind": kind,
             "auto": True,
         }
@@ -14035,20 +13965,10 @@ class GatewayService:
                     + alias_terms
                 )
             )
-            cooldown_multiplier = self.state_store.get_cooldown_multiplier(
-                session_id=session_id,
-                bucket_id=bucket_id,
-                cooldown_hours=self.cooldown_hours,
-                cooldown_floor=self.cooldown_floor,
-                now=now,
-            )
-            if bucket_id not in recent_ids and self._is_high_confidence_semantic_match(
-                semantic_score
-            ):
-                cooldown_multiplier = max(
-                    cooldown_multiplier,
-                    self.high_confidence_cooldown_floor,
-                )
+            # Session repeats are removed only after the best cards are picked.
+            # Do not demote them here, or a weaker candidate can move up and
+            # become an unrelated replacement.
+            cooldown_multiplier = 1.0
             vector_norm = self._clamp(semantic_norms.get(bucket_id, 0.0))
             keyword_norm = self._clamp(keyword_norms.get(bucket_id, 0.0))
             metadata_adjustment = 0.0
@@ -14175,44 +14095,16 @@ class GatewayService:
             scored_candidates = await self._rerank_scored_bucket_candidates(query, scored_candidates)
         mark("rerank_bucket_candidates", stage_started_at)
         stage_started_at = time.perf_counter()
-        hard_excluded_ids = self._session_hard_exclude_bucket_ids(session_id)
-        scored_candidates, session_suppressed_candidates = self._filter_session_hard_excluded_bucket_items(
-            query,
-            scored_candidates,
-            hard_excluded_ids,
-        )
-        if not scored_candidates:
-            mark("session_hard_exclude", stage_started_at)
-            return [], session_suppressed_candidates
+        # Pick the best candidates before session de-duplication. The final
+        # selected set is filtered later, without backfilling weaker cards.
+        session_suppressed_candidates: list[dict] = []
         mark("session_hard_exclude", stage_started_at)
 
         cooldown_suppressed_candidates: list[dict] = []
-        active_scored_candidates: list[dict] = []
-        for item in scored_candidates:
-            if self._cooldown_active_item(item):
-                cooldown_suppressed_candidates.append(
-                    self._mark_cooldown_suppressed_item(item, kind="bucket")
-                )
-            else:
-                active_scored_candidates.append(item)
-        scored_candidates = active_scored_candidates
-        if not scored_candidates:
-            mark("cooldown", stage_started_at)
-            return [], session_suppressed_candidates + cooldown_suppressed_candidates
         mark("cooldown", stage_started_at)
 
         stage_started_at = time.perf_counter()
-        filtered = [
-            item
-            for item in scored_candidates
-            if item["bucket"]["id"] not in recent_ids
-            or item.get("exact_anchor_match")
-            or item.get("authored_cue_match")
-            or self._is_high_confidence_semantic_match(
-                self._safe_float(item.get("semantic_score"), 0.0)
-            )
-        ]
-        active_pool = filtered
+        active_pool = scored_candidates
         required_terms = required_terms or []
 
         def admit_candidate_pool(pool: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -14254,7 +14146,7 @@ class GatewayService:
             semantic_dedupe_suppressed = []
         suppressed_candidates.extend(semantic_dedupe_suppressed)
         mark("semantic_session_dedupe", stage_started_at)
-        admitted_pool.sort(key=lambda item: self._bucket_final_candidate_rank(policy_query, item, recent_ids=recent_ids))
+        admitted_pool.sort(key=lambda item: self._bucket_final_candidate_rank(policy_query, item, recent_ids=set()))
         return admitted_pool, suppressed_candidates
 
     async def _select_dynamic_buckets(
