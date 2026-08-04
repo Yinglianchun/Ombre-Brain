@@ -1,4 +1,4 @@
-export const RECALL_OBSERVATION_EXPORT_SCHEMA_VERSION = 3;
+export const RECALL_OBSERVATION_EXPORT_SCHEMA_VERSION = 4;
 export const RECALL_OBSERVATION_EXPORT_TYPE = "serein.basement.recall-observation-training-export";
 
 const validActions = new Set(["skip", "recall"]);
@@ -122,25 +122,72 @@ function exportReview(review) {
   };
 }
 
+function manualSimulationEntry(label) {
+  const id = cleanText(label?.id);
+  const expectedAction = cleanText(label?.expectedAction).toLowerCase();
+  const expectedRoute = cleanText(label?.expectedRoute);
+  const observedAction = cleanText(label?.observedAction).toLowerCase();
+  const observedRoute = cleanText(label?.observedRoute);
+  const verdict = cleanText(label?.actionVerdict).toLowerCase();
+  const routeVerdict = cleanText(label?.routeVerdict).toLowerCase();
+  const item = {
+    id,
+    query: cleanText(label?.query),
+    queryAvailable: true,
+    observedAction,
+    action: observedAction,
+    route: observedRoute,
+    createdAt: cleanText(label?.createdAt),
+    source: "manual_simulation",
+  };
+  const review = {
+    verdict,
+    routeVerdict,
+    expectedRoute: routeVerdict === "incorrect" ? expectedRoute : null,
+    query: item.query,
+    observedAt: item.createdAt,
+    updatedAt: cleanText(label?.updatedAt),
+  };
+  const observation = {
+    ...exportObservation(item, review),
+    group: cleanText(label?.group) || `manual-simulation:${id}`,
+    group_basis: cleanText(label?.groupBasis) || "manual_simulation_batch",
+    source: "manual_simulation",
+    label_action: validActions.has(expectedAction) ? expectedAction : null,
+    label_route: expectedRoute || null,
+    expected_memory_ids: [...new Set((Array.isArray(label?.expectedMemoryIds) ? label.expectedMemoryIds : [])
+      .map(cleanText)
+      .filter(Boolean))],
+  };
+  return { item, review, observation };
+}
+
 export function buildRecallObservationTrainingExport(
   items,
   reviews,
   generatedAt = new Date().toISOString(),
+  manualSimulations = [],
 ) {
-  const observations = (Array.isArray(items) ? items : [])
+  const observationEntries = (Array.isArray(items) ? items : [])
     .filter((item) => item && cleanText(item.id))
-    .map((item) => exportObservation(item, reviews?.[item.id] || null));
-  const counts = observations.reduce((summary, observation) => {
-    const item = items.find((candidate) => cleanText(candidate?.id) === observation.observation_id);
-    const review = reviews?.[observation.observation_id] || null;
-    const classification = classifyObservationReview(item, review);
+    .map((item) => {
+      const review = reviews?.[item.id] || null;
+      return { item, review, observation: exportObservation(item, review) };
+    });
+  const manualEntries = (Array.isArray(manualSimulations) ? manualSimulations : [])
+    .filter((item) => item && cleanText(item.id))
+    .map(manualSimulationEntry);
+  const entries = [...observationEntries, ...manualEntries];
+  const observations = entries.map((entry) => entry.observation);
+  const counts = entries.reduce((summary, entry) => {
+    const classification = classifyObservationReview(entry.item, entry.review);
     summary[classification.kind] += 1;
     return summary;
   }, { available: 0, rejected: 0, missing: 0 });
   const alignedReviews = Object.fromEntries(
-    observations
-      .filter((observation) => reviews?.[observation.observation_id])
-      .map((observation) => [observation.observation_id, exportReview(reviews[observation.observation_id])]),
+    entries
+      .filter((entry) => entry.review)
+      .map((entry) => [entry.observation.observation_id, exportReview(entry.review)]),
   );
   return {
     schema_version: RECALL_OBSERVATION_EXPORT_SCHEMA_VERSION,
@@ -155,11 +202,14 @@ export function buildRecallObservationTrainingExport(
         "observed_route_and_action",
         "source_and_time_group",
         "reviewed_candidate_id_rank_score_and_relevance",
+        "manual_simulation_expected_action_route_and_memory_ids",
       ],
       excludes: ["full_prompt", "developer_context", "injected_memory_body", "additional_context"],
     },
     summary: {
-      total_observations: observations.length,
+      total_observations: observationEntries.length,
+      total_manual_simulations: manualEntries.length,
+      total_cases: observations.length,
       ...counts,
     },
     observations,

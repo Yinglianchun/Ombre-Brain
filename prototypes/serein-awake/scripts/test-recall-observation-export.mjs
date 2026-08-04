@@ -4,6 +4,7 @@ import {
   classifyObservationReview,
   observationGroup,
 } from "../src/storage/recallObservationExport.js";
+import { createRecallSimulationTrainingLabel } from "../src/storage/recallSimulationTraining.js";
 
 const items = [
   {
@@ -83,12 +84,32 @@ const reviews = {
   "gateway-4": { verdict: "missed", updatedAt: "2026-08-03T04:04:00Z" },
 };
 
-const payload = buildRecallObservationTrainingExport(items, reviews, "2026-08-03T04:05:00Z");
-assert.equal(payload.schema_version, 3);
+const manualSimulation = createRecallSimulationTrainingLabel({
+  query: "给予别人善意也是在善待自己",
+  expectedAction: "recall",
+  expectedRoute: "recall_needed",
+  expectedMemoryIds: ["scene_b62357c38b2f41b58cb0fbbf3eef6820"],
+  observedAction: "skip",
+  observedRoute: "present_chitchat",
+}, {
+  id: "manual-simulation-1",
+  batchId: "batch-1",
+  now: "2026-08-03T04:04:30Z",
+});
+
+const payload = buildRecallObservationTrainingExport(
+  items,
+  reviews,
+  "2026-08-03T04:05:00Z",
+  [manualSimulation],
+);
+assert.equal(payload.schema_version, 4);
 assert.equal(payload.export_type, "serein.basement.recall-observation-training-export");
 assert.deepEqual(payload.summary, {
   total_observations: 5,
-  available: 2,
+  total_manual_simulations: 1,
+  total_cases: 6,
+  available: 3,
   rejected: 2,
   missing: 1,
 });
@@ -107,6 +128,15 @@ assert.equal(payload.observations[1].expected_route, "present_chitchat");
 assert.equal(payload.reviews["gateway-2"].route_verdict, "incorrect");
 assert.equal(payload.observations[3].query, "");
 assert.equal(payload.observations[4].verdict, null);
+assert.equal(payload.observations[5].source, "manual_simulation");
+assert.equal(payload.observations[5].verdict, "missed");
+assert.equal(payload.observations[5].label_action, "recall");
+assert.equal(payload.observations[5].label_route, "recall_needed");
+assert.equal(payload.observations[5].observed_action, "skip");
+assert.equal(payload.observations[5].observed_route, "present_chitchat");
+assert.equal(payload.observations[5].group, "manual-simulation:batch-1");
+assert.deepEqual(payload.observations[5].expected_memory_ids, ["scene_b62357c38b2f41b58cb0fbbf3eef6820"]);
+assert.equal(payload.reviews["manual-simulation-1"].verdict, "missed");
 assert.equal(Object.hasOwn(payload.observations[0], "injected"), false);
 assert.equal(Object.hasOwn(payload.observations[0], "full_prompt"), false);
 assert.equal(Object.hasOwn(payload.reviews["hook-1"], "full_prompt"), false);

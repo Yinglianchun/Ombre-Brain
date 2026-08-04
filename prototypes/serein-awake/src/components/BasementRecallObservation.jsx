@@ -20,6 +20,7 @@ import {
   saveServerSemanticRouteDraft,
 } from "../storage/basementStore.js";
 import { buildRecallObservationTrainingExport } from "../storage/recallObservationExport.js";
+import { readRecallSimulationTrainingLabels } from "../storage/recallSimulationTraining.js";
 
 const snapshotRouteLabels = Object.fromEntries(
   semanticRouteSnapshot.routes.map((route) => [route.name, route.label || route.name]),
@@ -186,6 +187,7 @@ export function BasementRecallObservation() {
   const [draftForms, setDraftForms] = useState({});
   const [draftNotices, setDraftNotices] = useState({});
   const [exportNotice, setExportNotice] = useState("");
+  const [manualSimulations, setManualSimulations] = useState(readRecallSimulationTrainingLabels);
 
   const load = useCallback(async () => {
     setStatus("loading");
@@ -219,6 +221,12 @@ export function BasementRecallObservation() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const refreshManualSimulations = () => setManualSimulations(readRecallSimulationTrainingLabels());
+    window.addEventListener("serein:recall-simulation-training-updated", refreshManualSimulations);
+    return () => window.removeEventListener("serein:recall-simulation-training-updated", refreshManualSimulations);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -282,8 +290,8 @@ export function BasementRecallObservation() {
     [normalizedDatasets],
   );
   const exportPayload = useMemo(
-    () => buildRecallObservationTrainingExport(exportItems, reviews),
-    [exportItems, reviews],
+    () => buildRecallObservationTrainingExport(exportItems, reviews, new Date().toISOString(), manualSimulations),
+    [exportItems, reviews, manualSimulations],
   );
   const exportSummary = exportPayload.summary;
   const filteredItems = useMemo(
@@ -413,7 +421,7 @@ export function BasementRecallObservation() {
   }), [items]);
 
   const downloadTrainingExport = useCallback(() => {
-    if (!exportSummary.total_observations) {
+    if (!exportSummary.total_cases) {
       setExportNotice("当前没有已加载的观察记录，暂时没有可导出的内容。");
       return;
     }
@@ -427,7 +435,7 @@ export function BasementRecallObservation() {
     anchor.click();
     anchor.remove();
     URL.revokeObjectURL(url);
-    setExportNotice(`已导出 ${exportSummary.total_observations} 条观察；准备脚本会再次复核可用、拒绝与缺失。`);
+    setExportNotice(`已导出 ${exportSummary.total_cases} 条训练案例，其中 ${exportSummary.total_manual_simulations} 条来自人工模拟。`);
   }, [exportPayload, exportSummary]);
 
   return (
@@ -447,7 +455,7 @@ export function BasementRecallObservation() {
             className="observation-export-button"
             type="button"
             onClick={downloadTrainingExport}
-            disabled={!exportSummary.total_observations || status === "loading"}
+            disabled={!exportSummary.total_cases || status === "loading"}
           >
             <DownloadSimple size={16} aria-hidden="true" />
             导出训练标注
@@ -486,6 +494,7 @@ export function BasementRecallObservation() {
           <div><dt>可用</dt><dd>{exportSummary.available}</dd></div>
           <div><dt>拒绝</dt><dd>{exportSummary.rejected}</dd></div>
           <div><dt>缺失</dt><dd>{exportSummary.missing}</dd></div>
+          <div><dt>人工模拟</dt><dd>{exportSummary.total_manual_simulations}</dd></div>
         </dl>
         {exportNotice && <p className="observation-export-summary__notice" role="status">{exportNotice}</p>}
       </div>

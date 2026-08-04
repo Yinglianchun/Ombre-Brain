@@ -32,6 +32,7 @@ import {
   saveDomainPolicyDraft,
   saveSemanticRouteDraft,
 } from "../storage/basementStore.js";
+import { upsertRecallSimulationTrainingLabel } from "../storage/recallSimulationTraining.js";
 
 const routeLabels = {
   simple_contact: "陪伴与贴近",
@@ -146,6 +147,8 @@ function RecallSimulator() {
   const [status, setStatus] = useState("idle");
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [trainingForm, setTrainingForm] = useState({ expectedAction: "", expectedRoute: "", memoryIds: "" });
+  const [trainingNotice, setTrainingNotice] = useState("");
 
   const runSimulation = async (event) => {
     event?.preventDefault();
@@ -162,6 +165,8 @@ function RecallSimulator() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload?.message || payload?.error || "Gateway 没有返回结果");
       setResult(payload);
+      setTrainingForm({ expectedAction: "", expectedRoute: "", memoryIds: "" });
+      setTrainingNotice("");
       setStatus("done");
     } catch (requestError) {
       setResult(null);
@@ -181,6 +186,36 @@ function RecallSimulator() {
   const momentDebugByBucketId = new Map(
     (debug.recalled_moment_debug ?? []).map((item) => [item.bucket_id, item]),
   );
+  const trainingRouteOptions = [...new Map([
+    ...semanticRouteSnapshot.routes.map((route) => [route.name, route.label || routeLabels[route.name] || route.name]),
+    ...routeScores.map((route) => [route.route, routeLabels[route.route] || route.route]),
+  ].filter(([name]) => name)).entries()];
+
+  const chooseExpectedAction = (expectedAction) => {
+    setTrainingForm((current) => ({
+      ...current,
+      expectedAction,
+      expectedRoute: current.expectedRoute
+        || (expectedAction === "recall" ? "recall_needed" : semantic.route || "present_chitchat"),
+    }));
+    setTrainingNotice("");
+  };
+
+  const saveTrainingLabel = () => {
+    const saved = upsertRecallSimulationTrainingLabel({
+      query: result?.query || query,
+      expectedAction: trainingForm.expectedAction,
+      expectedRoute: trainingForm.expectedRoute,
+      expectedMemoryIds: trainingForm.memoryIds.split(/[\s,，]+/),
+      observedAction: semantic.applied_action,
+      observedRoute: semantic.route,
+    });
+    setTrainingNotice(saved.status === "added"
+      ? "已保存为人工模拟训练标注；下次导出会与真实观察合并，并保留来源。"
+      : saved.status === "updated"
+        ? "这句的人工模拟标注已更新，不会重复堆一条。"
+        : "先选择这句话应该召回还是应该跳过。");
+  };
 
   return (
     <section className="basement-workbench" aria-labelledby="recall-simulator-title">
@@ -315,6 +350,53 @@ function RecallSimulator() {
                 ))}
               </div>
             ) : <p className="recall-none">Router 允许继续寻找，但这一句没有记忆通过证据门。</p>}
+          </section>
+
+          <section className="recall-training-label">
+            <div className="recall-result-section__heading">
+              <h3>保存为训练标注</h3>
+              <span>人工模拟 · 不冒充真实 Hook</span>
+            </div>
+            <p>判断这一句本来应该做什么。重复保存同一句会更新原标注，不会越堆越多。</p>
+            <div className="recall-training-label__actions" role="group" aria-label="预期召回动作">
+              <button
+                type="button"
+                className={trainingForm.expectedAction === "recall" ? "is-active" : ""}
+                onClick={() => chooseExpectedAction("recall")}
+              >应该召回</button>
+              <button
+                type="button"
+                className={trainingForm.expectedAction === "skip" ? "is-active" : ""}
+                onClick={() => chooseExpectedAction("skip")}
+              >应该跳过</button>
+            </div>
+            <div className="recall-training-label__fields">
+              <label>
+                <span>预期路线</span>
+                <select
+                  value={trainingForm.expectedRoute}
+                  onChange={(event) => setTrainingForm((current) => ({ ...current, expectedRoute: event.target.value }))}
+                >
+                  <option value="">不标路线</option>
+                  {trainingRouteOptions.map(([name, label]) => <option value={name} key={name}>{label}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>目标记忆 ID（可选）</span>
+                <input
+                  value={trainingForm.memoryIds}
+                  placeholder="scene_…；多个可用空格分开"
+                  onChange={(event) => setTrainingForm((current) => ({ ...current, memoryIds: event.target.value }))}
+                />
+              </label>
+              <button
+                className="basement-primary-action"
+                type="button"
+                disabled={!trainingForm.expectedAction}
+                onClick={saveTrainingLabel}
+              ><Check size={16} aria-hidden="true" />保存标注</button>
+            </div>
+            {trainingNotice && <small className="recall-training-label__notice" role="status">{trainingNotice}</small>}
           </section>
 
           {suppressed.length > 0 && (

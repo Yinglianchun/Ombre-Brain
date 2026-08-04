@@ -234,7 +234,7 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
 asyncio.run(verify_hook_modes_use_the_same_semantic_entry())
 
 
-async def verify_skip_route_winner_is_the_action() -> None:
+async def verify_skip_route_must_clear_confidence_gates() -> None:
     service = SemanticRecallRouter(
         {"gateway": {"semantic_recall_router": {"mode": "active"}}},
         EnabledEmbeddingStub(),
@@ -247,10 +247,33 @@ async def verify_skip_route_winner_is_the_action() -> None:
     service._best_boundary_veto = lambda _index, _vector, _winner: None
     debug, _vector = await service.route_with_vector("宝宝，看到你的回复了")
     assert debug["route"] == "present_chitchat"
-    assert debug["would_skip"] is True
-    assert debug["recommended_action"] == "skip"
-    assert debug["reason"] == "matched_skip_route"
+    assert debug["would_skip"] is False
+    assert debug["recommended_action"] == "recall"
+    assert debug["reason"] == "below_threshold"
     assert debug["threshold_met"] is False
+    assert debug["margin_met"] is False
+
+    service._score_routes = lambda _index, _vector: [
+        {"name": "present_chitchat", "action": "skip", "score": 0.65, "threshold": 0.60, "top_examples": []},
+        {"name": "recall_needed", "action": "recall", "score": 0.63, "threshold": 0.72, "top_examples": []},
+    ]
+    narrow, _vector = await service.route_with_vector("安静下来以后，有些归属也不会消失，对不对")
+    assert narrow["would_skip"] is False
+    assert narrow["recommended_action"] == "recall"
+    assert narrow["reason"] == "insufficient_margin"
+    assert narrow["threshold_met"] is True
+    assert narrow["margin_met"] is False
+
+    service._score_routes = lambda _index, _vector: [
+        {"name": "present_chitchat", "action": "skip", "score": 0.65, "threshold": 0.60, "top_examples": []},
+        {"name": "recall_needed", "action": "recall", "score": 0.30, "threshold": 0.72, "top_examples": []},
+    ]
+    skipped, _vector = await service.route_with_vector("今天心情还不错")
+    assert skipped["would_skip"] is True
+    assert skipped["recommended_action"] == "skip"
+    assert skipped["reason"] == "matched_skip_route"
+    assert skipped["threshold_met"] is True
+    assert skipped["margin_met"] is True
 
     service._best_boundary_veto = lambda _index, _vector, _winner: {
         "route": "recall_needed",
@@ -267,6 +290,6 @@ async def verify_skip_route_winner_is_the_action() -> None:
     assert guarded["reason"] == "boundary_veto"
 
 
-asyncio.run(verify_skip_route_winner_is_the_action())
+asyncio.run(verify_skip_route_must_clear_confidence_gates())
 
 print("semantic recall cutover verification passed")

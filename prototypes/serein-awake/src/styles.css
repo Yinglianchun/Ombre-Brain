@@ -5022,6 +5022,48 @@ label:has(input:focus-visible) {
 .basement-error strong { font-size: 13px; font-weight: 500; }
 .basement-error p { margin: 5px 0 0; font-size: 11px; line-height: 1.6; }
 .recall-result { padding-bottom: 12px; }
+
+.recall-training-label {
+  display: grid;
+  gap: 14px;
+  padding: 25px 32px 28px;
+  border-top: 1px solid rgba(61, 80, 73, 0.10);
+  background: rgba(247, 250, 249, 0.72);
+}
+.recall-training-label > p { margin: 0; color: #7c8984; font-size: 11px; line-height: 1.7; }
+.recall-training-label__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.recall-training-label__actions button {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid rgba(61, 80, 73, 0.16);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.76);
+  color: #66736e;
+  cursor: pointer;
+}
+.recall-training-label__actions button.is-active {
+  border-color: rgba(55, 86, 75, 0.34);
+  background: #eaf1ee;
+  color: #345349;
+}
+.recall-training-label__fields { display: grid; grid-template-columns: minmax(180px, 0.8fr) minmax(250px, 1.3fr) auto; gap: 12px; align-items: end; }
+.recall-training-label__fields label { display: grid; gap: 7px; color: #6f7d78; font-size: 10px; }
+.recall-training-label__fields select,
+.recall-training-label__fields input {
+  width: 100%;
+  min-height: 42px;
+  box-sizing: border-box;
+  border: 1px solid rgba(61, 80, 73, 0.16);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #40534c;
+  padding: 0 12px;
+  font: inherit;
+  outline: none;
+}
+.recall-training-label__fields select:focus,
+.recall-training-label__fields input:focus { border-color: rgba(55, 86, 75, 0.42); box-shadow: 0 0 0 3px rgba(55, 86, 75, 0.05); }
+.recall-training-label__notice { color: #4d6d61; font-size: 10px; line-height: 1.6; }
 .recall-decision {
   display: grid;
   grid-template-columns: minmax(180px, 0.7fr) minmax(0, 1.6fr);
@@ -5872,6 +5914,8 @@ label:has(input:focus-visible) {
   .route-score { grid-template-columns: minmax(0, 1fr) 60px; gap: 12px; }
   .route-score small { grid-column: 1 / -1; }
   .recall-result-section { padding: 24px 20px; }
+  .recall-training-label { padding: 22px 20px 24px; }
+  .recall-training-label__fields { grid-template-columns: 1fr; }
   .recall-suppressed { margin-inline: 20px; }
   .route-editor-layout { grid-template-columns: 1fr; }
   .domain-policy-summary { display: none; }
