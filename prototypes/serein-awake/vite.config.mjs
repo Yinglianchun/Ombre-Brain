@@ -1141,6 +1141,7 @@ function sereinMemoryBridge() {
           response.statusCode = 200;
           response.end(JSON.stringify(result));
         } catch (error) {
+          console.error("[serein] bridge source messages failed", error);
           response.statusCode = 502;
           response.end(JSON.stringify({
             error: "bridge_source_messages_failed",
