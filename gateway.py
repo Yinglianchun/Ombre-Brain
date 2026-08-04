@@ -97,6 +97,11 @@ from recall_eval import RECALL_EVAL_BLOCKED_SECTIONS, RECALL_EVAL_DEFAULT_CASES
 from recall_policy import QueryAnchorPlan, RecallPolicy, diffusion_seed_topic_term_has_specific_residue
 from memory_nodes import MemoryNodeStore
 from memory_recall import DomainRecallPolicy, SemanticRecallRouter
+from memory_recall.retrieval_budget import (
+    build_retrieval_budget,
+    finalize_retrieval_budget,
+    partition_candidates_by_absolute_floor,
+)
 from narrative_rolls import NarrativeRollStore
 from persona_engine import PersonaStateEngine
 from persona_event_selection import (
@@ -318,6 +323,31 @@ TASK_ONLY_MOMENT_SECTIONS = {"followup", "followup_log"}
 MOMENT_TEMPERATURE_SECTIONS = CONTEXT_ONLY_SECTIONS - TASK_ONLY_MOMENT_SECTIONS
 DIRECT_AUX_CONTEXT_SECTIONS = MOMENT_TEMPERATURE_SECTIONS - {"comment"}
 PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feeling", "comment")
+
+RECALL_ABLATION_MODES = frozenset({"normal", "without_cues", "without_embedding"})
+
+
+def normalize_recall_ablation_mode(value: object) -> str:
+    mode = str(value or "normal").strip().lower() or "normal"
+    if mode not in RECALL_ABLATION_MODES:
+        allowed = ", ".join(sorted(RECALL_ABLATION_MODES))
+        raise ValueError(f"recall_ablation must be one of: {allowed}")
+    return mode
+
+
+def recall_ablation_debug_payload(mode: str, *, source: str = "") -> dict[str, Any]:
+    normalized = normalize_recall_ablation_mode(mode)
+    return {
+        "mode": normalized,
+        "source": str(source or "").strip() or "default_gateway",
+        "authored_cues_enabled": normalized != "without_cues",
+        "body_embedding_enabled": normalized != "without_embedding",
+        "route_embedding_enabled": True,
+        "route_decision_unchanged": True,
+        "evidence_veto_unchanged": True,
+    }
+
+
 class GatewayService:
     """
     OpenAI-compatible gateway that injects Ombre memory before forwarding
@@ -571,6 +601,14 @@ class GatewayService:
             embedding_timeout = 3.0
         self.embedding_query_timeout_seconds = max(0.0, min(30.0, embedding_timeout))
         self.first_card_min_score = float(self.gateway_cfg.get("first_card_min_score", 0.55))
+        self.retrieval_budget_sentinel_rescue_floor = self._clamp(
+            float(
+                self.gateway_cfg.get(
+                    "retrieval_budget_sentinel_rescue_floor",
+                    self.first_card_min_score,
+                )
+            )
+        )
         self.second_card_min_score = float(self.gateway_cfg.get("second_card_min_score", 0.50))
         self.second_card_relative_score = float(
             self.gateway_cfg.get("second_card_relative_score", 0.85)
@@ -2058,26 +2096,99 @@ class GatewayService:
             recall_mode = "full"
         if recall_mode not in {"fast", "full"}:
             return JSONResponse({"error": "recall_mode must be fast or full"}, status_code=400)
+        simulation_probe = self._truthy_header(
+            str(body.get("simulation")) if body.get("simulation") is not None else None
+        )
+        if simulation_probe:
+            include_debug = True
+        try:
+            recall_ablation_mode = normalize_recall_ablation_mode(body.get("recall_ablation"))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if recall_ablation_mode != "normal" and (
+            not simulation_probe or not include_debug or recall_mode != "full"
+        ):
+            return JSONResponse(
+                {
+                    "error": "recall_ablation_requires_simulation_debug_full",
+                    "message": "消融只允许在带 debug 的 full 模拟请求中运行。",
+                },
+                status_code=400,
+            )
         max_context_chars = bounded_int(
             body.get("max_context_chars"),
             default=4200,
             floor=400,
             ceiling=12000,
         )
-        record_hook_injection = str(body.get("channel") or "").strip().lower() == "haven_bridge"
+        record_hook_injection = (
+            str(body.get("channel") or "").strip().lower() == "haven_bridge"
+            and not simulation_probe
+        )
 
         semantic_recall_debug, semantic_query_vector = (
             await self.semantic_recall_router.route_with_vector(query)
         )
-        semantic_skip = self.semantic_recall_router.should_apply_skip(
+        if simulation_probe:
+            ablation_debug = recall_ablation_debug_payload(
+                recall_ablation_mode,
+                source=(
+                    "manual_simulation"
+                    if recall_ablation_mode != "normal"
+                    else "simulation_default"
+                ),
+            )
+            semantic_recall_debug["recall_ablation"] = ablation_debug
+            retrieval_budget = self._build_retrieval_budget_debug(
+                query,
+                semantic_recall_debug,
+            )
+            retrieval_budget["recall_ablation"] = dict(ablation_debug)
+            semantic_recall_debug["retrieval_budget"] = retrieval_budget
+            sentinel_debug = await self._retrieval_budget_sentinel_debug(
+                query,
+                semantic_query_vector,
+                retrieval_budget,
+            )
+            finalize_retrieval_budget(retrieval_budget, sentinel_debug)
+        route_skip_proposed = self.semantic_recall_router.should_apply_skip(
             semantic_recall_debug
         )
         semantic_skip = await self._apply_semantic_scene_evidence_veto(
             query,
-            semantic_skip,
+            route_skip_proposed,
             semantic_query_vector,
             semantic_recall_debug,
         )
+        if simulation_probe:
+            retrieval_budget = semantic_recall_debug.get("retrieval_budget")
+            if isinstance(retrieval_budget, dict):
+                evidence_veto_applied = bool(
+                    (semantic_recall_debug.get("scene_evidence_veto") or {}).get("applied")
+                )
+                retrieval_budget["route_would_skip"] = bool(route_skip_proposed)
+                retrieval_budget["evidence_veto_applied"] = evidence_veto_applied
+                if route_skip_proposed and not semantic_skip:
+                    retrieval_budget["budget_skip_applied"] = False
+                    retrieval_budget["route_skip_deferred"] = True
+                    retrieval_budget["deferred_reason"] = "scene_evidence_veto"
+                elif route_skip_proposed and retrieval_budget.get("skip_ready"):
+                    retrieval_budget["budget_skip_applied"] = True
+                    retrieval_budget["route_skip_deferred"] = False
+                    semantic_skip = True
+                    semantic_recall_debug["route_skip_reason"] = semantic_recall_debug.get("reason")
+                    semantic_recall_debug["reason"] = "pure_chitchat_sentinel_below_floor"
+                elif route_skip_proposed:
+                    retrieval_budget["budget_skip_applied"] = False
+                    retrieval_budget["route_skip_deferred"] = True
+                    retrieval_budget["deferred_reason"] = (
+                        "sentinel_candidate_over_rescue_floor"
+                        if retrieval_budget.get("pure_chitchat_prior")
+                        else "structural_or_anchor_fail_open"
+                    )
+                    semantic_recall_debug["route_skip_reason"] = semantic_recall_debug.get("reason")
+                    semantic_recall_debug["reason"] = "budget_shadow_deferred"
+                    semantic_skip = False
         semantic_recall_debug["skip_applied"] = semantic_skip
         semantic_recall_debug["applied_action"] = (
             "skip" if semantic_skip else "recall"
@@ -2102,6 +2213,9 @@ class GatewayService:
                     "candidate_count": 0,
                     "semantic_recall_debug": semantic_recall_debug,
                     "narrative_recall_debug": narrative_recall_debug,
+                    "recall_ablation": dict(
+                        semantic_recall_debug.get("recall_ablation") or {}
+                    ),
                     "hook_recall_debug": {
                         "mode": "full_gateway" if recall_mode == "full" else "fast_bucket",
                         "skip_reason": "semantic_recall_skip",
@@ -9851,12 +9965,42 @@ class GatewayService:
         )
         timing_debug = query_planner_debug.setdefault("timing_ms", {})
         self._add_timing_ms(timing_debug, "moment.select_dynamic_buckets", stage_started_at)
-        stage_started_at = time.perf_counter()
-        selected_buckets = self._with_explicit_source_record_buckets(
-            query,
-            selected_buckets,
-            all_buckets,
+        retrieval_budget = (
+            semantic_recall_debug.get("retrieval_budget")
+            if isinstance(semantic_recall_debug, dict)
+            and isinstance(semantic_recall_debug.get("retrieval_budget"), dict)
+            else None
         )
+        budget_shadow = bool(
+            retrieval_budget and retrieval_budget.get("mode") == "simulation_shadow"
+        )
+        shallow_budget = bool(
+            budget_shadow and retrieval_budget.get("effective_budget") == "shallow"
+        )
+        moment_suppressed_buckets = list(suppressed_buckets or [])
+        if budget_shadow:
+            budget_floor_blocked_ids = {
+                str((item.get("bucket") or {}).get("id") or "")
+                for item in moment_suppressed_buckets
+                if isinstance(item, dict)
+                and (
+                    item.get("budget_floor_qualified") is False
+                    or str(item.get("admission_reason") or "") == "below_absolute_floor"
+                )
+            }
+            moment_suppressed_buckets = [
+                item
+                for item in moment_suppressed_buckets
+                if str((item.get("bucket") or {}).get("id") or "")
+                not in budget_floor_blocked_ids
+            ]
+        stage_started_at = time.perf_counter()
+        if not shallow_budget:
+            selected_buckets = self._with_explicit_source_record_buckets(
+                query,
+                selected_buckets,
+                all_buckets,
+            )
         query_planner_debug["final_bucket_ids"] = [
             str(bucket.get("id") or "")
             for bucket in selected_buckets
@@ -9867,7 +10011,7 @@ class GatewayService:
         selected_bucket_ids = [bucket["id"] for bucket in selected_buckets if bucket.get("id")]
         cooldown_suppressed_bucket_ids = {
             str((item.get("bucket") or {}).get("id") or "")
-            for item in suppressed_buckets or []
+            for item in moment_suppressed_buckets
             if item.get("cooldown_suppressed")
             and str((item.get("bucket") or {}).get("id") or "")
         }
@@ -9878,13 +10022,13 @@ class GatewayService:
         }
         session_hard_excluded_ids = self._session_hard_exclude_bucket_ids(session_id) - set(selected_bucket_ids)
         candidate_bucket_signals = dict(selected_bucket_signals)
-        for item in suppressed_buckets or []:
+        for item in moment_suppressed_buckets:
             bucket = item.get("bucket") if isinstance(item, dict) else None
             bucket_id = str((bucket or {}).get("id") or "")
             if bucket_id and bucket_id not in cooldown_suppressed_bucket_ids:
                 candidate_bucket_signals.setdefault(bucket_id, self._bucket_candidate_recall_signal(item))
         bucket_boosts = {bucket_id: 1.0 for bucket_id in selected_bucket_ids}
-        for item in suppressed_buckets or []:
+        for item in moment_suppressed_buckets:
             bucket = item.get("bucket") if isinstance(item, dict) else None
             bucket_id = str((bucket or {}).get("id") or "")
             if (
@@ -9898,7 +10042,7 @@ class GatewayService:
                 bucket_boosts[bucket_id] = boost
         candidates = []
         stage_started_at = time.perf_counter()
-        if search_query:
+        if search_query and not shallow_budget:
             moment_search_queries = [search_query]
             raw_moment_query = str(query or "").strip()
             if raw_moment_query and raw_moment_query != search_query:
@@ -10003,7 +10147,15 @@ class GatewayService:
         candidates = self._apply_relevance_to_moment_candidates(query, candidates)
         self._add_timing_ms(timing_debug, "moment.filter_relevance", stage_started_at)
         stage_started_at = time.perf_counter()
-        candidates = await self._rerank_moment_candidates(query, candidates)
+        if budget_shadow:
+            query_planner_debug["moment_rerank"] = {
+                "mode": "shadow",
+                "called": False,
+                "would_call": bool(candidates),
+                "reason": "shadow_only_reranker_disabled",
+            }
+        else:
+            candidates = await self._rerank_moment_candidates(query, candidates)
         self._add_timing_ms(timing_debug, "moment.rerank_candidates", stage_started_at)
         stage_started_at = time.perf_counter()
         admitted_candidates = []
@@ -13190,6 +13342,301 @@ class GatewayService:
             "debug": dict(plan.debug or {}),
         }
 
+    def _build_retrieval_budget_debug(
+        self,
+        query: str,
+        semantic_recall_debug: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build a simulation-only retrieval budget from existing planners."""
+        plan = self._recall_query_plan(query)
+        anchor_plan = self._query_anchor_plan(query)
+        try:
+            date_hint = self._query_date_recall_hint(query)
+        except Exception:
+            date_hint = None
+        return build_retrieval_budget(
+            query,
+            route=str((semantic_recall_debug or {}).get("route") or ""),
+            route_action=str((semantic_recall_debug or {}).get("route_action") or "recall"),
+            semantic_debug=semantic_recall_debug,
+            planner={
+                "locatable_terms": list(getattr(plan, "locatable_terms", ()) or ()),
+                "specific_terms": list(getattr(plan, "specific_terms", ()) or ()),
+            },
+            anchor_plan=self._query_anchor_plan_debug(anchor_plan),
+            date_hint=date_hint,
+            absolute_floor=getattr(self, "first_card_min_score", 0.55),
+            rescue_floor=getattr(
+                self,
+                "retrieval_budget_sentinel_rescue_floor",
+                getattr(self, "first_card_min_score", 0.55),
+            ),
+        )
+
+    def _apply_retrieval_budget_candidate_floor(
+        self,
+        candidates: list[dict[str, Any]],
+        retrieval_budget: dict[str, Any],
+        *,
+        candidate_count: int,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        qualified, suppressed = partition_candidates_by_absolute_floor(
+            candidates,
+            absolute_floor=float(
+                retrieval_budget.get("absolute_floor") or self.first_card_min_score
+            ),
+        )
+        retrieval_budget["cheap_retrieval"].update(
+            candidate_count=max(0, int(candidate_count)),
+            floor_qualified_count=len(qualified),
+            stop_reason=(
+                "candidates_over_absolute_floor"
+                if qualified
+                else "no_candidate_over_absolute_floor"
+            ),
+            candidates=[
+                self._retrieval_budget_candidate_debug_row(item)
+                for item in [*qualified, *suppressed]
+            ][:30],
+        )
+        retrieval_budget["rerank"].update(
+            eligible_candidate_count=len(qualified),
+            would_call=bool(qualified),
+            called=False,
+            reason=(
+                "shadow_only_reranker_disabled"
+                if qualified
+                else "no_candidate_over_absolute_floor"
+            ),
+        )
+        return qualified, suppressed
+
+    def _retrieval_budget_candidate_debug_row(self, item: dict[str, Any]) -> dict[str, Any]:
+        bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+        bucket_id = str(bucket.get("id") or item.get("bucket_id") or "")
+        meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+        sources: list[str] = []
+        if item.get("exact_anchor_match"):
+            sources.append("exact_anchor")
+        if item.get("title_anchor_terms"):
+            sources.append("title_anchor")
+        if item.get("planner_lexical_match"):
+            sources.append("lexical")
+        if item.get("authored_cue_match"):
+            sources.append("cue_lexical")
+        if self._safe_float(item.get("semantic_score"), 0.0) > 0:
+            sources.append("body_semantic")
+        if item.get("retrieval_alias_match"):
+            sources.append("retrieval_alias")
+        floor_qualified = bool(item.get("budget_floor_qualified"))
+        return {
+            "bucket_id": bucket_id,
+            "title": str(meta.get("name") or bucket.get("name") or ""),
+            "canonical_scene": bool(bucket and self._is_canonical_scene_bucket(bucket)),
+            "semantic_profile": (
+                "canonical_body_only"
+                if bucket and self._is_canonical_scene_bucket(bucket)
+                else "legacy_or_unknown"
+            ),
+            "semantic_score": round(self._safe_float(item.get("semantic_score"), 0.0), 4),
+            "body_semantic_score": round(self._safe_float(item.get("semantic_score"), 0.0), 4),
+            "cue_semantic": {"status": "unavailable", "score": None},
+            "cue_lexical_match": bool(item.get("authored_cue_match")),
+            "matched_cues": list(item.get("authored_cue_terms") or [])[:4],
+            "title_anchor_match": bool(item.get("title_anchor_terms")),
+            "title_anchor_terms": list(item.get("title_anchor_terms") or [])[:4],
+            "exact_anchor_match": bool(item.get("exact_anchor_match")),
+            "candidate_sources": sources,
+            "combined_score": round(self._safe_float(item.get("score"), 0.0), 4),
+            "absolute_floor": round(self._safe_float(item.get("budget_floor"), 0.0), 4),
+            "floor_qualified": floor_qualified,
+            "final_admission_source": (
+                "pending_normal_admission" if floor_qualified else "below_absolute_floor"
+            ),
+            "reranker_shadow": {
+                "called": False,
+                "score": None,
+                "status": (
+                    "eligible_not_called" if floor_qualified else "ineligible_below_floor"
+                ),
+            },
+        }
+
+    @staticmethod
+    def _finalize_retrieval_budget_candidate_debug(
+        retrieval_budget: dict[str, Any],
+        selected_buckets: list[dict],
+        suppressed_candidates: list[dict],
+    ) -> None:
+        rows = (retrieval_budget.get("cheap_retrieval") or {}).get("candidates")
+        if not isinstance(rows, list):
+            return
+        selected_ids = {
+            str(bucket.get("id") or "")
+            for bucket in selected_buckets or []
+            if isinstance(bucket, dict) and str(bucket.get("id") or "")
+        }
+        suppression_by_id: dict[str, str] = {}
+        for item in suppressed_candidates or []:
+            if not isinstance(item, dict):
+                continue
+            bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+            bucket_id = str(bucket.get("id") or item.get("bucket_id") or "")
+            if bucket_id:
+                suppression_by_id.setdefault(
+                    bucket_id,
+                    str(item.get("admission_reason") or "normal_admission_rejected"),
+                )
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            bucket_id = str(row.get("bucket_id") or "")
+            if bucket_id in selected_ids:
+                row["final_admission_source"] = "selected_after_normal_admission"
+            elif bucket_id in suppression_by_id:
+                row["final_admission_source"] = suppression_by_id[bucket_id]
+
+    async def _retrieval_budget_sentinel_debug(
+        self,
+        query: str,
+        query_embedding: list[float] | None,
+        retrieval_budget: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Probe top body/title/cue entrances without expansion or admission."""
+        rescue_floor = self._clamp(
+            self._safe_float(
+                retrieval_budget.get("rescue_floor"),
+                getattr(self, "first_card_min_score", 0.55),
+            )
+        )
+        payload: dict[str, Any] = {
+            "called": False,
+            "top_k": 2,
+            "rescue_floor": round(rescue_floor, 4),
+            "candidate_count": 0,
+            "floor_qualified_count": 0,
+            "candidates": [],
+            "expanded": False,
+            "reranked": False,
+            "injection_allowed": False,
+            "recorded": False,
+            "reason": "not_applicable",
+        }
+        if not retrieval_budget.get("pure_chitchat_prior"):
+            return payload
+        if not query_embedding:
+            payload["reason"] = "query_vector_unavailable_fail_open"
+            return payload
+
+        embedding_engine = getattr(self, "embedding_engine", None)
+        search_similar = getattr(embedding_engine, "search_similar_by_embedding", None)
+        if not callable(search_similar):
+            payload["reason"] = "embedding_search_unavailable_fail_open"
+            return payload
+        try:
+            all_buckets = await self._list_gateway_buckets(include_archive=False)
+        except Exception as exc:
+            payload["reason"] = f"bucket_list_failed:{type(exc).__name__}"
+            return payload
+        eligible = {
+            str(bucket.get("id") or ""): bucket
+            for bucket in all_buckets or []
+            if isinstance(bucket, dict)
+            and str(bucket.get("id") or "")
+            and self._is_semantic_candidate_bucket(bucket)
+        }
+        if not eligible:
+            payload["called"] = True
+            payload["reason"] = "no_semantic_candidates_below_floor"
+            return payload
+
+        try:
+            search = search_similar(query_embedding, top_k=2)
+            timeout = self._safe_float(
+                getattr(self, "embedding_query_timeout_seconds", 0.0),
+                0.0,
+            )
+            if timeout > 0:
+                body_rows = await asyncio.wait_for(search, timeout=timeout)
+            else:
+                body_rows = await search
+        except asyncio.TimeoutError:
+            payload["reason"] = "body_sentinel_timeout_fail_open"
+            return payload
+        except Exception as exc:
+            payload["reason"] = f"body_sentinel_failed:{type(exc).__name__}"
+            return payload
+
+        candidate_by_id: dict[str, dict[str, Any]] = {}
+
+        def ensure_candidate(bucket_id: str) -> dict[str, Any] | None:
+            bucket = eligible.get(bucket_id)
+            if not bucket:
+                return None
+            row = candidate_by_id.get(bucket_id)
+            if row is None:
+                row = {
+                    "bucket_id": bucket_id,
+                    "semantic_score": 0.0,
+                    "rescue_score": 0.0,
+                    "sources": [],
+                    "title_anchor_terms": [],
+                    "authored_cue_terms": [],
+                    "would_inject": False,
+                }
+                candidate_by_id[bucket_id] = row
+            return row
+
+        for bucket_id, similarity in list(body_rows or [])[:2]:
+            row = ensure_candidate(str(bucket_id or ""))
+            if not row:
+                continue
+            semantic_score = self._clamp(self._safe_float(similarity, 0.0))
+            row["semantic_score"] = max(row["semantic_score"], round(semantic_score, 4))
+            row["rescue_score"] = max(row["rescue_score"], semantic_score)
+            row["sources"].append("body_semantic")
+
+        for bucket_id, bucket in eligible.items():
+            title_terms = self._bucket_title_anchor_terms(query, bucket)
+            cue_terms = self._bucket_authored_cue_terms(query, bucket)
+            if not title_terms and not cue_terms:
+                continue
+            row = ensure_candidate(bucket_id)
+            if not row:
+                continue
+            if title_terms:
+                row["title_anchor_terms"] = list(title_terms[:4])
+                row["sources"].append("title")
+            if cue_terms:
+                row["authored_cue_terms"] = list(cue_terms[:4])
+                row["sources"].append("authored_cue")
+            row["rescue_score"] = max(row["rescue_score"], 1.0)
+
+        rows = sorted(
+            candidate_by_id.values(),
+            key=lambda row: (
+                -self._safe_float(row.get("rescue_score"), 0.0),
+                -self._safe_float(row.get("semantic_score"), 0.0),
+                str(row.get("bucket_id") or ""),
+            ),
+        )[:2]
+        for row in rows:
+            row["sources"] = list(dict.fromkeys(row["sources"]))
+            row["rescue_score"] = round(self._safe_float(row.get("rescue_score"), 0.0), 4)
+            row["floor_qualified"] = row["rescue_score"] >= rescue_floor
+        payload.update(
+            called=True,
+            candidate_count=len(rows),
+            floor_qualified_count=sum(1 for row in rows if row.get("floor_qualified")),
+            candidates=rows,
+            reason=(
+                "candidate_over_rescue_floor"
+                if any(row.get("floor_qualified") for row in rows)
+                else "no_candidate_over_rescue_floor"
+            ),
+        )
+        return payload
+
     def _anchor_plan_direct_rejection(
         self,
         node: dict,
@@ -13825,6 +14272,23 @@ class GatewayService:
 
         if not query or self.inject_max_cards <= 0:
             return [], []
+        retrieval_budget = (
+            semantic_recall_debug.get("retrieval_budget")
+            if isinstance(semantic_recall_debug, dict)
+            and isinstance(semantic_recall_debug.get("retrieval_budget"), dict)
+            else None
+        )
+        budget_shadow = bool(
+            retrieval_budget and retrieval_budget.get("mode") == "simulation_shadow"
+        )
+        budget_channels = set(retrieval_budget.get("channels") or []) if budget_shadow else set()
+        recall_ablation_mode = str(
+            ((retrieval_budget or {}).get("recall_ablation") or {}).get("mode") or "normal"
+        )
+        if budget_shadow:
+            allow_rerank = False
+            if recall_ablation_mode == "without_embedding":
+                allow_semantic = False
         all_buckets = suppress_migrated_legacy_sources(all_buckets)
 
         raw_query = query
@@ -13849,13 +14313,28 @@ class GatewayService:
         ]
         mark("eligible_filter", stage_started_at)
         if not eligible and not semantic_eligible:
+            if budget_shadow:
+                retrieval_budget["cheap_retrieval"].update(
+                    candidate_count=0,
+                    floor_qualified_count=0,
+                    stop_reason="no_eligible_buckets",
+                )
+                retrieval_budget["rerank"].update(
+                    eligible_candidate_count=0,
+                    would_call=False,
+                    reason="no_candidate_over_absolute_floor",
+                )
             return [], []
 
         eligible_map = {bucket["id"]: bucket for bucket in eligible if bucket.get("id")}
         semantic_bucket_map = {bucket["id"]: bucket for bucket in semantic_eligible if bucket.get("id")}
         alias_eligible_map = {**semantic_bucket_map, **eligible_map}
         stage_started_at = time.perf_counter()
-        retrieval_alias_hits = self._retrieval_alias_hits(policy_query, set(alias_eligible_map))
+        retrieval_alias_hits = (
+            self._retrieval_alias_hits(policy_query, set(alias_eligible_map))
+            if not budget_shadow or "relations" in budget_channels
+            else []
+        )
         retrieval_alias_by_bucket: dict[str, list[dict[str, Any]]] = {}
         retrieval_alias_scores: dict[str, float] = {}
         for row in retrieval_alias_hits:
@@ -13880,6 +14359,7 @@ class GatewayService:
                 raw_query,
                 set(semantic_bucket_map),
                 query_embedding=query_embedding,
+                semantic_recall_debug=semantic_recall_debug,
             )
         else:
             semantic_scores = {}
@@ -13900,12 +14380,19 @@ class GatewayService:
             exact_scores, exact_debug = self._get_exact_anchor_candidates(raw_query, normalized_query, eligible)
         mark("exact_anchor_candidates", stage_started_at)
         stage_started_at = time.perf_counter()
-        authored_cue_debug = {
-            str(bucket.get("id") or ""): cue_terms
-            for bucket in eligible
-            if bucket.get("id")
-            and (cue_terms := self._bucket_authored_cue_terms(raw_query, bucket))
-        }
+        authored_cue_debug = (
+            {
+                str(bucket.get("id") or ""): cue_terms
+                for bucket in eligible
+                if bucket.get("id")
+                and (cue_terms := self._bucket_authored_cue_terms(raw_query, bucket))
+            }
+            if (
+                recall_ablation_mode != "without_cues"
+                and (not budget_shadow or "authored_cue" in budget_channels)
+            )
+            else {}
+        )
         mark("authored_cues", stage_started_at)
         stage_started_at = time.perf_counter()
         raw_query_plan = self._recall_query_plan(raw_query)
@@ -13937,6 +14424,17 @@ class GatewayService:
             | set(retrieval_alias_scores)
         )
         if not candidate_ids:
+            if budget_shadow:
+                retrieval_budget["cheap_retrieval"].update(
+                    candidate_count=0,
+                    floor_qualified_count=0,
+                    stop_reason="no_cheap_candidates",
+                )
+                retrieval_budget["rerank"].update(
+                    eligible_candidate_count=0,
+                    would_call=False,
+                    reason="no_candidate_over_absolute_floor",
+                )
             return [], []
         stage_started_at = time.perf_counter()
         semantic_norms = self._normalized_score_map(semantic_scores)
@@ -14125,6 +14623,15 @@ class GatewayService:
             key=lambda item: self._bucket_primary_candidate_rank(query, item)
         )
         mark("sort_candidates", stage_started_at)
+        budget_floor_suppressed: list[dict] = []
+        if budget_shadow:
+            scored_candidates, budget_floor_suppressed = (
+                self._apply_retrieval_budget_candidate_floor(
+                    scored_candidates,
+                    retrieval_budget,
+                    candidate_count=len(candidate_ids),
+                )
+            )
         stage_started_at = time.perf_counter()
         if allow_rerank:
             scored_candidates = await self._rerank_scored_bucket_candidates(query, scored_candidates)
@@ -14164,7 +14671,8 @@ class GatewayService:
 
         admitted_pool, suppressed_candidates = admit_candidate_pool(active_pool)
         suppressed_candidates = (
-            session_suppressed_candidates
+            budget_floor_suppressed
+            + session_suppressed_candidates
             + cooldown_suppressed_candidates
             + suppressed_candidates
         )
@@ -14238,7 +14746,14 @@ class GatewayService:
         self._add_timing_ms(timing_debug, "direct.pick_cards", stage_started_at)
 
         rescue_debug = planner_debug.setdefault("semantic_rescue", {})
-        if not self.semantic_rescue_enabled:
+        budget_shadow = bool(
+            isinstance(semantic_recall_debug, dict)
+            and isinstance(semantic_recall_debug.get("retrieval_budget"), dict)
+            and semantic_recall_debug["retrieval_budget"].get("mode") == "simulation_shadow"
+        )
+        if budget_shadow:
+            rescue_debug["skip_reason"] = "budget_shadow_floor_only"
+        elif not self.semantic_rescue_enabled:
             rescue_debug["skip_reason"] = "disabled"
         elif len(direct_selected) >= self.inject_max_cards:
             rescue_debug["skip_reason"] = "capacity_full"
@@ -14304,6 +14819,12 @@ class GatewayService:
             for bucket in selected_buckets
             if bucket.get("id")
         ]
+        if budget_shadow:
+            self._finalize_retrieval_budget_candidate_debug(
+                semantic_recall_debug["retrieval_budget"],
+                selected_buckets,
+                suppressed_candidates,
+            )
         result = (selected_buckets, suppressed_candidates)
         if include_query_planner_debug:
             return (*result, planner_debug)
@@ -15461,20 +15982,41 @@ class GatewayService:
         eligible_ids: set[str],
         *,
         query_embedding: list[float] | None = None,
+        semantic_recall_debug: dict[str, Any] | None = None,
     ) -> dict[str, float]:
         if not getattr(self.embedding_engine, "enabled", False):
             return {}
+
+        search_top_k = self.semantic_candidate_top_k
+        retrieval_budget = (
+            semantic_recall_debug.get("retrieval_budget")
+            if isinstance(semantic_recall_debug, dict)
+            and isinstance(semantic_recall_debug.get("retrieval_budget"), dict)
+            else None
+        )
+        if retrieval_budget and retrieval_budget.get("mode") == "simulation_shadow":
+            recall_ablation_mode = str(
+                (retrieval_budget.get("recall_ablation") or {}).get("mode") or "normal"
+            )
+            if recall_ablation_mode == "without_embedding":
+                return {}
+            try:
+                budget_top_k = int(retrieval_budget.get("semantic_top_k") or 0)
+            except (TypeError, ValueError):
+                budget_top_k = 0
+            if budget_top_k > 0:
+                search_top_k = min(search_top_k, budget_top_k)
 
         try:
             if query_embedding:
                 search = self.embedding_engine.search_similar_by_embedding(
                     query_embedding,
-                    top_k=self.semantic_candidate_top_k,
+                    top_k=search_top_k,
                 )
             else:
                 search = self.embedding_engine.search_similar(
                     query,
-                    top_k=self.semantic_candidate_top_k,
+                    top_k=search_top_k,
                 )
             if self.embedding_query_timeout_seconds > 0:
                 results = await asyncio.wait_for(search, timeout=self.embedding_query_timeout_seconds)

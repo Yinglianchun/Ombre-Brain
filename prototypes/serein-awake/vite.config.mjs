@@ -98,6 +98,23 @@ async function readJsonBody(request, maxBytes = 32_768) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
 
+export function normalizeRecallSimulationOptions(body = {}) {
+  const recallAblation = String(body.recall_ablation || "normal").trim().toLowerCase();
+  const allowedRecallAblations = new Set(["normal", "without_cues", "without_embedding"]);
+  const simulation = [true, 1, "1", "true", "yes", "on"].includes(body.simulation);
+  if (!allowedRecallAblations.has(recallAblation)) {
+    return { ok: false, error: "invalid_recall_ablation", message: "消融模式不正确。" };
+  }
+  if (recallAblation !== "normal" && !simulation) {
+    return {
+      ok: false,
+      error: "recall_ablation_requires_simulation",
+      message: "消融只允许从召回模拟发起。",
+    };
+  }
+  return { ok: true, recallAblation, simulation };
+}
+
 function parseMcpEvent(text) {
   const data = String(text || "")
     .split(/\r?\n/)
@@ -839,6 +856,16 @@ function sereinGatewayBridge() {
             response.end(JSON.stringify({ error: "query_required", message: "先写一句要测试的话。" }));
             return;
           }
+          const simulationOptions = normalizeRecallSimulationOptions(body);
+          if (!simulationOptions.ok) {
+            response.statusCode = 400;
+            response.end(JSON.stringify({
+              error: simulationOptions.error,
+              message: simulationOptions.message,
+            }));
+            return;
+          }
+          const { recallAblation, simulation } = simulationOptions;
 
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 30_000);
@@ -853,6 +880,8 @@ function sereinGatewayBridge() {
               session_id: `serein-basement-${randomUUID()}`,
               recall_mode: "full",
               include_debug: true,
+              simulation,
+              recall_ablation: recallAblation,
               include_context: false,
               include_recent_context: false,
               max_cards: 5,

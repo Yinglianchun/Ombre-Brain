@@ -142,11 +142,32 @@ function openSceneInMemory(item) {
   window.dispatchEvent(new CustomEvent("serein:open-memory-scene", { detail: { sourceId: sceneId } }));
 }
 
+const recallAblationOptions = [
+  { value: "normal", label: "正常", description: "cues + 正文 embedding" },
+  { value: "without_cues", label: "关闭 cues", description: "只看正文 embedding" },
+  { value: "without_embedding", label: "关闭正文 embedding", description: "只看 cues / 词面" },
+];
+
+const recallCandidateSourceLabels = {
+  exact_anchor: "精确锚点",
+  title_anchor: "标题锚点",
+  lexical: "正文词面",
+  cue_lexical: "cue 词面",
+  body_semantic: "正文 embedding",
+  retrieval_alias: "检索别名",
+};
+
+const rerankerShadowLabels = {
+  eligible_not_called: "达到 floor，shadow 未调用",
+  ineligible_below_floor: "低于 floor，不进入 reranker",
+};
+
 function RecallSimulator() {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("idle");
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [recallAblation, setRecallAblation] = useState("normal");
   const [trainingForm, setTrainingForm] = useState({ expectedAction: "", expectedRoute: "", memoryIds: "" });
   const [trainingNotice, setTrainingNotice] = useState("");
 
@@ -160,7 +181,13 @@ function RecallSimulator() {
       const response = await fetch("/__serein/gateway/recall", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: text }),
+        body: JSON.stringify({
+          query: text,
+          simulation: true,
+          include_debug: true,
+          recall_mode: "full",
+          recall_ablation: recallAblation,
+        }),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload?.message || payload?.error || "Gateway 没有返回结果");
@@ -183,6 +210,17 @@ function RecallSimulator() {
   const injected = debug.recall_why_summary?.injected ?? [];
   const suppressed = debug.recall_why_summary?.suppressed ?? [];
   const cards = result?.cards ?? [];
+  const retrievalBudget = semantic.retrieval_budget ?? {};
+  const prototypePrior = retrievalBudget.prototype_prior ?? {};
+  const sentinel = retrievalBudget.sentinel ?? {};
+  const cheapRetrieval = retrievalBudget.cheap_retrieval ?? {};
+  const rerankerShadow = retrievalBudget.rerank ?? {};
+  const ablationDebug = retrievalBudget.recall_ablation ?? semantic.recall_ablation ?? {
+    mode: recallAblation,
+  };
+  const candidateEvidence = Array.isArray(cheapRetrieval.candidates)
+    ? cheapRetrieval.candidates
+    : [];
   const momentDebugByBucketId = new Map(
     (debug.recalled_moment_debug ?? []).map((item) => [item.bucket_id, item]),
   );
@@ -254,6 +292,24 @@ function RecallSimulator() {
             {status === "loading" ? "正在走一遍" : "现场模拟"}
           </button>
         </div>
+        <fieldset className="recall-ablation-control">
+          <legend>消融观察</legend>
+          <div className="recall-ablation-control__options">
+            {recallAblationOptions.map((option) => (
+              <label key={option.value} className={recallAblation === option.value ? "is-active" : ""}>
+                <input
+                  type="radio"
+                  name="recall-ablation"
+                  value={option.value}
+                  checked={recallAblation === option.value}
+                  onChange={(event) => setRecallAblation(event.target.value)}
+                />
+                <span><strong>{option.label}</strong><small>{option.description}</small></span>
+              </label>
+            ))}
+          </div>
+          <p>Route 与 evidence veto 保持不变；这里只切换 simulation 候选通道，不把 cue 混进 Scene 正文向量。</p>
+        </fieldset>
       </form>
 
       {status === "idle" && (
@@ -289,6 +345,28 @@ function RecallSimulator() {
           </section>
 
           <section className="recall-result-section">
+            <div className="recall-result-section__heading">
+              <h3>预算 Router（simulation shadow）</h3>
+              <span>{retrievalBudget.effective_budget || "未返回"}</span>
+            </div>
+            <dl className="recall-decision__facts">
+              <div><dt>surface_route</dt><dd>{retrievalBudget.surface_route || "—"}</dd></div>
+              <div><dt>route_budget</dt><dd>{retrievalBudget.route_budget || "—"}</dd></div>
+              <div><dt>effective_budget</dt><dd>{retrievalBudget.effective_budget || "—"}</dd></div>
+              <div><dt>anchor_override</dt><dd>{retrievalBudget.anchor_override ? "是" : "否"}</dd></div>
+              <div><dt>pure chitchat prior</dt><dd>{retrievalBudget.pure_chitchat_prior ? "高置信候选" : "否"}</dd></div>
+              <div><dt>prototype confidence</dt><dd>{prototypePrior.confidence == null ? "—" : percent(prototypePrior.confidence)}</dd></div>
+              <div><dt>sentinel top1/2</dt><dd>{sentinel.called ? `${sentinel.floor_qualified_count ?? 0} / ${sentinel.candidate_count ?? 0}` : sentinel.reason || "未运行"}</dd></div>
+              <div><dt>absolute floor</dt><dd>{cheapRetrieval.floor_qualified_count ?? 0} / {cheapRetrieval.candidate_count ?? 0}</dd></div>
+              <div><dt>reranker shadow</dt><dd>{rerankerShadow.would_call ? "有资格，未调用生产模型" : rerankerShadow.reason || "未进入"}</dd></div>
+              <div><dt>query_facets</dt><dd>{(retrievalBudget.query_facets || []).map((facet) => `${facet.kind}:${facet.value}`).join(" · ") || "—"}</dd></div>
+            </dl>
+            <p className="recall-evidence-decomposition__note">
+              sentinel 只复用现有 query vector 做 top1/2 救援检查，不扩图、不 rerank、不注入、不写正式记录；异常一律 fail-open。
+            </p>
+          </section>
+
+          <section className="recall-result-section">
             <div className="recall-result-section__heading"><h3>路线对照</h3><span>同一原句只做一次 query embedding</span></div>
             <div className="route-score-list">
               {routeScores.map((score) => (
@@ -299,6 +377,41 @@ function RecallSimulator() {
                 </div>
               ))}
             </div>
+          </section>
+
+          <section className="recall-result-section recall-evidence-decomposition">
+            <div className="recall-result-section__heading">
+              <h3>候选证据拆解</h3>
+              <span>{candidateEvidence.length} 条 · {recallAblationOptions.find((option) => option.value === ablationDebug.mode)?.label || ablationDebug.mode || "正常"}</span>
+            </div>
+            <p className="recall-evidence-decomposition__note">
+              canonical Scene 的 body semantic 仍是正文原文向量；cue semantic 尚无独立索引时显示 unavailable，不用 0 冒充。候选发现与最终放行依据分开显示。
+            </p>
+            {candidateEvidence.length ? (
+              <div className="recall-evidence-list">
+                {candidateEvidence.map((candidate) => (
+                  <article className={`recall-evidence-row ${candidate.floor_qualified ? "is-qualified" : "is-suppressed"}`} key={candidate.bucket_id}>
+                    <header>
+                      <strong>{candidate.title || candidate.bucket_id}</strong>
+                      <span>{candidate.final_admission_source || "pending"}</span>
+                    </header>
+                    <dl>
+                      <div><dt>body semantic</dt><dd>{candidate.body_semantic_score == null ? "—" : percent(candidate.body_semantic_score)}</dd></div>
+                      <div><dt>semantic profile</dt><dd>{candidate.semantic_profile || "unknown"}</dd></div>
+                      <div><dt>cue semantic</dt><dd>{candidate.cue_semantic?.status || "unknown"}</dd></div>
+                      <div><dt>cue lexical</dt><dd>{candidate.cue_lexical_match ? candidate.matched_cues?.join(" · ") || "命中" : "未命中"}</dd></div>
+                      <div><dt>title anchor</dt><dd>{candidate.title_anchor_match ? candidate.title_anchor_terms?.join(" · ") || "命中" : "未命中"}</dd></div>
+                      <div><dt>候选来源</dt><dd>{(candidate.candidate_sources || []).map((source) => recallCandidateSourceLabels[source] || source).join(" · ") || "未记录"}</dd></div>
+                      <div><dt>combined / floor</dt><dd>{percent(candidate.combined_score)} / {percent(candidate.absolute_floor)}</dd></div>
+                      <div><dt>reranker shadow</dt><dd>{candidate.reranker_shadow?.score == null ? rerankerShadowLabels[candidate.reranker_shadow?.status] || candidate.reranker_shadow?.status || "未调用" : percent(candidate.reranker_shadow.score)}</dd></div>
+                    </dl>
+                    <button type="button" className="recall-card__memory-link" onClick={() => openSceneInMemory(candidate)}>
+                      在记忆卡里查看召回入口
+                    </button>
+                  </article>
+                ))}
+              </div>
+            ) : <p className="recall-none">本轮没有进入廉价候选池的记忆。</p>}
           </section>
 
           {boundaryCandidate && (
