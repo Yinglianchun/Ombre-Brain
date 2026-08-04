@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { CaretDown, Check, LinkSimple, MagnifyingGlass, Plus, Quotes, X } from "@phosphor-icons/react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowLeft, CaretDown, Check, Crosshair, LinkSimple, MagnifyingGlass, Plus, Quotes, X } from "@phosphor-icons/react";
 
 function evidenceKey(item) {
   return `${item?.source_system || ""}:${item?.session_id || ""}:${item?.message_id || ""}`;
@@ -35,6 +35,10 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
   const [hasMore, setHasMore] = useState(false);
   const [searchDraft, setSearchDraft] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
+  const [sourceMode, setSourceMode] = useState("browse");
+  const [contextTargetId, setContextTargetId] = useState(null);
+  const [returnQuery, setReturnQuery] = useState("");
+  const contextTargetRef = useRef(null);
 
   const loadEvidence = useCallback(async () => {
     if (!sceneId) {
@@ -64,7 +68,12 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
     loadEvidence();
   }, [loadEvidence]);
 
-  const loadSourceMessages = async ({ append = false, query = activeQuery } = {}) => {
+  useEffect(() => {
+    if (sourceMode !== "context" || sourceState !== "ready" || !contextTargetId) return;
+    contextTargetRef.current?.scrollIntoView({ block: "center" });
+  }, [contextTargetId, sourceMessages, sourceMode, sourceState]);
+
+  const loadSourceMessages = async ({ append = false, query = activeQuery, contextMessageId = 0 } = {}) => {
     if (sourceState === "loading") return;
     const normalizedQuery = String(query || "").trim();
     setActiveQuery(normalizedQuery);
@@ -74,7 +83,13 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
       const response = await fetch("/__serein/memory/bridge-source-messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ limit: 40, beforeId: append ? nextBeforeId : null, query: normalizedQuery }),
+        body: JSON.stringify({
+          limit: 40,
+          beforeId: append ? nextBeforeId : null,
+          query: normalizedQuery,
+          contextMessageId,
+          contextRadius: 6,
+        }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.message || payload.error || "Bridge 原文读取失败");
@@ -82,6 +97,8 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
       setSourceMessages((current) => append ? [...current, ...items] : items);
       setNextBeforeId(payload.next_before_id || null);
       setHasMore(Boolean(payload.has_more));
+      setSourceMode(payload.mode || (normalizedQuery ? "search" : "browse"));
+      setContextTargetId(payload.target_message_id || null);
       setSourceState("ready");
     } catch (error) {
       setSourceState("error");
@@ -98,12 +115,14 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
   const searchSourceMessages = (event) => {
     event.preventDefault();
     setSelectedIds(new Set());
+    setReturnQuery("");
     loadSourceMessages({ query: searchDraft });
   };
 
   const clearSearch = () => {
     setSearchDraft("");
     setSelectedIds(new Set());
+    setReturnQuery("");
     loadSourceMessages({ query: "" });
   };
 
@@ -112,7 +131,20 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
     setPickerOpen(true);
     setSearchDraft(query);
     setSelectedIds(new Set());
+    setReturnQuery("");
     loadSourceMessages({ query });
+  };
+
+  const locateSourceMessage = (item) => {
+    setReturnQuery(sourceMode === "search" ? activeQuery : "");
+    setSelectedIds(new Set());
+    loadSourceMessages({ query: "", contextMessageId: item.id });
+  };
+
+  const returnFromContext = () => {
+    setSearchDraft(returnQuery);
+    setSelectedIds(new Set());
+    loadSourceMessages({ query: returnQuery });
   };
 
   const toggleSelection = (id) => {
@@ -243,6 +275,17 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
             ) : null}
             <button className="is-primary" type="submit" disabled={sourceState === "loading"}>搜索</button>
           </form>
+          {sourceMode === "context" ? (
+            <div className="scene-evidence-picker__context-status">
+              <button type="button" onClick={returnFromContext} disabled={sourceState === "loading"}>
+                <ArrowLeft size={13} weight="light" aria-hidden="true" />
+                {returnQuery ? "返回搜索结果" : "返回最近原文"}
+              </button>
+              <span>已定位 #{contextTargetId} · 同一会话前后各 6 条</span>
+            </div>
+          ) : sourceMode === "search" && activeQuery ? (
+            <p className="scene-evidence-picker__search-summary">搜索命中；点“看前后”回到它在原会话中的位置。</p>
+          ) : null}
           {sourceMessages.length ? (
             <div className="scene-evidence-picker__list">
               {sourceMessages.map((item) => {
@@ -250,26 +293,41 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
                 const boundEvidence = evidence.find((evidenceItem) => evidenceKey(evidenceItem) === `haven_bridge:${item.session_id}:${id}`);
                 const alreadyBound = Boolean(boundEvidence);
                 const selected = selectedIds.has(id);
+                const contextTarget = Boolean(item.is_context_target) || String(contextTargetId || "") === id;
                 return (
-                  <label className={`${selected ? "is-selected" : ""}${alreadyBound ? " is-bound" : ""}`} key={id}>
-                    <input
-                      type="checkbox"
-                      checked={alreadyBound || selected}
-                      disabled={state === "saving"}
-                      onChange={() => alreadyBound ? unbindEvidence(boundEvidence) : toggleSelection(id)}
-                    />
-                    <span className="scene-evidence-picker__check">
-                      {alreadyBound || selected ? <Check size={13} weight="bold" aria-hidden="true" /> : null}
-                    </span>
-                    <span className="scene-evidence-picker__copy">
-                      <span>
-                        <strong>{item.role === "user" ? "小雨" : "Haven"}</strong>
-                        <time>{formatEvidenceTime(item.created_at)}</time>
-                        {alreadyBound ? <small>已绑定 · 取消勾选可解绑</small> : null}
+                  <article
+                    className={`${selected ? "is-selected" : ""}${alreadyBound ? " is-bound" : ""}${contextTarget ? " is-context-target" : ""}`}
+                    key={id}
+                    ref={contextTarget ? contextTargetRef : undefined}
+                  >
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={alreadyBound || selected}
+                        disabled={state === "saving"}
+                        onChange={() => alreadyBound ? unbindEvidence(boundEvidence) : toggleSelection(id)}
+                      />
+                      <span className="scene-evidence-picker__check">
+                        {alreadyBound || selected ? <Check size={13} weight="bold" aria-hidden="true" /> : null}
                       </span>
-                      <p>{item.content}</p>
-                    </span>
-                  </label>
+                      <span className="scene-evidence-picker__copy">
+                        <span>
+                          <strong>{item.role === "user" ? "小雨" : "Haven"}</strong>
+                          <time>{formatEvidenceTime(item.created_at)}</time>
+                          <small>#{id}</small>
+                          {contextTarget ? <small>当前定位</small> : null}
+                          {alreadyBound ? <small>已绑定 · 取消勾选可解绑</small> : null}
+                        </span>
+                        <p>{item.content}</p>
+                      </span>
+                    </label>
+                    {sourceMode !== "context" ? (
+                      <button className="scene-evidence-picker__locate" type="button" onClick={() => locateSourceMessage(item)} disabled={sourceState === "loading"}>
+                        <Crosshair size={13} weight="light" aria-hidden="true" />
+                        看前后
+                      </button>
+                    ) : null}
+                  </article>
                 );
               })}
             </div>
@@ -279,10 +337,14 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
             <p className="scene-evidence__empty">{activeQuery ? `没有找到包含「${activeQuery}」的原文。` : "没有读到可绑定的聊天原文。"}</p>
           )}
           <footer>
-            <button type="button" onClick={() => loadSourceMessages({ append: true })} disabled={!hasMore || sourceState === "loading"}>
-              <CaretDown size={14} weight="light" aria-hidden="true" />
-              {hasMore ? (activeQuery ? "更早的结果" : "更早的原文") : "已经到底了"}
-            </button>
+            {sourceMode === "context" ? (
+              <span>目标句已放回原会话时间线</span>
+            ) : (
+              <button type="button" onClick={() => loadSourceMessages({ append: true })} disabled={!hasMore || sourceState === "loading"}>
+                <CaretDown size={14} weight="light" aria-hidden="true" />
+                {hasMore ? (activeQuery ? "更早的结果" : "更早的原文") : "已经到底了"}
+              </button>
+            )}
             <span>已选 {selectedIds.size} 条</span>
             <button className="is-primary" type="button" onClick={bindSelected} disabled={!selectedIds.size || state === "saving"}>
               <LinkSimple size={14} weight="light" aria-hidden="true" />

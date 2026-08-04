@@ -11,6 +11,11 @@ export function normalizeEvidenceSearchQuery(value) {
   return String(value || "").trim().slice(0, 120);
 }
 
+export function normalizeEvidenceMessageId(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
 export function buildSceneEvidenceRefs(messages, selections) {
   if (!Array.isArray(messages) || !Array.isArray(selections) || !selections.length) {
     throw new Error("evidence_selection_required");

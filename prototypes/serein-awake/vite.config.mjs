@@ -4,7 +4,11 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { buildSceneEvidenceRefs, normalizeEvidenceSearchQuery } from "./server/sceneEvidenceBridge.mjs";
+import {
+  buildSceneEvidenceRefs,
+  normalizeEvidenceMessageId,
+  normalizeEvidenceSearchQuery,
+} from "./server/sceneEvidenceBridge.mjs";
 
 const canonicalSceneDomains = new Set([
   "relationship",
@@ -554,7 +558,14 @@ print(json.dumps({"status": "ok", "items": items}, ensure_ascii=False))
   });
 }
 
-async function readHavenBridgeEvidenceMessages({ limit = 40, beforeId = 0, messageIds = [], query = "" } = {}) {
+async function readHavenBridgeEvidenceMessages({
+  limit = 40,
+  beforeId = 0,
+  messageIds = [],
+  query = "",
+  contextMessageId = 0,
+  contextRadius = 6,
+} = {}) {
   const sshTarget = String(process.env.HAVEN_BRIDGE_VPS_SSH_TARGET || "root@168.119.228.217").trim();
   const identityFile = String(
     process.env.HAVEN_BRIDGE_VPS_IDENTITY_FILE || "C:\\Users\\86188\\.ssh\\id_ed25519",
@@ -566,6 +577,8 @@ async function readHavenBridgeEvidenceMessages({ limit = 40, beforeId = 0, messa
   const safeLimit = Math.max(1, Math.min(80, Number.parseInt(limit, 10) || 40));
   const safeBeforeId = Math.max(0, Number.parseInt(beforeId, 10) || 0);
   const safeQuery = normalizeEvidenceSearchQuery(query);
+  const safeContextMessageId = normalizeEvidenceMessageId(contextMessageId);
+  const safeContextRadius = Math.max(1, Math.min(12, Number.parseInt(contextRadius, 10) || 6));
   const safeMessageIds = Array.isArray(messageIds)
     ? [...new Set(messageIds.map((value) => Number.parseInt(value, 10)).filter((value) => value > 0))].slice(0, 12)
     : [];
@@ -574,6 +587,8 @@ async function readHavenBridgeEvidenceMessages({ limit = 40, beforeId = 0, messa
     before_id: safeBeforeId,
     message_ids: safeMessageIds,
     query: safeQuery,
+    context_message_id: safeContextMessageId,
+    context_radius: safeContextRadius,
   }), "utf8").toString("base64");
   const script = `
 import base64, json, sqlite3
@@ -589,41 +604,81 @@ where = [
 ]
 params = []
 message_ids = [int(item) for item in request.get("message_ids") or [] if int(item) > 0]
-if message_ids:
+query = str(request.get("query") or "").strip()
+exact_id = query[1:] if query.startswith("#") else ""
+context_message_id = int(request.get("context_message_id") or 0)
+if not context_message_id and exact_id.isdigit():
+    context_message_id = int(exact_id)
+context_radius = max(1, min(12, int(request.get("context_radius") or 6)))
+select_sql = "SELECT m.id, m.session_id, m.role, m.source, m.created_at, m.content, s.external_thread_id AS thread_id FROM messages m LEFT JOIN sessions s ON s.id=m.session_id"
+base_where = " AND ".join(where)
+
+mode = "browse"
+target_message_id = None
+has_more = False
+next_before_id = None
+
+if context_message_id > 0:
+    mode = "context"
+    target = conn.execute(
+        select_sql + " WHERE " + base_where + " AND m.id=?",
+        (context_message_id,),
+    ).fetchone()
+    rows = []
+    if target is not None:
+        target_message_id = int(target["id"])
+        before = conn.execute(
+            select_sql + " WHERE " + base_where + " AND m.session_id=? AND m.id<? ORDER BY m.id DESC LIMIT ?",
+            (target["session_id"], target_message_id, context_radius),
+        ).fetchall()
+        after = conn.execute(
+            select_sql + " WHERE " + base_where + " AND m.session_id=? AND m.id>? ORDER BY m.id ASC LIMIT ?",
+            (target["session_id"], target_message_id, context_radius),
+        ).fetchall()
+        rows = list(reversed(before)) + [target] + list(after)
+elif message_ids:
+    mode = "selected"
     where.append("m.id IN (" + ",".join("?" for _ in message_ids) + ")")
     params.extend(message_ids)
+    params.append(len(message_ids) + 1)
+    rows = conn.execute(
+        select_sql + " WHERE " + " AND ".join(where) + " ORDER BY m.id DESC LIMIT ?",
+        params,
+    ).fetchall()
 else:
-    query = str(request.get("query") or "").strip()
     if query:
-        exact_id = query[1:] if query.startswith("#") else ""
-        if exact_id.isdigit():
-            where.append("m.id = ?")
-            params.append(int(exact_id))
-        else:
-            where.append("instr(m.content, ?) > 0")
-            params.append(query)
+        mode = "search"
+        where.append("instr(m.content, ?) > 0")
+        params.append(query)
     before_id = int(request.get("before_id") or 0)
     if before_id > 0:
         where.append("m.id < ?")
         params.append(before_id)
-params.append((len(message_ids) if message_ids else int(request.get("limit") or 40)) + 1)
-rows = conn.execute(
-    "SELECT m.id, m.session_id, m.role, m.source, m.created_at, m.content, s.external_thread_id AS thread_id FROM messages m LEFT JOIN sessions s ON s.id=m.session_id WHERE "
-    + " AND ".join(where)
-    + " ORDER BY m.id DESC LIMIT ?",
-    params,
-).fetchall()
-has_more = False if message_ids else len(rows) > int(request.get("limit") or 40)
-if has_more:
-    rows = rows[:-1]
-items = [dict(row) for row in rows]
+    params.append(int(request.get("limit") or 40) + 1)
+    rows = conn.execute(
+        select_sql + " WHERE " + " AND ".join(where) + " ORDER BY m.id DESC LIMIT ?",
+        params,
+    ).fetchall()
+    has_more = len(rows) > int(request.get("limit") or 40)
+    if has_more:
+        rows = rows[:-1]
+    next_before_id = min((int(row["id"]) for row in rows), default=0) or None
+
+items = []
+for row in rows:
+    item = dict(row)
+    item["is_context_target"] = int(row["id"]) == target_message_id
+    items.append(item)
 conn.close()
 print(json.dumps({
     "status": "ok",
     "items": items,
     "has_more": has_more,
-    "next_before_id": min((int(item["id"]) for item in items), default=0) or None,
+    "next_before_id": next_before_id,
     "query": str(request.get("query") or ""),
+    "mode": mode,
+    "target_message_id": target_message_id,
+    "context_radius": context_radius if mode == "context" else None,
 }, ensure_ascii=False))
 `;
 
@@ -1080,6 +1135,8 @@ function sereinMemoryBridge() {
             limit: body.limit,
             beforeId: body.beforeId,
             query: body.query,
+            contextMessageId: body.contextMessageId,
+            contextRadius: body.contextRadius,
           });
           response.statusCode = 200;
           response.end(JSON.stringify(result));
