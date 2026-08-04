@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { CaretDown, Check, LinkSimple, Plus, Quotes } from "@phosphor-icons/react";
+import { useCallback, useEffect, useState } from "react";
+import { CaretDown, Check, LinkSimple, MagnifyingGlass, Plus, Quotes, X } from "@phosphor-icons/react";
 
 function evidenceKey(item) {
   return `${item?.source_system || ""}:${item?.session_id || ""}:${item?.message_id || ""}`;
@@ -33,8 +33,8 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [nextBeforeId, setNextBeforeId] = useState(null);
   const [hasMore, setHasMore] = useState(false);
-
-  const boundKeys = useMemo(() => new Set(evidence.map(evidenceKey)), [evidence]);
+  const [searchDraft, setSearchDraft] = useState("");
+  const [activeQuery, setActiveQuery] = useState("");
 
   const loadEvidence = useCallback(async () => {
     if (!sceneId) {
@@ -64,15 +64,17 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
     loadEvidence();
   }, [loadEvidence]);
 
-  const loadSourceMessages = async ({ append = false } = {}) => {
+  const loadSourceMessages = async ({ append = false, query = activeQuery } = {}) => {
     if (sourceState === "loading") return;
+    const normalizedQuery = String(query || "").trim();
+    setActiveQuery(normalizedQuery);
     setSourceState("loading");
     setMessage("");
     try {
       const response = await fetch("/__serein/memory/bridge-source-messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ limit: 40, beforeId: append ? nextBeforeId : null }),
+        body: JSON.stringify({ limit: 40, beforeId: append ? nextBeforeId : null, query: normalizedQuery }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.message || payload.error || "Bridge 原文读取失败");
@@ -91,6 +93,26 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
     setPickerOpen(true);
     setSelectedIds(new Set());
     if (!sourceMessages.length) loadSourceMessages();
+  };
+
+  const searchSourceMessages = (event) => {
+    event.preventDefault();
+    setSelectedIds(new Set());
+    loadSourceMessages({ query: searchDraft });
+  };
+
+  const clearSearch = () => {
+    setSearchDraft("");
+    setSelectedIds(new Set());
+    loadSourceMessages({ query: "" });
+  };
+
+  const locateEvidence = (item) => {
+    const query = `#${item.message_id}`;
+    setPickerOpen(true);
+    setSearchDraft(query);
+    setSelectedIds(new Set());
+    loadSourceMessages({ query });
   };
 
   const toggleSelection = (id) => {
@@ -129,6 +151,29 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
     }
   };
 
+  const unbindEvidence = async (item) => {
+    const evidenceId = Number.parseInt(item?.id, 10);
+    if (!evidenceId || state === "saving") return;
+    if (!window.confirm(`取消这条原文与「${sceneTitle}」的绑定？\n\n原文仍保留在 Haven Bridge，Scene 正文也不会改变。`)) return;
+    setState("saving");
+    setMessage("");
+    try {
+      const response = await fetch("/__serein/memory/unbind-scene-evidence", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sceneId, evidenceIds: [evidenceId] }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.message || payload.error || "原文解绑失败");
+      setEvidence(Array.isArray(payload.evidence_refs) ? payload.evidence_refs : []);
+      setState("ready");
+      setMessage(payload.unbound_count ? "已取消这条原文绑定" : "这条原文已经取消绑定了");
+    } catch (error) {
+      setState("error");
+      setMessage(error.message || "原文解绑失败");
+    }
+  };
+
   return (
     <section className="scene-evidence" aria-labelledby={`scene-evidence-${sceneId || "snapshot"}`}>
       <header className="scene-evidence__header">
@@ -151,9 +196,17 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
           {evidence.map((item) => (
             <article key={item.id || evidenceKey(item)}>
               <header>
-                <span>{item.role === "user" ? "小雨" : "Haven"}</span>
-                <time>{formatEvidenceTime(item.created_at)}</time>
-                <small>{item.evidence_kind === "supporting" ? "补充证据" : item.evidence_kind === "adjacent_context" ? "相邻上下文" : "主要证据"}</small>
+                <div>
+                  <span>{item.role === "user" ? "小雨" : "Haven"}</span>
+                  <time>{formatEvidenceTime(item.created_at)}</time>
+                  <small>{item.evidence_kind === "supporting" ? "补充证据" : item.evidence_kind === "adjacent_context" ? "相邻上下文" : "主要证据"}</small>
+                </div>
+                {item.source_system === "haven_bridge" && item.message_id ? (
+                  <button type="button" onClick={() => locateEvidence(item)} disabled={state === "saving"}>
+                    <MagnifyingGlass size={13} weight="light" aria-hidden="true" />
+                    定位原文
+                  </button>
+                ) : null}
               </header>
               <p>{item.content || "这条证据只保存了外部快照引用。"}</p>
             </article>
@@ -173,19 +226,37 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
             </div>
             <button type="button" onClick={() => setPickerOpen(false)}>收起</button>
           </header>
+          <form className="scene-evidence-picker__search" onSubmit={searchSourceMessages}>
+            <MagnifyingGlass size={15} weight="light" aria-hidden="true" />
+            <input
+              type="search"
+              value={searchDraft}
+              placeholder="搜索原文关键词，或输入 #消息ID"
+              aria-label="搜索 Haven Bridge 原文"
+              onChange={(event) => setSearchDraft(event.target.value)}
+            />
+            {activeQuery ? (
+              <button type="button" aria-label="清除原文搜索" onClick={clearSearch}>
+                <X size={13} weight="light" aria-hidden="true" />
+                清除
+              </button>
+            ) : null}
+            <button className="is-primary" type="submit" disabled={sourceState === "loading"}>搜索</button>
+          </form>
           {sourceMessages.length ? (
             <div className="scene-evidence-picker__list">
               {sourceMessages.map((item) => {
                 const id = String(item.id);
-                const alreadyBound = boundKeys.has(`haven_bridge:${item.session_id}:${id}`);
+                const boundEvidence = evidence.find((evidenceItem) => evidenceKey(evidenceItem) === `haven_bridge:${item.session_id}:${id}`);
+                const alreadyBound = Boolean(boundEvidence);
                 const selected = selectedIds.has(id);
                 return (
                   <label className={`${selected ? "is-selected" : ""}${alreadyBound ? " is-bound" : ""}`} key={id}>
                     <input
                       type="checkbox"
-                      checked={selected}
-                      disabled={alreadyBound || state === "saving"}
-                      onChange={() => toggleSelection(id)}
+                      checked={alreadyBound || selected}
+                      disabled={state === "saving"}
+                      onChange={() => alreadyBound ? unbindEvidence(boundEvidence) : toggleSelection(id)}
                     />
                     <span className="scene-evidence-picker__check">
                       {alreadyBound || selected ? <Check size={13} weight="bold" aria-hidden="true" /> : null}
@@ -194,7 +265,7 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
                       <span>
                         <strong>{item.role === "user" ? "小雨" : "Haven"}</strong>
                         <time>{formatEvidenceTime(item.created_at)}</time>
-                        {alreadyBound ? <small>已绑定</small> : null}
+                        {alreadyBound ? <small>已绑定 · 取消勾选可解绑</small> : null}
                       </span>
                       <p>{item.content}</p>
                     </span>
@@ -203,14 +274,14 @@ export function SceneEvidenceEditor({ sceneId, sceneTitle }) {
               })}
             </div>
           ) : sourceState === "loading" ? (
-            <p className="scene-evidence__empty">正在翻原文表…</p>
+            <p className="scene-evidence__empty">{activeQuery ? "正在搜索原文…" : "正在翻原文表…"}</p>
           ) : (
-            <p className="scene-evidence__empty">没有读到可绑定的聊天原文。</p>
+            <p className="scene-evidence__empty">{activeQuery ? `没有找到包含「${activeQuery}」的原文。` : "没有读到可绑定的聊天原文。"}</p>
           )}
           <footer>
             <button type="button" onClick={() => loadSourceMessages({ append: true })} disabled={!hasMore || sourceState === "loading"}>
               <CaretDown size={14} weight="light" aria-hidden="true" />
-              {hasMore ? "更早的原文" : "已经到底了"}
+              {hasMore ? (activeQuery ? "更早的结果" : "更早的原文") : "已经到底了"}
             </button>
             <span>已选 {selectedIds.size} 条</span>
             <button className="is-primary" type="button" onClick={bindSelected} disabled={!selectedIds.size || state === "saving"}>

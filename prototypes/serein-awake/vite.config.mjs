@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { buildSceneEvidenceRefs } from "./server/sceneEvidenceBridge.mjs";
+import { buildSceneEvidenceRefs, normalizeEvidenceSearchQuery } from "./server/sceneEvidenceBridge.mjs";
 
 const canonicalSceneDomains = new Set([
   "relationship",
@@ -554,7 +554,7 @@ print(json.dumps({"status": "ok", "items": items}, ensure_ascii=False))
   });
 }
 
-async function readHavenBridgeEvidenceMessages({ limit = 40, beforeId = 0, messageIds = [] } = {}) {
+async function readHavenBridgeEvidenceMessages({ limit = 40, beforeId = 0, messageIds = [], query = "" } = {}) {
   const sshTarget = String(process.env.HAVEN_BRIDGE_VPS_SSH_TARGET || "root@168.119.228.217").trim();
   const identityFile = String(
     process.env.HAVEN_BRIDGE_VPS_IDENTITY_FILE || "C:\\Users\\86188\\.ssh\\id_ed25519",
@@ -565,6 +565,7 @@ async function readHavenBridgeEvidenceMessages({ limit = 40, beforeId = 0, messa
   ).trim();
   const safeLimit = Math.max(1, Math.min(80, Number.parseInt(limit, 10) || 40));
   const safeBeforeId = Math.max(0, Number.parseInt(beforeId, 10) || 0);
+  const safeQuery = normalizeEvidenceSearchQuery(query);
   const safeMessageIds = Array.isArray(messageIds)
     ? [...new Set(messageIds.map((value) => Number.parseInt(value, 10)).filter((value) => value > 0))].slice(0, 12)
     : [];
@@ -572,6 +573,7 @@ async function readHavenBridgeEvidenceMessages({ limit = 40, beforeId = 0, messa
     limit: safeLimit,
     before_id: safeBeforeId,
     message_ids: safeMessageIds,
+    query: safeQuery,
   }), "utf8").toString("base64");
   const script = `
 import base64, json, sqlite3
@@ -591,6 +593,15 @@ if message_ids:
     where.append("m.id IN (" + ",".join("?" for _ in message_ids) + ")")
     params.extend(message_ids)
 else:
+    query = str(request.get("query") or "").strip()
+    if query:
+        exact_id = query[1:] if query.startswith("#") else ""
+        if exact_id.isdigit():
+            where.append("m.id = ?")
+            params.append(int(exact_id))
+        else:
+            where.append("instr(m.content, ?) > 0")
+            params.append(query)
     before_id = int(request.get("before_id") or 0)
     if before_id > 0:
         where.append("m.id < ?")
@@ -612,6 +623,7 @@ print(json.dumps({
     "items": items,
     "has_more": has_more,
     "next_before_id": min((int(item["id"]) for item in items), default=0) or None,
+    "query": str(request.get("query") or ""),
 }, ensure_ascii=False))
 `;
 
@@ -1067,6 +1079,7 @@ function sereinMemoryBridge() {
           const result = await readHavenBridgeEvidenceMessages({
             limit: body.limit,
             beforeId: body.beforeId,
+            query: body.query,
           });
           response.statusCode = 200;
           response.end(JSON.stringify(result));
@@ -1112,6 +1125,40 @@ function sereinMemoryBridge() {
           response.end(JSON.stringify({
             error: invalid ? error.message : "scene_evidence_bind_failed",
             message: invalid ? "选择的原文已变化，请刷新后重选。" : "没有完成这次原文绑定。",
+          }));
+        }
+      });
+
+      server.middlewares.use("/__serein/memory/unbind-scene-evidence", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const sceneId = String(body.sceneId || "").trim();
+          const evidenceIds = Array.isArray(body.evidenceIds)
+            ? [...new Set(body.evidenceIds.map((item) => Number.parseInt(item, 10)).filter((item) => item > 0))].slice(0, 12)
+            : [];
+          if (!/^[A-Za-z0-9_.:#-]{1,160}$/.test(sceneId) || !evidenceIds.length) {
+            response.statusCode = 400;
+            response.end(JSON.stringify({ error: "invalid_evidence_unbind", message: "没有找到要取消的原文绑定。" }));
+            return;
+          }
+          const result = await callOmbreTool("unbind_scene_evidence", {
+            scene_id: sceneId,
+            evidence_ids: evidenceIds,
+            unbound_by: "serein_memory_ui",
+          });
+          response.statusCode = result?.status === "invalid" ? 400 : result?.status === "error" ? 502 : 200;
+          response.end(JSON.stringify(result));
+        } catch (error) {
+          response.statusCode = error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            error: "scene_evidence_unbind_failed",
+            message: "没有完成这次原文解绑。",
           }));
         }
       });

@@ -7,6 +7,10 @@ export function contentSha256(content) {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
+export function normalizeEvidenceSearchQuery(value) {
+  return String(value || "").trim().slice(0, 120);
+}
+
 export function buildSceneEvidenceRefs(messages, selections) {
   if (!Array.isArray(messages) || !Array.isArray(selections) || !selections.length) {
     throw new Error("evidence_selection_required");

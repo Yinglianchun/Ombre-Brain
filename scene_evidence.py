@@ -1,9 +1,10 @@
-"""Append-only source evidence bindings for canonical Scenes.
+"""Source evidence bindings for canonical Scenes.
 
 Scene Markdown remains the authored source. This sidecar stores only the
 relationship between a Scene and an exact source message (or a separately
-addressable snapshot), so binding evidence never rewrites the Scene or queues
-an embedding refresh.
+addressable snapshot), so binding or reversibly unbinding evidence never
+rewrites the Scene or queues an embedding refresh. Source snapshots stay
+immutable; binding-state changes are recorded as append-only events.
 """
 
 from __future__ import annotations
@@ -135,6 +136,25 @@ class SceneEvidenceStore:
                 ON scene_evidence(scene_id, created_at, id)
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scene_evidence_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    evidence_id INTEGER NOT NULL,
+                    scene_id TEXT NOT NULL,
+                    action TEXT NOT NULL CHECK(action IN ('bind', 'unbind')),
+                    actor TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(evidence_id) REFERENCES scene_evidence(id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_scene_evidence_events_latest
+                ON scene_evidence_events(evidence_id, id DESC)
+                """
+            )
             conn.commit()
         finally:
             conn.close()
@@ -155,6 +175,7 @@ class SceneEvidenceStore:
         self._init_db()
         conn = self._connect()
         inserted = 0
+        reactivated = 0
         existing_count = 0
         rows: list[sqlite3.Row] = []
         try:
@@ -177,7 +198,18 @@ class SceneEvidenceStore:
                         raise ValueError(
                             "evidence key already exists with different source content"
                         )
-                    existing_count += 1
+                    if _latest_evidence_action(conn, int(existing["id"])) == "unbind":
+                        _record_evidence_event(
+                            conn,
+                            evidence_id=int(existing["id"]),
+                            scene_id=safe_scene_id,
+                            action="bind",
+                            actor=safe_bound_by,
+                            created_at=now,
+                        )
+                        reactivated += 1
+                    else:
+                        existing_count += 1
                     continue
                 conn.execute(
                     """
@@ -207,10 +239,7 @@ class SceneEvidenceStore:
                 )
                 inserted += 1
             conn.commit()
-            rows = conn.execute(
-                "SELECT * FROM scene_evidence WHERE scene_id=? ORDER BY created_at, id",
-                (safe_scene_id,),
-            ).fetchall()
+            rows = _active_scene_evidence_rows(conn, safe_scene_id)
         except Exception:
             conn.rollback()
             raise
@@ -219,25 +248,152 @@ class SceneEvidenceStore:
         return {
             "scene_id": safe_scene_id,
             "evidence_status": "bound" if rows else "unbound",
-            "bound_count": inserted,
+            "bound_count": inserted + reactivated,
+            "inserted_count": inserted,
+            "reactivated_count": reactivated,
             "existing_count": existing_count,
-            "idempotent": inserted == 0,
+            "idempotent": inserted == 0 and reactivated == 0,
             "evidence_refs": [_row_to_ref(row) for row in rows],
+        }
+
+    def unbind(
+        self,
+        scene_id: str,
+        evidence_ids: list[int | str],
+        *,
+        unbound_by: str = "",
+    ) -> dict[str, Any]:
+        """Deactivate exact bindings without deleting their source snapshots."""
+
+        safe_scene_id = _required_identifier(scene_id, "scene_id", 128)
+        if not isinstance(evidence_ids, list) or not evidence_ids:
+            raise ValueError("evidence_ids must be a non-empty list")
+        safe_ids: list[int] = []
+        for raw_id in evidence_ids:
+            try:
+                evidence_id = int(raw_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("each evidence id must be a positive integer") from exc
+            if evidence_id <= 0:
+                raise ValueError("each evidence id must be a positive integer")
+            if evidence_id not in safe_ids:
+                safe_ids.append(evidence_id)
+        if len(safe_ids) > 50:
+            raise ValueError("at most 50 evidence ids can be unbound at once")
+
+        safe_actor = str(unbound_by or "").strip()[:120]
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self._init_db()
+        conn = self._connect()
+        unbound_count = 0
+        already_unbound_count = 0
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            placeholders = ",".join("?" for _ in safe_ids)
+            rows = conn.execute(
+                f"SELECT id, scene_id FROM scene_evidence WHERE id IN ({placeholders})",
+                safe_ids,
+            ).fetchall()
+            by_id = {int(row["id"]): row for row in rows}
+            if len(by_id) != len(safe_ids):
+                raise ValueError("one or more evidence ids do not exist")
+            if any(str(by_id[evidence_id]["scene_id"]) != safe_scene_id for evidence_id in safe_ids):
+                raise ValueError("one or more evidence ids belong to another Scene")
+
+            for evidence_id in safe_ids:
+                if _latest_evidence_action(conn, evidence_id) == "unbind":
+                    already_unbound_count += 1
+                    continue
+                _record_evidence_event(
+                    conn,
+                    evidence_id=evidence_id,
+                    scene_id=safe_scene_id,
+                    action="unbind",
+                    actor=safe_actor,
+                    created_at=now,
+                )
+                unbound_count += 1
+            conn.commit()
+            active_rows = _active_scene_evidence_rows(conn, safe_scene_id)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return {
+            "scene_id": safe_scene_id,
+            "evidence_status": "bound" if active_rows else "unbound",
+            "unbound_count": unbound_count,
+            "already_unbound_count": already_unbound_count,
+            "idempotent": unbound_count == 0,
+            "evidence_refs": [_row_to_ref(row) for row in active_rows],
         }
 
     def list_for_scene(self, scene_id: str) -> list[dict[str, Any]]:
         safe_scene_id = _required_identifier(scene_id, "scene_id", 128)
         if not os.path.exists(self.db_path):
             return []
+        # Existing production sidecars predate the event table. Migrate before
+        # the first read so a restart never depends on a bind/unbind happening
+        # first.
+        self._init_db()
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT * FROM scene_evidence WHERE scene_id=? ORDER BY created_at, id",
-                (safe_scene_id,),
-            ).fetchall()
+            rows = _active_scene_evidence_rows(conn, safe_scene_id)
         finally:
             conn.close()
         return [_row_to_ref(row) for row in rows]
+
+
+def _latest_evidence_action(conn: sqlite3.Connection, evidence_id: int) -> str:
+    row = conn.execute(
+        "SELECT action FROM scene_evidence_events WHERE evidence_id=? ORDER BY id DESC LIMIT 1",
+        (evidence_id,),
+    ).fetchone()
+    return str(row["action"] or "bind") if row is not None else "bind"
+
+
+def _record_evidence_event(
+    conn: sqlite3.Connection,
+    *,
+    evidence_id: int,
+    scene_id: str,
+    action: str,
+    actor: str,
+    created_at: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO scene_evidence_events (evidence_id, scene_id, action, actor, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (evidence_id, scene_id, action, actor, created_at),
+    )
+
+
+def _active_scene_evidence_rows(
+    conn: sqlite3.Connection,
+    scene_id: str,
+) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT evidence.*
+        FROM scene_evidence AS evidence
+        WHERE evidence.scene_id=?
+          AND COALESCE(
+                (
+                    SELECT event.action
+                    FROM scene_evidence_events AS event
+                    WHERE event.evidence_id=evidence.id
+                    ORDER BY event.id DESC
+                    LIMIT 1
+                ),
+                'bind'
+              )='bind'
+        ORDER BY evidence.created_at, evidence.id
+        """,
+        (scene_id,),
+    ).fetchall()
 
 
 def _same_source_snapshot(row: sqlite3.Row, ref: dict[str, Any]) -> bool:

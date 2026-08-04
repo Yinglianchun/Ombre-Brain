@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { buildSceneEvidenceRefs, contentSha256 } from "../server/sceneEvidenceBridge.mjs";
+import {
+  buildSceneEvidenceRefs,
+  contentSha256,
+  normalizeEvidenceSearchQuery,
+} from "../server/sceneEvidenceBridge.mjs";
 
 const content = "原文保留空格  \n和换行。";
 const refs = buildSceneEvidenceRefs([
@@ -18,6 +22,8 @@ assert.equal(refs[0].content, content);
 assert.equal(refs[0].content_sha256, contentSha256(content));
 assert.equal(refs[0].evidence_kind, "supporting");
 assert.equal(refs[0].binding_method, "serein_manual_selection");
+assert.equal(normalizeEvidenceSearchQuery("  原文关键词  "), "原文关键词");
+assert.equal(normalizeEvidenceSearchQuery("x".repeat(160)).length, 120);
 assert.throws(() => buildSceneEvidenceRefs([], [{ messageId: 42 }]), /evidence_message_missing/);
 assert.throws(
   () => buildSceneEvidenceRefs([{ id: 42, session_id: 7, role: "trace", created_at: "now", content }], [{ messageId: 42 }]),

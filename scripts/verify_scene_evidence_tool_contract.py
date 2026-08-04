@@ -31,6 +31,17 @@ class FakeEvidenceStore:
     def list_for_scene(self, scene_id: str) -> list[dict]:
         return self.calls[-1][1] if self.calls and self.calls[-1][0] == scene_id else []
 
+    def unbind(self, scene_id: str, evidence_ids: list[int | str], *, unbound_by: str = "") -> dict:
+        _ = evidence_ids, unbound_by
+        return {
+            "scene_id": scene_id,
+            "evidence_status": "unbound",
+            "unbound_count": 1,
+            "already_unbound_count": 0,
+            "idempotent": False,
+            "evidence_refs": [],
+        }
+
 
 async def main() -> None:
     scene_id = "scene_contract_exact_id"
@@ -82,8 +93,10 @@ async def main() -> None:
         patch.object(server, "scene_evidence_store", fake_store),
     ):
         rebound = await server.bind_scene_evidence(scene_id, [ref], bound_by="test")
+        unbound = await server.unbind_scene_evidence(scene_id, [1], unbound_by="test")
         read_result = await server.read_scene_evidence(scene_id)
     assert rebound["status"] == "bound"
+    assert unbound["status"] == "unbound"
     assert read_result["status"] == "ok"
     assert read_result["evidence_status"] == "bound"
 

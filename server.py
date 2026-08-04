@@ -11749,6 +11749,39 @@ async def bind_scene_evidence(
 
 
 @mcp.tool()
+async def unbind_scene_evidence(
+    scene_id: str,
+    evidence_ids: list[int | str],
+    unbound_by: str = "",
+) -> dict:
+    """Reversibly unbind exact source refs without deleting source text or changing the Scene."""
+
+    safe_scene_id, reason = await _validate_scene_evidence_target(scene_id)
+    if reason:
+        return {"status": "invalid", "reason": reason, "scene_id": str(scene_id or "")}
+    try:
+        result = scene_evidence_store.unbind(
+            safe_scene_id,
+            evidence_ids,
+            unbound_by=unbound_by or "explicit_client",
+        )
+    except ValueError as exc:
+        return {
+            "status": "invalid",
+            "reason": "invalid_evidence_ids",
+            "error": str(exc),
+            "scene_id": safe_scene_id,
+        }
+    except Exception as exc:
+        logger.warning("Scene evidence unbind failed: %s", exc)
+        return {"status": "error", "error": str(exc), "scene_id": safe_scene_id}
+    return {
+        "status": "already_unbound" if result.get("idempotent") else "unbound",
+        **result,
+    }
+
+
+@mcp.tool()
 async def read_scene_evidence(scene_id: str) -> dict:
     """Read the independent evidence sidecar for one canonical Scene."""
 

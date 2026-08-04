@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -41,6 +42,30 @@ def main() -> None:
         assert len(saved) == 1
         assert saved[0]["content"] == exact
         assert saved[0]["content_sha256"] == ref["content_sha256"]
+
+        # Simulate opening a production sidecar created before binding-state
+        # events existed. A read must migrate it without requiring a write.
+        legacy_conn = sqlite3.connect(store.db_path)
+        try:
+            legacy_conn.execute("DROP TABLE scene_evidence_events")
+            legacy_conn.commit()
+        finally:
+            legacy_conn.close()
+        assert len(store.list_for_scene("scene_test")) == 1
+
+        unbound = store.unbind("scene_test", [saved[0]["id"]], unbound_by="serein_ui")
+        assert unbound["unbound_count"] == 1
+        assert unbound["evidence_status"] == "unbound"
+        assert store.list_for_scene("scene_test") == []
+
+        repeated_unbind = store.unbind("scene_test", [saved[0]["id"]], unbound_by="retry")
+        assert repeated_unbind["idempotent"] is True
+        assert repeated_unbind["already_unbound_count"] == 1
+
+        reactivated = store.bind("scene_test", [ref], bound_by="serein_ui")
+        assert reactivated["reactivated_count"] == 1
+        assert reactivated["bound_count"] == 1
+        assert len(store.list_for_scene("scene_test")) == 1
 
         conflicting_content = "漂移后的原文"
         conflicting = {
