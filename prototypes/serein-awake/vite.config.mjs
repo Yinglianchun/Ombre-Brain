@@ -559,7 +559,10 @@ async function readHavenBridgeEvidenceMessages({ limit = 40, beforeId = 0, messa
   const identityFile = String(
     process.env.HAVEN_BRIDGE_VPS_IDENTITY_FILE || "C:\\Users\\86188\\.ssh\\id_ed25519",
   ).trim();
-  const localDatabase = String(process.env.HAVEN_BRIDGE_LOCAL_DB || "").trim();
+  const localDatabase = String(
+    process.env.HAVEN_BRIDGE_LOCAL_DB
+      || (existsSync("/opt/haven_bridge/data/haven.db") ? "/opt/haven_bridge/data/haven.db" : ""),
+  ).trim();
   const safeLimit = Math.max(1, Math.min(80, Number.parseInt(limit, 10) || 40));
   const safeBeforeId = Math.max(0, Number.parseInt(beforeId, 10) || 0);
   const safeMessageIds = Array.isArray(messageIds)
