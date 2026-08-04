@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { buildSceneEvidenceRefs } from "./server/sceneEvidenceBridge.mjs";
 
 const canonicalSceneDomains = new Set([
   "relationship",
@@ -553,6 +554,95 @@ print(json.dumps({"status": "ok", "items": items}, ensure_ascii=False))
   });
 }
 
+async function readHavenBridgeEvidenceMessages({ limit = 40, beforeId = 0, messageIds = [] } = {}) {
+  const sshTarget = String(process.env.HAVEN_BRIDGE_VPS_SSH_TARGET || "root@168.119.228.217").trim();
+  const identityFile = String(
+    process.env.HAVEN_BRIDGE_VPS_IDENTITY_FILE || "C:\\Users\\86188\\.ssh\\id_ed25519",
+  ).trim();
+  const localDatabase = String(process.env.HAVEN_BRIDGE_LOCAL_DB || "").trim();
+  const safeLimit = Math.max(1, Math.min(80, Number.parseInt(limit, 10) || 40));
+  const safeBeforeId = Math.max(0, Number.parseInt(beforeId, 10) || 0);
+  const safeMessageIds = Array.isArray(messageIds)
+    ? [...new Set(messageIds.map((value) => Number.parseInt(value, 10)).filter((value) => value > 0))].slice(0, 12)
+    : [];
+  const requestPayload = Buffer.from(JSON.stringify({
+    limit: safeLimit,
+    before_id: safeBeforeId,
+    message_ids: safeMessageIds,
+  }), "utf8").toString("base64");
+  const script = `
+import base64, json, sqlite3
+
+request = json.loads(base64.b64decode("${requestPayload}").decode("utf-8"))
+conn = sqlite3.connect("/opt/haven_bridge/data/haven.db")
+conn.row_factory = sqlite3.Row
+where = [
+    "m.role IN ('user', 'assistant')",
+    "COALESCE(json_extract(m.metadata_json, '$.draft'), 0)=0",
+    "COALESCE(json_extract(m.metadata_json, '$.discarded'), 0)=0",
+    "((m.role='user' AND m.source IN ('chat','codex_direct') AND (m.source!='chat' OR COALESCE(json_extract(m.metadata_json, '$.delivery_status'), '')='done')) OR (m.role='assistant' AND m.source IN ('codex','codex_direct') AND COALESCE(json_extract(m.metadata_json, '$.autonomy'), 0)=0 AND COALESCE(json_extract(m.metadata_json, '$.proactive'), 0)=0))",
+]
+params = []
+message_ids = [int(item) for item in request.get("message_ids") or [] if int(item) > 0]
+if message_ids:
+    where.append("m.id IN (" + ",".join("?" for _ in message_ids) + ")")
+    params.extend(message_ids)
+else:
+    before_id = int(request.get("before_id") or 0)
+    if before_id > 0:
+        where.append("m.id < ?")
+        params.append(before_id)
+params.append((len(message_ids) if message_ids else int(request.get("limit") or 40)) + 1)
+rows = conn.execute(
+    "SELECT m.id, m.session_id, m.role, m.source, m.created_at, m.content, s.external_thread_id AS thread_id FROM messages m LEFT JOIN sessions s ON s.id=m.session_id WHERE "
+    + " AND ".join(where)
+    + " ORDER BY m.id DESC LIMIT ?",
+    params,
+).fetchall()
+has_more = False if message_ids else len(rows) > int(request.get("limit") or 40)
+if has_more:
+    rows = rows[:-1]
+items = [dict(row) for row in rows]
+conn.close()
+print(json.dumps({
+    "status": "ok",
+    "items": items,
+    "has_more": has_more,
+    "next_before_id": min((int(item["id"]) for item in items), default=0) or None,
+}, ensure_ascii=False))
+`;
+
+  return new Promise((resolve, reject) => {
+    const command = localDatabase ? "python3" : "ssh";
+    const args = localDatabase
+      ? ["-"]
+      : ["-i", identityFile, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", sshTarget, "python3", "-"];
+    const localScript = localDatabase
+      ? script.replace('/opt/haven_bridge/data/haven.db', localDatabase.replaceAll('\\', '\\\\').replaceAll('"', '\\"'))
+      : script;
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => child.kill(), 25_000);
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || `haven_bridge_evidence_${code}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout.trim()));
+      } catch {
+        reject(new Error("haven_bridge_evidence_invalid"));
+      }
+    });
+    child.stdin.end(localScript);
+  });
+}
+
 function sereinGatewayBridge() {
   return {
     name: "serein-gateway-bridge",
@@ -931,6 +1021,94 @@ function sereinMemoryBridge() {
           response.end(JSON.stringify({
             error: "dream_bridge_failed",
             message: error?.name === "AbortError" ? "读取这场梦超时。" : "这场梦暂时翻不开。",
+          }));
+        }
+      });
+
+      server.middlewares.use("/__serein/memory/scene-evidence", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const sceneId = String(body.sceneId || "").trim();
+          if (!/^[A-Za-z0-9_.:#-]{1,160}$/.test(sceneId)) {
+            response.statusCode = 400;
+            response.end(JSON.stringify({ error: "invalid_scene_id", message: "这张 Scene 没有可读取的原文证据 ID。" }));
+            return;
+          }
+          const result = await callOmbreTool("read_scene_evidence", { scene_id: sceneId });
+          response.statusCode = result?.status === "invalid" ? 404 : result?.status === "error" ? 502 : 200;
+          response.end(JSON.stringify(result));
+        } catch (error) {
+          response.statusCode = error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            error: "scene_evidence_read_failed",
+            message: error?.name === "AbortError" ? "读取原文证据超时。" : "暂时没有读到这张 Scene 的原文证据。",
+          }));
+        }
+      });
+
+      server.middlewares.use("/__serein/memory/bridge-source-messages", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const result = await readHavenBridgeEvidenceMessages({
+            limit: body.limit,
+            beforeId: body.beforeId,
+          });
+          response.statusCode = 200;
+          response.end(JSON.stringify(result));
+        } catch (error) {
+          response.statusCode = 502;
+          response.end(JSON.stringify({
+            error: "bridge_source_messages_failed",
+            message: "暂时没有读到 Haven Bridge 的原文表。",
+            items: [],
+          }));
+        }
+      });
+
+      server.middlewares.use("/__serein/memory/bind-scene-evidence", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const sceneId = String(body.sceneId || "").trim();
+          const selections = Array.isArray(body.selections) ? body.selections.slice(0, 12) : [];
+          const messageIds = selections.map((item) => Number.parseInt(item?.messageId, 10)).filter((item) => item > 0);
+          if (!/^[A-Za-z0-9_.:#-]{1,160}$/.test(sceneId) || !messageIds.length || messageIds.length !== selections.length) {
+            response.statusCode = 400;
+            response.end(JSON.stringify({ error: "invalid_evidence_selection", message: "先选择要绑定的 Bridge 原文。" }));
+            return;
+          }
+          const source = await readHavenBridgeEvidenceMessages({ messageIds });
+          const evidenceRefs = buildSceneEvidenceRefs(source.items, selections);
+          const result = await callOmbreTool("bind_scene_evidence", {
+            scene_id: sceneId,
+            evidence_refs: evidenceRefs,
+            bound_by: "serein_memory_ui",
+          });
+          response.statusCode = result?.status === "invalid" ? 400 : result?.status === "error" ? 502 : 200;
+          response.end(JSON.stringify(result));
+        } catch (error) {
+          const invalid = String(error?.message || "").startsWith("evidence_");
+          response.statusCode = invalid ? 400 : error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            error: invalid ? error.message : "scene_evidence_bind_failed",
+            message: invalid ? "选择的原文已变化，请刷新后重选。" : "没有完成这次原文绑定。",
           }));
         }
       });

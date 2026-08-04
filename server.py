@@ -11,13 +11,14 @@
 #   - Initialize canonical authored-memory stores, Diary storage, legacy
 #     read compatibility, indexes, and background maintenance engines.
 #     初始化作者记忆主存储、日记存储、旧数据读取兼容、索引与后台维护引擎。
-#   - Expose the 17-tool daily façade:
-#     暴露 17 把日常工具：
+#   - Expose the 19-tool daily façade:
+#     暴露 19 把日常工具：
 #       recall / read_memory
 #         Recall Scenes or explicitly read handoff; read exact Scene,
 #         Window Shadow, or Narrative Roll objects.
 #         召回 Scene 或显式读取 handoff；精确读取 Scene、窗影或叙事卷。
-#       write_scene / edit_scene / set_scene_status / annotate / close_window
+#       write_scene / bind_scene_evidence / read_scene_evidence / edit_scene /
+#       set_scene_status / annotate / close_window
 #         Author and revise Scenes, append sourced later understanding,
 #         and atomically settle one Window Shadow plus inline Scenes.
 #         亲写与修订 Scene、追加有来源的后来理解，并原子沉淀一篇窗影及内联 Scene。
@@ -54,7 +55,7 @@ import re
 import secrets
 import time
 from contextvars import ContextVar
-from typing import Literal
+from typing import Any, Literal
 from typing_extensions import NotRequired, TypedDict
 from base64 import b64decode
 from dataclasses import replace
@@ -136,6 +137,7 @@ from memory_object_policy import (
 )
 from mcp_surface import OmbreFastMCP
 from recall_policy import RecallPolicy, diffusion_seed_topic_term_has_specific_residue
+from scene_evidence import SceneEvidenceStore, normalize_evidence_ref
 from window_shadows import (
     WindowShadowRejectedDraftStore,
     WindowShadowRevisionError,
@@ -249,6 +251,7 @@ raw_event_store = RawEventStore(config)                  # Raw dialogue archive 
 reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
 narrative_roll_store = NarrativeRollStore(config)          # Reviewed sourced Narrative Projection arcs / 审阅后发布的叙事卷
 narrative_revision_inbox_store = NarrativeRevisionInbox(config) # Derived source-to-roll review queue / 派生叙事修订箱
+scene_evidence_store = SceneEvidenceStore(config)           # Independent Scene/source evidence sidecar / Scene 原文证据旁路索引
 legacy_memory_review_store = LegacyMemoryReviewStore(config) # Admin-only legacy lifecycle / bridge review cards
 legacy_memory_lifecycle_publisher = LegacyMemoryLifecyclePublisher(
     config,
@@ -11031,6 +11034,7 @@ async def _write_scene_memory(
     date: str = "",
     domain: str = "",
     cues: str | list[str] = "",
+    scene_id: str = "",
 ) -> str:
     """Store one authored Scene without entering the retired hold policy."""
     await decay_engine.ensure_started()
@@ -11070,7 +11074,7 @@ async def _write_scene_memory(
         memory_classification_source=classification["memory_classification_source"],
         date=str(date or "").strip(),
         source="write_scene",
-        bucket_id=generate_scene_id(),
+        bucket_id=scene_id or generate_scene_id(),
         extra_metadata={
             "memory_value_source": "authored_scene",
             "object_kind": "scene",
@@ -11604,6 +11608,42 @@ async def read_memory(
     return await _read_scene_memory(safe_id)
 
 
+async def _validate_scene_evidence_target(scene_id: str) -> tuple[str, str]:
+    safe_scene_id = _coerce_memory_id(scene_id)
+    if not MEMORY_ID_RE.fullmatch(safe_scene_id):
+        return "", "invalid_scene_id"
+    scene = await bucket_mgr.get(safe_scene_id)
+    if not scene:
+        return "", "scene_not_found"
+    metadata = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
+    if (
+        not _is_canonical_scene_bucket(scene)
+        or metadata.get("active") is False
+        or metadata.get("deprecated")
+    ):
+        return "", "not_active_canonical_scene"
+    return safe_scene_id, ""
+
+
+def _scene_write_contract_result(
+    write_result: object,
+    *,
+    scene_id: str,
+    evidence_status: str,
+    bound_count: int = 0,
+    error: str = "",
+) -> str:
+    lines = [
+        str(write_result or "").strip(),
+        f"[scene_id:{scene_id}]",
+        f"[evidence_status:{evidence_status}]",
+        f"[evidence_bound_count:{max(0, int(bound_count))}]",
+    ]
+    if error:
+        lines.append(f"[evidence_error:{_clip_text(error, 240)}]")
+    return "\n".join(line for line in lines if line)
+
+
 @mcp.tool()
 async def write_scene(
     content: str,
@@ -11611,15 +11651,121 @@ async def write_scene(
     title: str = "",
     date: str = "",
     domain: str = "",
+    evidence_refs: list[dict[str, Any]] | None = None,
 ) -> str:
-    """保存一条 Scene。一条只记录一个可独立召回的核心事件；可保留理解它所必需的背景、过程与结果，但不要并列第二件事。content 用你的第一人称写成能独立理解的完整经历，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要写成摘要或说明；Scene 本身就是最小记忆，不再拆片或生成索引卡。cues 由你写 1～8 个“以后提到什么时希望它回来”的入口，不是摘要，可传数组，字符串可用逗号、竖线或换行分隔；title、date、domain 可选。"""
-    return await _write_scene_memory(
+    """保存一条 Scene。一条只记录一个可独立召回的核心事件；可保留理解它所必需的背景、过程与结果，但不要并列第二件事。content 用你的第一人称写成能独立理解的完整经历，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要写成摘要或说明；Scene 本身就是最小记忆，不再拆片或生成索引卡。cues 由你写 1～8 个“以后提到什么时希望它回来”的入口，不是摘要，可传数组，字符串可用逗号、竖线或换行分隔；title、date、domain 可选。不传 evidence_refs 时仍正常写入并返回 evidence_status=unbound；传入时只写独立 SQLite 证据索引，不改 Scene 正文、metadata 或 embedding。"""
+    raw_refs = evidence_refs if evidence_refs is not None else []
+    if not isinstance(raw_refs, list):
+        return _scene_write_contract_result(
+            "写入被拒绝：evidence_refs 必须是数组。",
+            scene_id="",
+            evidence_status="error",
+        )
+    try:
+        normalized_refs = [normalize_evidence_ref(item) for item in raw_refs]
+    except ValueError as exc:
+        return _scene_write_contract_result(
+            f"写入被拒绝：{exc}",
+            scene_id="",
+            evidence_status="error",
+        )
+
+    requested_scene_id = generate_scene_id()
+    write_result = await _write_scene_memory(
         content,
         title=title,
         date=date,
         domain=domain,
         cues=cues,
+        scene_id=requested_scene_id,
     )
+    scene = await bucket_mgr.get(requested_scene_id)
+    if not _is_canonical_scene_bucket(scene):
+        return _scene_write_contract_result(
+            write_result,
+            scene_id="",
+            evidence_status="error" if normalized_refs else "unbound",
+            error="scene_id_unresolved",
+        )
+    if not normalized_refs:
+        return _scene_write_contract_result(
+            write_result,
+            scene_id=requested_scene_id,
+            evidence_status="unbound",
+        )
+    try:
+        binding = scene_evidence_store.bind(
+            requested_scene_id,
+            normalized_refs,
+            bound_by="write_scene",
+        )
+    except Exception as exc:
+        logger.warning("Scene evidence binding after write failed: %s", exc)
+        return _scene_write_contract_result(
+            write_result,
+            scene_id=requested_scene_id,
+            evidence_status="error",
+            error=str(exc),
+        )
+    return _scene_write_contract_result(
+        write_result,
+        scene_id=requested_scene_id,
+        evidence_status=str(binding.get("evidence_status") or "bound"),
+        bound_count=int(binding.get("bound_count") or 0),
+    )
+
+
+@mcp.tool()
+async def bind_scene_evidence(
+    scene_id: str,
+    evidence_refs: list[dict[str, Any]],
+    bound_by: str = "",
+) -> dict:
+    """Append exact source refs without changing the target Scene or embedding."""
+
+    safe_scene_id, reason = await _validate_scene_evidence_target(scene_id)
+    if reason:
+        return {"status": "invalid", "reason": reason, "scene_id": str(scene_id or "")}
+    try:
+        binding = scene_evidence_store.bind(
+            safe_scene_id,
+            evidence_refs,
+            bound_by=bound_by or "explicit_client",
+        )
+    except ValueError as exc:
+        return {
+            "status": "invalid",
+            "reason": "invalid_evidence_refs",
+            "error": str(exc),
+            "scene_id": safe_scene_id,
+        }
+    except Exception as exc:
+        logger.warning("Scene evidence binding failed: %s", exc)
+        return {"status": "error", "error": str(exc), "scene_id": safe_scene_id}
+    return {
+        "status": "already_bound" if binding.get("idempotent") else "bound",
+        **binding,
+    }
+
+
+@mcp.tool()
+async def read_scene_evidence(scene_id: str) -> dict:
+    """Read the independent evidence sidecar for one canonical Scene."""
+
+    safe_scene_id, reason = await _validate_scene_evidence_target(scene_id)
+    if reason:
+        return {"status": "invalid", "reason": reason, "scene_id": str(scene_id or "")}
+    try:
+        refs = scene_evidence_store.list_for_scene(safe_scene_id)
+    except Exception as exc:
+        logger.warning("Scene evidence read failed: %s", exc)
+        return {"status": "error", "error": str(exc), "scene_id": safe_scene_id}
+    return {
+        "status": "ok",
+        "scene_id": safe_scene_id,
+        "evidence_status": "bound" if refs else "unbound",
+        "evidence_refs": refs,
+    }
 
 
 @mcp.tool()

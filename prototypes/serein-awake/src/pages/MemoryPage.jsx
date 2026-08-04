@@ -31,6 +31,7 @@ import {
 } from "../storage/memoryStore.js";
 import { MarkdownProjection } from "../components/MarkdownProjection.jsx";
 import { SceneCueEditor } from "../components/SceneCueEditor.jsx";
+import { SceneEvidenceEditor } from "../components/SceneEvidenceEditor.jsx";
 
 const relationLabels = {
   continues: {
@@ -790,6 +791,12 @@ export function MemoryPage() {
                 key={`scene-cues-${selectedScene.id}`}
                 scene={selectedScene}
                 onSaved={(cues) => updateScene(selectedScene.id, () => ({ cues }))}
+              />
+
+              <SceneEvidenceEditor
+                key={`scene-evidence-${selectedScene.id}`}
+                sceneId={ombreSourceIdForScene(selectedScene)}
+                sceneTitle={selectedScene.title}
               />
 
               <section className="scene-annotations" aria-labelledby={`scene-annotations-${selectedScene.id}`}>
