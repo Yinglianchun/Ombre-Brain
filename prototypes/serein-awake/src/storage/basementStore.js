@@ -96,6 +96,19 @@ export async function readServerSemanticRouteDraft() {
   return readRouteDraftResponse(response);
 }
 
+export function inspectServerSemanticRouteDraft(serverState, publishedDatasetVersion) {
+  const draft = serverState?.draft;
+  if (!draft) return { status: "none", draft: null };
+  const baseDatasetVersion = Number(draft.baseDatasetVersion);
+  const datasetVersion = Number(publishedDatasetVersion);
+  return {
+    status: baseDatasetVersion === datasetVersion ? "current" : "conflict",
+    draft,
+    baseDatasetVersion,
+    datasetVersion,
+  };
+}
+
 export async function saveServerSemanticRouteDraft(
   routes,
   baseDatasetVersion,

@@ -25,6 +25,7 @@ import {
   clearServerSemanticRouteDraft,
   clearSemanticRouteDraft,
   hasDomainPolicyDraft,
+  inspectServerSemanticRouteDraft,
   readDomainPolicyDraft,
   readServerSemanticRouteDraft,
   readSemanticRouteDraft,
@@ -745,15 +746,27 @@ function RouteExampleEditor() {
       const payload = await readRouteApiResponse(response);
       if (!response.ok) throw new Error(payload.message || payload.error || "route_dataset_unavailable");
       const nextSnapshot = routeSnapshotFromApi(payload);
+      setRouteSnapshot(nextSnapshot);
+      setRoutes(nextSnapshot.routes);
       const localRoutes = readSemanticRouteDraft(nextSnapshot);
       const serverState = await readServerSemanticRouteDraft();
+      const serverDraftState = inspectServerSemanticRouteDraft(serverState, nextSnapshot.datasetVersion);
       let nextRoutes = localRoutes;
-      if (serverState.draft) {
-        if (serverState.draft.baseDatasetVersion !== nextSnapshot.datasetVersion) {
-          throw new Error(`服务器草稿基于 v${serverState.draft.baseDatasetVersion}，线上已是 v${nextSnapshot.datasetVersion}，先不要覆盖。`);
-        }
-        nextRoutes = serverState.draft.routes;
-        draftRevisionRef.current = serverState.draft.revision || 0;
+      if (serverDraftState.status === "conflict") {
+        draftRevisionRef.current = serverDraftState.draft.revision || 0;
+        setDraftSyncState({
+          status: "conflict",
+          message: `服务器草稿基于 v${serverDraftState.baseDatasetVersion}，已隔离保留；当前显示线上 v${nextSnapshot.datasetVersion}。`,
+        });
+        setDatasetState({
+          status: "conflict",
+          message: `已读到线上 v${nextSnapshot.datasetVersion}；先处理 v${serverDraftState.baseDatasetVersion} 草稿冲突再编辑。`,
+        });
+        return;
+      }
+      if (serverDraftState.status === "current") {
+        nextRoutes = serverDraftState.draft.routes;
+        draftRevisionRef.current = serverDraftState.draft.revision || 0;
         saveSemanticRouteDraft(nextRoutes, nextSnapshot.datasetVersion);
         setDraftSyncState({ status: "saved", message: "服务器草稿已载入" });
       } else if (JSON.stringify(localRoutes) !== JSON.stringify(nextSnapshot.routes)) {
@@ -777,7 +790,6 @@ function RouteExampleEditor() {
         saveSemanticRouteDraft(nextRoutes, nextSnapshot.datasetVersion);
         setDraftSyncState({ status: "saved", message: "已加入闲聊路线的建议阈值，等待发布" });
       }
-      setRouteSnapshot(nextSnapshot);
       setRoutes(nextRoutes);
       setDatasetState({ status: "ready", message: `已核对线上 v${nextSnapshot.datasetVersion}` });
     } catch (error) {
@@ -790,6 +802,12 @@ function RouteExampleEditor() {
   }, []);
 
   const persistRoutes = (nextRoutes) => {
+    if (datasetState.status !== "ready") {
+      window.alert(datasetState.status === "conflict"
+        ? `旧版服务器草稿仍在保留。请先放弃旧草稿或完成合并，再编辑线上 v${routeSnapshot.datasetVersion}。`
+        : "先核对线上 Router 版本，再编辑例句。");
+      return Promise.resolve(null);
+    }
     setRoutes(nextRoutes);
     saveSemanticRouteDraft(nextRoutes, routeSnapshot.datasetVersion);
     setDraftSyncState({ status: "saving", message: "正在保存到服务器……" });
@@ -914,13 +932,17 @@ function RouteExampleEditor() {
   };
 
   const resetDraft = async () => {
-    if (dirty && !window.confirm("放弃本机所有例句草稿？")) return;
+    const draftConflict = datasetState.status === "conflict";
+    if ((dirty || draftConflict) && !window.confirm(draftConflict
+      ? `放弃服务器上基于旧版本的例句草稿？线上 v${routeSnapshot.datasetVersion} 不会改变。`
+      : "放弃本机所有例句草稿？")) return;
     try {
       await saveQueueRef.current.catch(() => {});
       await clearServerSemanticRouteDraft();
       draftRevisionRef.current = 0;
       setRoutes(clearSemanticRouteDraft(routeSnapshot));
       setDraftSyncState({ status: "saved", message: "服务器草稿已清除" });
+      setDatasetState({ status: "ready", message: `已核对线上 v${routeSnapshot.datasetVersion}` });
       setEditingIndex(null);
     } catch {
       setDraftSyncState({ status: "error", message: "服务器草稿没有清除。" });
@@ -983,7 +1005,7 @@ function RouteExampleEditor() {
           <span>{dirty
             ? "服务器草稿未发布"
             : `${routeSnapshot.deploymentState === "production" ? "生产快照" : "本地候选"} v${routeSnapshot.datasetVersion}`}</span>
-          {datasetState.status === "ready" && (
+          {["ready", "conflict"].includes(datasetState.status) && (
             <span>
               边界护栏 {routeSnapshot.indexedBoundaryExampleCount ?? 0}/{routeSnapshot.boundaryExampleCount ?? 0}
               {routeSnapshot.boundaryIndexReady ? " 已索引" : " 等待重建"}
@@ -1112,7 +1134,7 @@ function RouteExampleEditor() {
         </div>
         <div>
           <button type="button" onClick={loadPublishedDataset} disabled={datasetState.status === "loading" || publishState.status === "publishing"} title="重新读取线上完整数据集"><ArrowClockwise size={14} className={datasetState.status === "loading" ? "is-spinning" : ""} />核对线上</button>
-          <button type="button" onClick={resetDraft} disabled={!dirty || publishState.status === "publishing"}>撤销草稿</button>
+          <button type="button" onClick={resetDraft} disabled={(!dirty && datasetState.status !== "conflict") || publishState.status === "publishing"}>{datasetState.status === "conflict" ? "放弃旧版草稿" : "撤销草稿"}</button>
           <button
             type="button"
             className="basement-primary-action"

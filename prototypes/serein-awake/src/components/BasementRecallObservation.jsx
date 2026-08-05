@@ -12,6 +12,7 @@ import {
 import { semanticRouteSnapshot } from "../data/basement.js";
 import {
   appendSemanticRouteDraftExample,
+  inspectServerSemanticRouteDraft,
   readRecallObservationReviews,
   readSemanticRouteDraft,
   readServerSemanticRouteDraft,
@@ -190,6 +191,7 @@ export function BasementRecallObservation() {
   const [draftRoutes, setDraftRoutes] = useState(readSemanticRouteDraft);
   const [publishedRoutes, setPublishedRoutes] = useState(semanticRouteSnapshot.routes);
   const [draftDatasetVersion, setDraftDatasetVersion] = useState(semanticRouteSnapshot.datasetVersion);
+  const [draftConflict, setDraftConflict] = useState(null);
   const draftRevisionRef = useRef(0);
   const [status, setStatus] = useState("loading");
   const [errors, setErrors] = useState({});
@@ -318,11 +320,21 @@ export function BasementRecallObservation() {
           utterances: Array.isArray(route.utterances) ? route.utterances : [],
         }));
         if (!cancelled) setPublishedRoutes(publishedRoutes);
+        const serverDraftState = inspectServerSemanticRouteDraft(serverState, datasetVersion);
         let nextRoutes;
-        if (serverState.draft?.baseDatasetVersion === datasetVersion) {
-          nextRoutes = serverState.draft.routes;
-          draftRevisionRef.current = serverState.draft.revision || 0;
+        if (serverDraftState.status === "current") {
+          nextRoutes = serverDraftState.draft.routes;
+          draftRevisionRef.current = serverDraftState.draft.revision || 0;
+          if (!cancelled) setDraftConflict(null);
+        } else if (serverDraftState.status === "conflict") {
+          nextRoutes = publishedRoutes;
+          draftRevisionRef.current = serverDraftState.draft.revision || 0;
+          if (!cancelled) setDraftConflict({
+            baseDatasetVersion: serverDraftState.baseDatasetVersion,
+            datasetVersion,
+          });
         } else {
+          if (!cancelled) setDraftConflict(null);
           const snapshot = { ...semanticRouteSnapshot, datasetVersion, routes: publishedRoutes };
           nextRoutes = readSemanticRouteDraft(snapshot);
           if (JSON.stringify(nextRoutes) !== JSON.stringify(publishedRoutes)) {
@@ -449,6 +461,13 @@ export function BasementRecallObservation() {
   };
 
   const addDraft = async (item) => {
+    if (draftConflict) {
+      setDraftNotices((current) => ({
+        ...current,
+        [item.id]: `服务器仍保留 v${draftConflict.baseDatasetVersion} 草稿；先在例句维护处理与 v${draftConflict.datasetVersion} 的冲突。`,
+      }));
+      return;
+    }
     const form = draftForms[item.id] || {};
     if (!form.routeName) {
       setDraftNotices((current) => ({ ...current, [item.id]: "先选这句话应该属于哪条路线。" }));

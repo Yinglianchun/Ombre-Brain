@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "preview": "vite preview",
-    "test:recall-observation": "node scripts/test-recall-observation-export.mjs && node scripts/test-recall-observation-hook-pagination.mjs",
+    "test:recall-observation": "node scripts/test-recall-observation-export.mjs && node scripts/test-recall-observation-hook-pagination.mjs && node scripts/test-semantic-route-draft-conflict.mjs",
     "test:recall-simulation": "node scripts/test-recall-simulation-budget.mjs",
     "test:scene-evidence": "node scripts/test-scene-evidence-bridge.mjs",
     "test:sites": "node --test tests/sites-worker.test.mjs"
