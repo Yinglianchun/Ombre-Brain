@@ -265,6 +265,14 @@ function RecallSimulator() {
       expectedMemoryIds: trainingForm.memoryIds.split(/[\s,，]+/),
       observedAction: semantic.applied_action,
       observedRoute: semantic.route,
+      ablationMode: ablationDebug.mode || recallAblation,
+      candidateTelemetry: candidateEvidence,
+      simulationTelemetry: {
+        semantic,
+        retrievalBudget,
+        sentinel,
+        ablation: ablationDebug,
+      },
     });
     setTrainingNotice(saved.status === "added"
       ? "已保存为人工模拟训练标注；下次导出会与真实观察合并，并保留来源。"
@@ -381,6 +389,11 @@ function RecallSimulator() {
               <div><dt>reranker shadow</dt><dd>{rerankerShadow.called ? `${rerankerShadow.score_count ?? 0} / ${rerankerShadow.candidate_count ?? 0} 已评分 · 不参与决定` : rerankerShadow.would_call ? rerankerShadowReasonLabels[rerankerShadow.reason] || rerankerShadow.reason || "有资格，尚未调用" : rerankerShadowReasonLabels[rerankerShadow.reason] || rerankerShadow.reason || "未进入"}</dd></div>
               <div><dt>query_facets</dt><dd>{(retrievalBudget.query_facets || []).map((facet) => `${facet.kind}:${facet.value}`).join(" · ") || "—"}</dd></div>
             </dl>
+            {rerankerShadow.score_count > 0 && rerankerShadow.decision_applied === false && (
+              <p className="recall-evidence-decomposition__note">
+                shadow 高分只记录为观察证据；不会参与放行、排序、cards、recalled_ids 或 context，也不会把未召回的候选拉起。
+              </p>
+            )}
             <p className="recall-evidence-decomposition__note">
               sentinel 只复用现有 query vector 做 top1/2 救援检查，不扩图、不 rerank、不注入、不写正式记录；异常一律 fail-open。
             </p>
@@ -418,14 +431,20 @@ function RecallSimulator() {
                     <dl>
                       <div><dt>body semantic</dt><dd>{candidate.body_semantic_score == null ? "—" : percent(candidate.body_semantic_score)}</dd></div>
                       <div><dt>semantic profile</dt><dd>{candidate.semantic_profile || "unknown"}</dd></div>
-                      <div><dt>cue semantic</dt><dd>{candidate.cue_semantic?.score == null ? candidate.cue_semantic?.status || "unknown" : `${percent(candidate.cue_semantic.score)} · ${candidate.cue_semantic.matched_cues?.join(" · ") || "命中"} · candidate only`}</dd></div>
-                      <div><dt>cue lexical</dt><dd>{candidate.cue_lexical_match ? candidate.matched_cues?.join(" · ") || "命中" : "未命中"}</dd></div>
-                      <div><dt>title anchor</dt><dd>{candidate.title_anchor_match ? candidate.title_anchor_terms?.join(" · ") || "命中" : "未命中"}</dd></div>
+                      <div><dt>cue semantic</dt><dd>{candidate.cue_semantic?.score == null ? candidate.cue_semantic?.status || "unknown" : `${percent(candidate.cue_semantic.score)} · candidate only`}</dd></div>
+                      <div><dt>cue lexical</dt><dd>{candidate.cue_lexical_match ? `${candidate.cue_lexical_role || "matched"} · 命中` : "未命中"}</dd></div>
+                      <div><dt>title anchor</dt><dd>{candidate.title_anchor_match ? "命中" : "未命中"}</dd></div>
                       <div><dt>候选来源</dt><dd>{(candidate.candidate_sources || []).map((source) => recallCandidateSourceLabels[source] || source).join(" · ") || "未记录"}</dd></div>
                       <div><dt>discovery / absolute / reranker entry</dt><dd>{percent(candidate.discovery_score ?? candidate.combined_score)} / {percent(candidate.absolute_floor)} / {percent(candidate.reranker_entry_floor)}</dd></div>
                       <div><dt>reranker shadow</dt><dd>{candidate.reranker_shadow?.score == null ? rerankerShadowLabels[candidate.reranker_shadow?.status] || candidate.reranker_shadow?.status || "未调用" : percent(candidate.reranker_shadow.score)}</dd></div>
+                      <div><dt>未调用原因</dt><dd>{candidate.reranker_shadow?.called === false ? candidate.reranker_shadow?.called_false_reason || candidate.reranker_shadow?.reason || "未记录" : "—"}</dd></div>
                       <div><dt>原文证据</dt><dd>{candidate.reranker_shadow?.evidence_status === "bound" ? `${candidate.reranker_shadow.evidence_count ?? 0} 条绑定片段` : "unknown（不等于 unsupported）"}</dd></div>
                     </dl>
+                    {candidate.reranker_shadow?.score != null && candidate.reranker_shadow?.decision_applied === false && (
+                      <p className="recall-evidence-decomposition__note">
+                        shadow 分数仅供校准；本候选不会因高分被放行或拉起。
+                      </p>
+                    )}
                     <button type="button" className="recall-card__memory-link" onClick={() => openSceneInMemory(candidate)}>
                       在记忆卡里查看召回入口
                     </button>
@@ -474,7 +493,7 @@ function RecallSimulator() {
                     {(item.admission_reasons?.length > 0) && <small>{item.admission_reasons.join(" / ")}</small>}
                     {momentDebugByBucketId.get(item.bucket_id)?.authored_cue_match ? (
                       <small className="recall-card__cue-hit">
-                        cue 命中：{momentDebugByBucketId.get(item.bucket_id).authored_cue_terms.join(" · ")}
+                        cue 命中（正文不导出）
                       </small>
                     ) : null}
                     <button type="button" className="recall-card__memory-link" onClick={() => openSceneInMemory(item)}>

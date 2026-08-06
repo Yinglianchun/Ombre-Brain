@@ -320,9 +320,10 @@ cue_service._finalize_retrieval_budget_candidate_debug(
 cue_debug = cue_budget["cheap_retrieval"]["candidates"][0]
 assert cue_debug["cue_lexical_match"] is True
 assert cue_debug["cue_lexical_role"] == "candidate_only"
-assert cue_debug["matched_cues"] == ["给予别人善意也是在善待自己"]
+assert "matched_cues" not in cue_debug
 assert cue_debug["final_admission_source"] == "candidate_only_requires_reranker"
-assert cue_debug["reranker_shadow"]["status"] == "eligible_not_called"
+assert cue_debug["reranker_shadow"]["status"] == "simulation_shadow_disabled"
+assert cue_debug["reranker_shadow"]["called_false_reason"] == "simulation_shadow_disabled"
 
 strong_body_cue_service = service({"scene-watermelon": 0.72})
 strong_body_cue_service._bucket_authored_cue_terms = cue_service._bucket_authored_cue_terms
@@ -412,6 +413,7 @@ fruit_admitted, fruit_suppressed = asyncio.run(
 )
 assert fruit_admitted == [], "gray-zone candidates must never bypass reranking"
 assert len(fruit_suppressed) == 1
+assert [item["bucket"]["id"] for item in fruit_admitted] == [], "shadow high score must not promote a candidate"
 assert fruit_suppressed[0]["admission_reason"] == "pending_reranker_shadow_gray_zone"
 assert fruit_suppressed[0]["recall_policy_debug"]["reranker_required"] is True
 assert fruit_suppressed[0]["budget_gray_zone_qualified"] is True
@@ -448,6 +450,7 @@ giant_fruit_admitted, giant_fruit_suppressed = asyncio.run(
 )
 assert giant_fruit_admitted == []
 assert len(giant_fruit_suppressed) == 1
+assert [item["bucket"]["id"] for item in giant_fruit_admitted] == [], "shadow high score must not inject a candidate"
 assert giant_fruit_suppressed[0]["admission_reason"] == "pending_reranker_shadow_route_guard"
 assert giant_fruit_suppressed[0]["recall_policy_debug"]["reranker_required"] is True
 assert giant_fruit_suppressed[0]["recall_policy_debug"]["normal_admission_reason"] == (

@@ -125,10 +125,12 @@ assert [item["reranker_shadow_score"] for item in candidates] == [0.21, 0.83]
 assert budget["rerank"]["called"] is True
 assert budget["rerank"]["score_count"] == 2
 assert budget["rerank"]["decision_applied"] is False
+assert budget["rerank"]["telemetry_generated_at"]
 rows = budget["cheap_retrieval"]["candidates"]
 assert rows[0]["reranker_shadow"]["score"] == 0.21
 assert rows[0]["reranker_shadow"]["evidence_status"] == "bound"
 assert rows[0]["reranker_shadow"]["decision_applied"] is False
+assert rows[0]["reranker_shadow"]["telemetry_generated_at"] == budget["rerank"]["telemetry_generated_at"]
 assert rows[1]["reranker_shadow"]["score"] == 0.83
 assert rows[1]["reranker_shadow"]["evidence_status"] == "unknown"
 
@@ -173,7 +175,12 @@ disabled_engine.simulation_shadow_enabled = False
 disabled_engine.shadow_ready = False
 disabled_service = service(disabled_engine)
 disabled_candidate = candidate("scene-watermelon", "西瓜", "正文", 0.56)
-disabled_budget = {"rerank": {"would_call": True}, "cheap_retrieval": {"candidates": []}}
+disabled_budget = {
+    "rerank": {"would_call": True},
+    "cheap_retrieval": {
+        "candidates": [disabled_service._retrieval_budget_candidate_debug_row(disabled_candidate)]
+    },
+}
 asyncio.run(
     disabled_service._apply_simulation_reranker_shadow(
         "西瓜",
@@ -183,6 +190,9 @@ asyncio.run(
 )
 assert disabled_engine.calls == []
 assert disabled_budget["rerank"]["reason"] == "simulation_shadow_disabled"
+assert disabled_budget["rerank"]["called_false_reason"] == "simulation_shadow_disabled"
+assert disabled_budget["cheap_retrieval"]["candidates"][0]["reranker_shadow"]["called"] is False
+assert disabled_budget["cheap_retrieval"]["candidates"][0]["reranker_shadow"]["called_false_reason"] == "simulation_shadow_disabled"
 assert "reranker_shadow_score" not in disabled_candidate
 
 engine_config = {

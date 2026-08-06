@@ -114,6 +114,7 @@ function normalizeObservation(row) {
     action,
     observedAction: action,
     sessionId: row?.session_id ?? row?.sessionId ?? payload.session_id ?? "",
+    reviewBatchId: row?.review_batch_id ?? row?.reviewBatchId ?? payload.review_batch_id ?? payload.reviewBatchId ?? "",
     confidence: Number.isFinite(confidence) ? `${(confidence * 100).toFixed(1)}%` : "",
     outcome,
     injected,
@@ -154,6 +155,7 @@ function normalizeBridgeObservation(row, routeActions = snapshotRouteActions) {
     action: routeAction,
     observedAction: routeAction,
     sessionId: row?.session_id ?? row?.sessionId ?? "",
+    reviewBatchId: row?.review_batch_id ?? row?.reviewBatchId ?? "",
     confidence: "",
     outcome,
     injected,
@@ -581,7 +583,7 @@ export function BasementRecallObservation() {
       <div className="observation-export-summary" aria-live="polite">
         <div className="observation-export-summary__copy">
           <span>训练标注导出</span>
-          <p>只导出当前已加载窗口与人工模拟，不声称全历史；不含完整 prompt、注入正文或上下文。</p>
+          <p>只导出当前已加载窗口与人工模拟，不声称全历史；不含完整 prompt、Scene 正文、cue、证据原文或上下文。</p>
         </div>
         <dl>
           <div><dt>可用</dt><dd>{exportSummary.available}</dd></div>
@@ -590,6 +592,14 @@ export function BasementRecallObservation() {
           <div><dt>已加载 Hook</dt><dd>{exportSummary.loaded_hook_observations}</dd></div>
           <div><dt>已加载 Gateway</dt><dd>{exportSummary.loaded_gateway_observations}</dd></div>
           <div><dt>已加载模拟</dt><dd>{exportSummary.total_manual_simulations}</dd></div>
+          <div><dt>route/budget/sentinel</dt><dd>{exportSummary.simulation_telemetry_rows ?? 0}</dd></div>
+          <div><dt>candidate judgment</dt><dd>{exportSummary.candidate_judgment_rows ?? 0}</dd></div>
+          <div><dt>shadow telemetry</dt><dd>{exportSummary.candidate_telemetry_rows ?? 0}</dd></div>
+          <div><dt>可校准</dt><dd>{exportSummary.calibration_available ?? 0}</dd></div>
+          <div><dt>unavailable</dt><dd>{exportSummary.calibration_unavailable ?? 0}</dd></div>
+          <div><dt>stale</dt><dd>{exportSummary.calibration_stale ?? 0}</dd></div>
+          <div><dt>query family</dt><dd>{exportSummary.query_family_count ?? 0}</dd></div>
+          <div><dt>evaluation group</dt><dd>{exportSummary.evaluation_group_count ?? 0}</dd></div>
         </dl>
         {exportNotice && <p className="observation-export-summary__notice" role="status">{exportNotice}</p>}
       </div>
@@ -666,6 +676,15 @@ export function BasementRecallObservation() {
                               {label}
                             </button>
                           ))}
+                          <button
+                            type="button"
+                            className="observation-memory-review__replay"
+                            disabled
+                            title="Gateway 当前没有按 observation_id + candidate_id 强制重放的 simulation-only 接口"
+                          >
+                            重跑 shadow 校准
+                          </button>
+                          <small>telemetry unavailable · 不会换成其他候选重跑</small>
                         </div>
                       )}
                     </div>

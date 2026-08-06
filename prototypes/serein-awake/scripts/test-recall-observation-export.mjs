@@ -112,14 +112,25 @@ const payload = buildRecallObservationTrainingExport(
   "2026-08-03T04:05:00Z",
   [manualSimulation],
 );
-assert.equal(payload.schema_version, 4);
+assert.equal(payload.schema_version, 6);
 assert.equal(payload.export_type, "serein.basement.recall-observation-training-export");
+assert.equal(payload.dataset_kind, "recall_observation_and_reranker_calibration");
 assert.deepEqual(payload.summary, {
   total_observations: 5,
   total_manual_simulations: 1,
   total_cases: 6,
   loaded_hook_observations: 3,
   loaded_gateway_observations: 2,
+  simulation_telemetry_rows: 0,
+  simulation_telemetry_missing: 6,
+  candidate_judgment_rows: 2,
+  candidate_telemetry_rows: 0,
+  calibration_rows: 2,
+  calibration_available: 0,
+  calibration_unavailable: 2,
+  calibration_stale: 0,
+  query_family_count: 5,
+  evaluation_group_count: 6,
   available: 3,
   rejected: 2,
   missing: 1,
@@ -134,6 +145,8 @@ assert.deepEqual(payload.scope, {
 assert.equal(payload.observations[0].observation_id, "hook-1");
 assert.equal(payload.observations[0].verdict, "false_positive");
 assert.equal(payload.observations[0].group, "session:s-1");
+assert.match(payload.observations[0].query_family_id, /^qf-v1-[0-9a-f]{8}$/);
+assert.match(payload.observations[0].evaluation_group_id, /^eg-v1-[0-9a-f]{8}$/);
 assert.deepEqual(payload.observations[0].candidate_judgments, [
   { memory_id: "scene-origin", rank: 1, observed_score: 0.536, relevance: "core" },
   { memory_id: "scene-meteor", rank: 2, observed_score: 0.565, relevance: "weak" },
@@ -153,11 +166,39 @@ assert.equal(payload.observations[5].label_route, "recall_needed");
 assert.equal(payload.observations[5].observed_action, "skip");
 assert.equal(payload.observations[5].observed_route, "present_chitchat");
 assert.equal(payload.observations[5].group, "manual-simulation:batch-1");
+assert.match(payload.observations[5].query_family_id, /^qf-v1-[0-9a-f]{8}$/);
+assert.match(payload.observations[5].evaluation_group_id, /^eg-v1-[0-9a-f]{8}$/);
 assert.deepEqual(payload.observations[5].expected_memory_ids, ["scene_b62357c38b2f41b58cb0fbbf3eef6820"]);
 assert.equal(payload.reviews["manual-simulation-1"].verdict, "missed");
 assert.equal(Object.hasOwn(payload.observations[0], "injected"), false);
 assert.equal(Object.hasOwn(payload.observations[0], "full_prompt"), false);
 assert.equal(Object.hasOwn(payload.reviews["hook-1"], "full_prompt"), false);
+const reviewBatchGrouping = buildRecallObservationTrainingExport([
+  {
+    id: "hook-review-batch-1",
+    query: "同一 review batch 的 paired query",
+    queryAvailable: true,
+    sessionId: "session-a",
+    review_batch_id: "review-batch-1",
+    source: "hook",
+  },
+  {
+    id: "gateway-review-batch-2",
+    query: "同一 review batch 的 paired query",
+    queryAvailable: true,
+    sessionId: "session-b",
+    review_batch_id: "review-batch-1",
+    source: "gateway",
+  },
+], {}, "2026-08-03T04:05:00Z");
+assert.equal(reviewBatchGrouping.observations[0].query_family_id, reviewBatchGrouping.observations[1].query_family_id);
+assert.equal(reviewBatchGrouping.observations[0].evaluation_group_id, reviewBatchGrouping.observations[1].evaluation_group_id);
+assert.equal(payload.calibration_rows.length, 2);
+assert.equal(payload.calibration_rows[0].calibration_available, false);
+assert.equal(payload.calibration_rows[0].unavailable_reason, "telemetry_unavailable");
+assert.equal(payload.calibration_rows[0].shadow_score, null);
+assert.equal(payload.calibration_rows[0].legacy_observed_score, 0.536);
+assert.equal(Object.hasOwn(payload.calibration_rows[0], "title"), false);
 assert.equal(classifyObservationReview(items[1], reviews["gateway-2"]).label, "skip");
 assert.equal(classifyObservationReview(items[2], reviews["hook-3"]).kind, "rejected");
 assert.deepEqual(observationGroup({ id: "gateway-6", createdAt: "2026-08-03T04:06:00Z" }), {

@@ -13477,6 +13477,11 @@ class GatewayService:
                 if qualified
                 else f"no_candidate_over_{eligible_floor_name}"
             ),
+            called_false_reason=(
+                "simulation_shadow_call_pending"
+                if qualified
+                else f"no_candidate_over_{eligible_floor_name}"
+            ),
         )
         return qualified, suppressed
 
@@ -13506,6 +13511,29 @@ class GatewayService:
         reranker_eligible = bool(item.get("budget_reranker_eligible"))
         shadow_score = item.get("reranker_shadow_score")
         shadow_called = bool(item.get("reranker_shadow_called"))
+        final_admission_source = (
+            "pending_reranker_shadow_gray_zone"
+            if gray_zone_qualified
+            else "pending_normal_admission"
+            if floor_qualified
+            else str(item.get("admission_reason") or "below_absolute_floor")
+        )
+        shadow_status = (
+            "scored_shadow_only"
+            if shadow_score is not None
+            else "called_without_score"
+            if shadow_called
+            else "eligible_gray_zone_not_called"
+            if gray_zone_qualified
+            else "eligible_not_called"
+            if reranker_eligible
+            else "ineligible_below_entry_floor"
+        )
+        called_false_reason = str(
+            item.get("reranker_shadow_called_false_reason") or ""
+        ).strip()
+        if not shadow_called and not called_false_reason:
+            called_false_reason = shadow_status
         return {
             "bucket_id": bucket_id,
             "title": str(meta.get("name") or bucket.get("name") or ""),
@@ -13531,7 +13559,6 @@ class GatewayService:
                     if cue_semantic_match
                     else None
                 ),
-                "matched_cues": list(item.get("cue_semantic_terms") or [])[:4],
                 "role": "candidate_only" if cue_semantic_match else "none",
             },
             "cue_lexical_match": bool(item.get("authored_cue_match") or cue_candidate_only),
@@ -13539,13 +13566,7 @@ class GatewayService:
                 "candidate_only" if cue_candidate_only else "direct_evidence"
                 if item.get("authored_cue_match") else "none"
             ),
-            "matched_cues": list(
-                item.get("authored_cue_candidate_terms")
-                or item.get("authored_cue_terms")
-                or []
-            )[:4],
             "title_anchor_match": bool(item.get("title_anchor_terms")),
-            "title_anchor_terms": list(item.get("title_anchor_terms") or [])[:4],
             "exact_anchor_match": bool(item.get("exact_anchor_match")),
             "candidate_sources": sources,
             "combined_score": round(self._safe_float(item.get("score"), 0.0), 4),
@@ -13564,13 +13585,7 @@ class GatewayService:
             "floor_qualified": floor_qualified,
             "gray_zone_qualified": gray_zone_qualified,
             "reranker_eligible": reranker_eligible,
-            "final_admission_source": (
-                "pending_reranker_shadow_gray_zone"
-                if gray_zone_qualified
-                else "pending_normal_admission"
-                if floor_qualified
-                else str(item.get("admission_reason") or "below_absolute_floor")
-            ),
+            "final_admission_source": final_admission_source,
             "reranker_shadow": {
                 "called": shadow_called,
                 "score": (
@@ -13586,18 +13601,13 @@ class GatewayService:
                     0,
                     int(item.get("reranker_shadow_evidence_count") or 0),
                 ),
-                "decision_applied": False,
-                "status": (
-                    "scored_shadow_only"
-                    if shadow_score is not None
-                    else "called_without_score"
-                    if shadow_called
-                    else "eligible_gray_zone_not_called"
-                    if gray_zone_qualified
-                    else "eligible_not_called"
-                    if reranker_eligible
-                    else "ineligible_below_entry_floor"
+                "telemetry_generated_at": str(
+                    item.get("reranker_shadow_telemetry_generated_at") or ""
                 ),
+                "decision_applied": False,
+                "status": shadow_status,
+                "reason": shadow_status,
+                "called_false_reason": called_false_reason if not shadow_called else None,
             },
         }
 
@@ -13668,7 +13678,13 @@ class GatewayService:
 
         rerank_debug = retrieval_budget.setdefault("rerank", {})
         if not candidates:
-            rerank_debug.update(called=False, score_count=0)
+            reason = "no_candidates"
+            rerank_debug.update(
+                called=False,
+                score_count=0,
+                reason=reason,
+                called_false_reason=reason,
+            )
             return candidates
         engine = getattr(self, "reranker_engine", None)
         shadow_ready = bool(getattr(engine, "shadow_ready", False))
@@ -13681,15 +13697,27 @@ class GatewayService:
             decision_applied=False,
         )
         if not shadow_ready or not callable(shadow_call):
+            reason = (
+                "simulation_shadow_disabled"
+                if not bool(getattr(engine, "simulation_shadow_enabled", False))
+                else "simulation_shadow_credentials_unavailable"
+            )
             rerank_debug.update(
                 called=False,
                 score_count=0,
-                reason=(
-                    "simulation_shadow_disabled"
-                    if not bool(getattr(engine, "simulation_shadow_enabled", False))
-                    else "simulation_shadow_credentials_unavailable"
-                ),
+                reason=reason,
+                called_false_reason=reason,
             )
+            rows = (retrieval_budget.get("cheap_retrieval") or {}).get("candidates")
+            if isinstance(rows, list):
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    shadow = row.get("reranker_shadow")
+                    if isinstance(shadow, dict) and not shadow.get("called"):
+                        shadow["reason"] = reason
+                        shadow["status"] = reason
+                        shadow["called_false_reason"] = reason
             return candidates
 
         candidate_limit = min(
@@ -13700,6 +13728,14 @@ class GatewayService:
             enumerate(candidates),
             key=lambda pair: self._bucket_rerank_candidate_priority(query, pair[1]),
         )[:candidate_limit]
+        ranked_item_ids = {id(item) for _original_index, item in ranked_pool}
+        for item in candidates:
+            if id(item) not in ranked_item_ids:
+                item["reranker_shadow_called"] = False
+                item["reranker_shadow_called_false_reason"] = (
+                    "outside_shadow_candidate_limit"
+                )
+        telemetry_generated_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
         documents: list[str] = []
         document_meta: list[dict[str, Any]] = []
         recall_ablation_mode = str(
@@ -13718,6 +13754,7 @@ class GatewayService:
             candidate_count=len(documents),
             score_count=0,
             reason="simulation_shadow_call_pending",
+            telemetry_generated_at=telemetry_generated_at,
         )
         try:
             results = await shadow_call(query, documents, top_n=len(documents))
@@ -13739,6 +13776,7 @@ class GatewayService:
             item["reranker_shadow_evidence_count"] = int(
                 document_meta[local_index].get("evidence_count") or 0
             )
+            item["reranker_shadow_telemetry_generated_at"] = telemetry_generated_at
             if local_index in by_index:
                 item["reranker_shadow_score"] = round(by_index[local_index], 4)
 
@@ -13802,6 +13840,8 @@ class GatewayService:
                         reranker_shadow["admission_status"] = reason
                         if not reranker_shadow.get("called"):
                             reranker_shadow["status"] = reason
+                            reranker_shadow["reason"] = reason
+                            reranker_shadow["called_false_reason"] = reason
 
     async def _retrieval_budget_sentinel_debug(
         self,

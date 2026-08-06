@@ -102,20 +102,18 @@ assert candidate_debug["scene-high"]["cue_semantic"] == {
     "status": "unavailable",
     "reason": "",
     "score": None,
-    "matched_cues": [],
     "role": "none",
 }
 assert candidate_debug["scene-high"]["reranker_shadow"]["status"] == "eligible_not_called"
 assert candidate_debug["scene-low"]["final_admission_source"] == "below_absolute_floor"
 assert candidate_debug["scene-cue"]["cue_lexical_match"] is True
 assert candidate_debug["scene-cue"]["cue_lexical_role"] == "candidate_only"
-assert candidate_debug["scene-cue"]["matched_cues"] == ["给予别人善意也是在善待自己"]
+assert "matched_cues" not in candidate_debug["scene-cue"]
 assert candidate_debug["scene-cue"]["candidate_sources"] == ["cue_lexical"]
 assert candidate_debug["scene-cue-semantic"]["cue_semantic"] == {
     "status": "matched",
     "reason": "",
     "score": 0.68,
-    "matched_cues": ["巨型西瓜还没吃完"],
     "role": "candidate_only",
 }
 assert candidate_debug["scene-cue-semantic"]["candidate_sources"] == ["cue_semantic"]
