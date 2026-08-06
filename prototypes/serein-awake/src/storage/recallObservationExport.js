@@ -115,6 +115,15 @@ export function classifyObservationReview(item, review) {
 }
 
 function candidateJudgmentsFor(item, review) {
+  const explicitJudgments = Array.isArray(item?.candidateJudgments) ? item.candidateJudgments : [];
+  if (explicitJudgments.length) {
+    return explicitJudgments.map((candidate, index) => ({
+      memory_id: cleanText(candidate?.memoryId || candidate?.memory_id),
+      rank: Number(candidate?.rank) > 0 ? Number(candidate.rank) : index + 1,
+      observed_score: null,
+      relevance: cleanText(candidate?.relevance).toLowerCase(),
+    })).filter((candidate) => candidate.memory_id && validCandidateRelevances.has(candidate.relevance));
+  }
   const candidateReviews = review?.candidateReviews && typeof review.candidateReviews === "object"
     ? review.candidateReviews
     : {};
@@ -241,6 +250,7 @@ function manualSimulationEntry(label) {
     ablationMode: cleanText(label?.ablationMode),
     sessionId: manualGroup,
     candidateTelemetry: label?.candidateTelemetry,
+    candidateJudgments: label?.candidateJudgments,
     simulationTelemetry: label?.simulationTelemetry,
   };
   const review = {

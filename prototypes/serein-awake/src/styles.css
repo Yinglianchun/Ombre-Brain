@@ -5287,6 +5287,11 @@ label:has(input:focus-visible) {
 .recall-evidence-row dl div { min-width: 0; }
 .recall-evidence-row dt { color: #9aa39f; font-size: 9px; }
 .recall-evidence-row dd { margin: 4px 0 0; color: #60716a; font-family: var(--font-editorial-cjk); font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
+.recall-candidate-review { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+.recall-candidate-review > span { margin-right: 2px; color: #8d9893; font-size: 9px; }
+.recall-candidate-review button { padding: 5px 9px; border: 1px solid rgba(72, 94, 86, 0.14); border-radius: 999px; background: rgba(255, 255, 255, 0.62); color: #74827c; font-size: 9px; cursor: pointer; }
+.recall-candidate-review button:hover { border-color: rgba(67, 99, 87, 0.28); color: #4f685e; }
+.recall-candidate-review button.is-active { border-color: rgba(63, 97, 84, 0.28); background: rgba(228, 238, 233, 0.78); color: #35574b; }
 .route-score-list { display: grid; gap: 3px; }
 .route-score {
   display: grid;
@@ -5860,7 +5865,7 @@ label:has(input:focus-visible) {
 .observation-toolbar p { margin: 0 0 0 auto; color: #84908c; font-size: 10px; }
 .observation-export-summary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   gap: 20px;
   padding: 14px clamp(24px, 3.2vw, 42px);
@@ -5870,8 +5875,8 @@ label:has(input:focus-visible) {
 .observation-export-summary__copy { min-width: 0; }
 .observation-export-summary__copy > span { color: #586e65; font-family: var(--font-editorial-cjk); font-size: 12px; }
 .observation-export-summary__copy > p { margin: 4px 0 0; color: #8a9691; font-size: 10px; line-height: 1.6; }
-.observation-export-summary dl { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px 17px; margin: 0; }
-.observation-export-summary dl div { display: grid; gap: 3px; min-width: 38px; }
+.observation-export-summary dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); align-items: start; gap: 12px 17px; width: 100%; margin: 0; }
+.observation-export-summary dl div { display: grid; gap: 3px; min-width: 0; }
 .observation-export-summary dt { color: #8a9691; font-size: 9px; }
 .observation-export-summary dd { margin: 0; color: #405b51; font-family: var(--font-editorial); font-size: 16px; }
 .observation-export-summary__notice { grid-column: 1 / -1; margin: 0; color: #587267; font-size: 10px; }

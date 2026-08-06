@@ -179,6 +179,12 @@ const rerankerShadowReasonLabels = {
   scored_shadow_only: "已评分，仅观察",
 };
 
+const candidateRelevanceOptions = [
+  { value: "core", label: "核心相关" },
+  { value: "weak", label: "弱相关" },
+  { value: "irrelevant", label: "无关" },
+];
+
 function RecallSimulator() {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("idle");
@@ -186,6 +192,7 @@ function RecallSimulator() {
   const [error, setError] = useState("");
   const [recallAblation, setRecallAblation] = useState("normal");
   const [trainingForm, setTrainingForm] = useState({ expectedAction: "", expectedRoute: "", memoryIds: "" });
+  const [candidateJudgments, setCandidateJudgments] = useState({});
   const [trainingNotice, setTrainingNotice] = useState("");
 
   const runSimulation = async (event) => {
@@ -210,6 +217,7 @@ function RecallSimulator() {
       if (!response.ok) throw new Error(payload?.message || payload?.error || "Gateway 没有返回结果");
       setResult(payload);
       setTrainingForm({ expectedAction: "", expectedRoute: "", memoryIds: "" });
+      setCandidateJudgments({});
       setTrainingNotice("");
       setStatus("done");
     } catch (requestError) {
@@ -267,6 +275,10 @@ function RecallSimulator() {
       observedRoute: semantic.route,
       ablationMode: ablationDebug.mode || recallAblation,
       candidateTelemetry: candidateEvidence,
+      candidateJudgments: candidateEvidence.flatMap((candidate, index) => {
+        const relevance = candidateJudgments[candidate.bucket_id];
+        return relevance ? [{ memoryId: candidate.bucket_id, rank: index + 1, relevance }] : [];
+      }),
       simulationTelemetry: {
         semantic,
         retrievalBudget,
@@ -445,6 +457,22 @@ function RecallSimulator() {
                         shadow 分数仅供校准；本候选不会因高分被放行或拉起。
                       </p>
                     )}
+                    <div className="recall-candidate-review" role="group" aria-label={`候选相关度：${candidate.title || candidate.bucket_id}`}>
+                      <span>候选相关度</span>
+                      {candidateRelevanceOptions.map((option) => (
+                        <button
+                          type="button"
+                          className={candidateJudgments[candidate.bucket_id] === option.value ? "is-active" : ""}
+                          key={option.value}
+                          onClick={() => setCandidateJudgments((current) => ({
+                            ...current,
+                            [candidate.bucket_id]: current[candidate.bucket_id] === option.value ? undefined : option.value,
+                          }))}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
                     <button type="button" className="recall-card__memory-link" onClick={() => openSceneInMemory(candidate)}>
                       在记忆卡里查看召回入口
                     </button>

@@ -77,6 +77,7 @@ const normalLabel = createRecallSimulationTrainingLabel({
   observedAction: "recall",
   observedRoute: "recall_needed",
   ablationMode: "normal",
+  candidateJudgments: [{ memoryId: "scene-fruit", rank: 1, relevance: "core" }],
   candidateTelemetry: [candidate],
 }, {
   id: "manual-simulation-telemetry",
@@ -85,6 +86,9 @@ const normalLabel = createRecallSimulationTrainingLabel({
 });
 assert.equal(normalLabel.observationId, "manual-simulation-telemetry");
 assert.equal(normalLabel.queryNormalized, "餐桌上的巨型水果");
+assert.deepEqual(normalLabel.candidateJudgments, [
+  { memoryId: "scene-fruit", rank: 1, relevance: "core" },
+]);
 assert.equal(normalLabel.candidateTelemetry.length, 1);
 assert.deepEqual(normalLabel.candidateTelemetry[0].candidateSources, [
   "body_semantic",
@@ -212,7 +216,7 @@ assert.equal(legacyUpdated.status, "updated");
 assert.equal(legacyUpdated.label.id, "legacy-label");
 assert.ok(legacyUpdated.label.queryFamilyId);
 assert.ok(legacyUpdated.label.evaluationGroupId);
-assert.equal(JSON.parse(localStorageValues.get("serein.basement.recall-simulation-training.v1")).schemaVersion, 2);
+assert.equal(JSON.parse(localStorageValues.get("serein.basement.recall-simulation-training.v1")).schemaVersion, 3);
 
 for (const mode of ["normal", "without_cues", "without_embedding"]) {
   const modeLabel = createRecallSimulationTrainingLabel({
@@ -336,12 +340,13 @@ assert.equal(notCalled.final_admission_source, "pending_reranker_shadow_route_gu
 assert.equal(notCalled.reranker_shadow.called, false);
 assert.equal(notCalled.reranker_shadow.called_false_reason, "pending_reranker_shadow_route_guard");
 const manualOnly = exported.calibration_rows.find((row) => row.observation_id === normalLabel.observationId);
-assert.equal(manualOnly.calibration_available, false);
-assert.equal(manualOnly.unavailable_reason, "candidate_judgment_missing");
+assert.equal(manualOnly.calibration_available, true);
+assert.equal(manualOnly.unavailable_reason, null);
+assert.equal(manualOnly.relevance, "core");
 assert.equal(manualOnly.ablation_mode, "normal");
-assert.equal(exported.telemetry_coverage.calibration_available, 1);
+assert.equal(exported.telemetry_coverage.calibration_available, 2);
 assert.equal(exported.telemetry_coverage.unavailable_reasons.telemetry_unavailable, 1);
-assert.equal(exported.telemetry_coverage.unavailable_reasons.candidate_judgment_missing, 1);
+assert.equal(exported.telemetry_coverage.unavailable_reasons.candidate_judgment_missing || 0, 0);
 assert.equal(exported.telemetry_coverage.unavailable_reasons.stale, 1);
 for (const row of exported.calibration_rows) {
   assert.equal(Object.hasOwn(row, "title"), false);

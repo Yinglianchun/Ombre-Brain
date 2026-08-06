@@ -4,6 +4,7 @@ const batchStorageKey = "serein.basement.recall-simulation-training-batch.v1";
 const validActions = new Set(["skip", "recall"]);
 const validAblationModes = new Set(["normal", "without_cues", "without_embedding"]);
 const validTelemetryStatuses = new Set(["fresh", "stale", "unavailable"]);
+const validCandidateRelevances = new Set(["core", "weak", "irrelevant"]);
 export const EVALUATION_GROUPING_CONTRACT_VERSION = "serein.evaluation-group.v1";
 export const EVALUATION_GROUPING_HASH_ALGORITHM = "fnv1a32";
 const candidateSourceEnums = new Set([
@@ -94,6 +95,21 @@ function nullableNonNegativeInteger(value) {
 function normalizedAblationMode(value) {
   const mode = cleanText(value).toLowerCase();
   return validAblationModes.has(mode) ? mode : null;
+}
+
+function normalizedCandidateJudgments(values) {
+  const seen = new Set();
+  return (Array.isArray(values) ? values : []).map((item, index) => {
+    const memoryId = cleanText(item?.memoryId || item?.memory_id || item?.candidateId || item?.candidate_id);
+    const relevance = cleanText(item?.relevance).toLowerCase();
+    if (!memoryId || seen.has(memoryId) || !validCandidateRelevances.has(relevance)) return null;
+    seen.add(memoryId);
+    return {
+      memoryId,
+      rank: nullableNonNegativeInteger(item?.rank) || index + 1,
+      relevance,
+    };
+  }).filter(Boolean);
 }
 
 function normalizedTelemetryStatus(value, fallback = "unavailable") {
@@ -645,6 +661,7 @@ export function createRecallSimulationTrainingLabel(input, options = {}) {
     evaluationGroupId,
     source: "manual_simulation",
     ablationMode,
+    candidateJudgments: normalizedCandidateJudgments(input?.candidateJudgments),
     candidateTelemetry,
     simulationTelemetry,
     createdAt: now,
@@ -687,7 +704,7 @@ export function upsertRecallSimulationTrainingLabel(input) {
     labels.push(next);
   }
   window.localStorage.setItem(recallSimulationTrainingStorageKey, JSON.stringify({
-    schemaVersion: 2,
+    schemaVersion: 3,
     updatedAt: next.updatedAt,
     labels,
   }));
