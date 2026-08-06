@@ -33,9 +33,21 @@ else:
 without_cues = recall_ablation_debug_payload("without_cues", source="manual_simulation")
 assert without_cues["authored_cues_enabled"] is False
 assert without_cues["body_embedding_enabled"] is True
+assert without_cues["cue_embedding_enabled"] is False
 assert without_cues["route_embedding_enabled"] is True
 assert without_cues["route_decision_unchanged"] is True
 assert without_cues["evidence_veto_unchanged"] is True
+
+without_embedding = recall_ablation_debug_payload(
+    "without_embedding",
+    source="manual_simulation",
+)
+assert without_embedding["authored_cues_enabled"] is True
+assert without_embedding["body_embedding_enabled"] is False
+assert without_embedding["cue_embedding_enabled"] is False
+
+normal = recall_ablation_debug_payload("normal", source="manual_simulation")
+assert normal["cue_embedding_enabled"] is True
 
 
 class Request:

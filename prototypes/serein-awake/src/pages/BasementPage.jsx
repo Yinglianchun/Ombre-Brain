@@ -144,9 +144,9 @@ function openSceneInMemory(item) {
 }
 
 const recallAblationOptions = [
-  { value: "normal", label: "正常", description: "cues + 正文 embedding" },
-  { value: "without_cues", label: "关闭 cues", description: "只看正文 embedding" },
-  { value: "without_embedding", label: "关闭正文 embedding", description: "只看 cues / 词面" },
+  { value: "normal", label: "正常", description: "cue 词面/embedding + 正文 embedding" },
+  { value: "without_cues", label: "关闭 cues", description: "只看正文 embedding / 词面" },
+  { value: "without_embedding", label: "关闭 embedding", description: "只看 cue / 正文词面" },
 ];
 
 const recallCandidateSourceLabels = {
@@ -154,6 +154,7 @@ const recallCandidateSourceLabels = {
   title_anchor: "标题锚点",
   lexical: "正文词面",
   cue_lexical: "cue 词面",
+  cue_semantic: "cue embedding",
   body_semantic: "正文 embedding",
   retrieval_alias: "检索别名",
 };
@@ -216,6 +217,7 @@ function RecallSimulator() {
   const sentinel = retrievalBudget.sentinel ?? {};
   const cheapRetrieval = retrievalBudget.cheap_retrieval ?? {};
   const rerankerShadow = retrievalBudget.rerank ?? {};
+  const cueSemanticShadow = retrievalBudget.cue_semantic ?? {};
   const ablationDebug = retrievalBudget.recall_ablation ?? semantic.recall_ablation ?? {
     mode: recallAblation,
   };
@@ -359,6 +361,7 @@ function RecallSimulator() {
               <div><dt>prototype confidence</dt><dd>{prototypePrior.confidence == null ? "—" : percent(prototypePrior.confidence)}</dd></div>
               <div><dt>sentinel top1/2</dt><dd>{sentinel.called ? `${sentinel.floor_qualified_count ?? 0} / ${sentinel.candidate_count ?? 0}` : sentinel.reason || "未运行"}</dd></div>
               <div><dt>absolute floor</dt><dd>{cheapRetrieval.floor_qualified_count ?? 0} / {cheapRetrieval.candidate_count ?? 0}</dd></div>
+              <div><dt>cue embedding</dt><dd>{cueSemanticShadow.status === "available" ? `${cueSemanticShadow.candidate_count ?? 0} 条候选 · v${cueSemanticShadow.dataset_version ?? "?"}` : cueSemanticShadow.reason || "未建立索引"}</dd></div>
               <div><dt>reranker shadow</dt><dd>{rerankerShadow.would_call ? "有资格，未调用生产模型" : rerankerShadow.reason || "未进入"}</dd></div>
               <div><dt>query_facets</dt><dd>{(retrievalBudget.query_facets || []).map((facet) => `${facet.kind}:${facet.value}`).join(" · ") || "—"}</dd></div>
             </dl>
@@ -386,7 +389,7 @@ function RecallSimulator() {
               <span>{candidateEvidence.length} 条 · {recallAblationOptions.find((option) => option.value === ablationDebug.mode)?.label || ablationDebug.mode || "正常"}</span>
             </div>
             <p className="recall-evidence-decomposition__note">
-              canonical Scene 的 body semantic 仍是正文原文向量；cue semantic 尚无独立索引时显示 unavailable，不用 0 冒充。候选发现与最终放行依据分开显示。
+              canonical Scene 的 body semantic 仍是正文原文向量；cue semantic 来自独立索引且只负责候选发现，不是注入证据。索引不可用时明确显示 unavailable，不用 0 冒充。
             </p>
             {candidateEvidence.length ? (
               <div className="recall-evidence-list">
@@ -399,11 +402,11 @@ function RecallSimulator() {
                     <dl>
                       <div><dt>body semantic</dt><dd>{candidate.body_semantic_score == null ? "—" : percent(candidate.body_semantic_score)}</dd></div>
                       <div><dt>semantic profile</dt><dd>{candidate.semantic_profile || "unknown"}</dd></div>
-                      <div><dt>cue semantic</dt><dd>{candidate.cue_semantic?.status || "unknown"}</dd></div>
+                      <div><dt>cue semantic</dt><dd>{candidate.cue_semantic?.score == null ? candidate.cue_semantic?.status || "unknown" : `${percent(candidate.cue_semantic.score)} · ${candidate.cue_semantic.matched_cues?.join(" · ") || "命中"} · candidate only`}</dd></div>
                       <div><dt>cue lexical</dt><dd>{candidate.cue_lexical_match ? candidate.matched_cues?.join(" · ") || "命中" : "未命中"}</dd></div>
                       <div><dt>title anchor</dt><dd>{candidate.title_anchor_match ? candidate.title_anchor_terms?.join(" · ") || "命中" : "未命中"}</dd></div>
                       <div><dt>候选来源</dt><dd>{(candidate.candidate_sources || []).map((source) => recallCandidateSourceLabels[source] || source).join(" · ") || "未记录"}</dd></div>
-                      <div><dt>combined / floor</dt><dd>{percent(candidate.combined_score)} / {percent(candidate.absolute_floor)}</dd></div>
+                      <div><dt>discovery / floor</dt><dd>{percent(candidate.discovery_score ?? candidate.combined_score)} / {percent(candidate.absolute_floor)}</dd></div>
                       <div><dt>reranker shadow</dt><dd>{candidate.reranker_shadow?.score == null ? rerankerShadowLabels[candidate.reranker_shadow?.status] || candidate.reranker_shadow?.status || "未调用" : percent(candidate.reranker_shadow.score)}</dd></div>
                     </dl>
                     <button type="button" className="recall-card__memory-link" onClick={() => openSceneInMemory(candidate)}>

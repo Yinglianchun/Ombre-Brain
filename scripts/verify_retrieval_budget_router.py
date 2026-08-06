@@ -89,7 +89,19 @@ def service(semantic_scores: dict[str, float]) -> GatewayService:
     instance._canonical_scene_semantic_threshold = lambda _bucket: 0.55
     instance._bucket_primary_candidate_rank = lambda _query, item: (-item["score"], item["bucket"]["id"])
     instance._bucket_final_candidate_rank = lambda _query, item, **_kwargs: (-item["score"], item["bucket"]["id"])
-    instance._admit_bucket_for_recall = lambda _query, _item: True
+    def admit(_query, item):
+        if item.get("exact_anchor_match") or item.get("authored_cue_match"):
+            return True
+        if float(item.get("semantic_score") or 0.0) >= 0.55:
+            return True
+        item["admission_reason"] = (
+            "candidate_only_requires_reranker"
+            if item.get("authored_cue_candidate_match")
+            else "scene_below_semantic_route_threshold"
+        )
+        return False
+
+    instance._admit_bucket_for_recall = admit
     async def forbidden_reranker(*_args, **_kwargs):
         raise AssertionError("simulation shadow must not call the production reranker")
     instance._rerank_scored_bucket_candidates = forbidden_reranker
@@ -104,6 +116,7 @@ watermelon = {
         "importance": 5,
         "memory_value_source": "authored_scene",
         "object_kind": "scene",
+        "scene_cues": ["巨型西瓜还没吃完"],
     },
 }
 
@@ -126,6 +139,57 @@ mixed_admitted, mixed_suppressed = asyncio.run(
 )
 assert [item["bucket"]["id"] for item in mixed_admitted] == ["scene-watermelon"]
 assert mixed_suppressed == []
+
+
+class CueSemanticIndex:
+    def __init__(self):
+        self.calls = 0
+
+    def search_by_vector(self, vector, *, current_cue_hashes, top_k):
+        self.calls += 1
+        assert vector == [0.1, 0.2]
+        assert set(current_cue_hashes) == {"scene-watermelon"}
+        assert top_k == 8
+        return {
+            "status": "available",
+            "dataset_version": 1,
+            "profile": {"model": "Qwen/Qwen3-Embedding-4B"},
+            "stale_scene_count": 0,
+            "matches": [
+                {
+                    "scene_id": "scene-watermelon",
+                    "score": 0.68,
+                    "matched_cues": ["巨型西瓜还没吃完"],
+                }
+            ],
+        }
+
+
+cue_semantic_service = service({"scene-watermelon": 0.20})
+cue_semantic_service.cue_semantic_index = CueSemanticIndex()
+cue_semantic_budget = cue_semantic_service._build_retrieval_budget_debug(
+    "刚吃完饭，昨天那个巨型西瓜还没吃完",
+    route_debug(),
+)
+assert cue_semantic_budget["effective_budget"] == "normal"
+cue_semantic_admitted, cue_semantic_suppressed = asyncio.run(
+    cue_semantic_service._dynamic_bucket_candidate_items(
+        "刚吃完饭，昨天那个巨型西瓜还没吃完",
+        "simulation",
+        [watermelon],
+        query_embedding=[0.1, 0.2],
+        semantic_recall_debug={"retrieval_budget": cue_semantic_budget},
+        allow_semantic_session_dedupe=False,
+    )
+)
+assert cue_semantic_admitted == []
+assert cue_semantic_suppressed[0]["admission_reason"] == "scene_below_semantic_route_threshold"
+assert cue_semantic_suppressed[0]["cue_semantic_candidate_match"] is True
+assert cue_semantic_suppressed[0]["cue_semantic_score"] == 0.68
+assert cue_semantic_suppressed[0]["authored_cue_match"] is False
+assert cue_semantic_budget["cue_semantic"]["status"] == "available"
+assert cue_semantic_budget["cue_semantic"]["candidate_count"] == 1
+assert cue_semantic_budget["rerank"]["would_call"] is True
 
 date_service = service({"scene-watermelon": 0.32})
 date_budget = date_service._build_retrieval_budget_debug("昨天好热", route_debug())
@@ -155,5 +219,102 @@ no_target_admitted, _ = asyncio.run(
 )
 assert no_target_admitted == []
 assert no_target_budget["cheap_retrieval"]["stop_reason"] == "no_cheap_candidates"
+
+cue_service = service({"scene-watermelon": 0.20})
+cue_service._bucket_authored_cue_terms = lambda query, bucket: (
+    ["给予别人善意也是在善待自己"]
+    if query == "给予别人善意也是在善待自己" and bucket.get("id") == "scene-watermelon"
+    else []
+)
+cue_budget = cue_service._build_retrieval_budget_debug(
+    "给予别人善意也是在善待自己",
+    route_debug(),
+)
+assert cue_budget["effective_budget"] == "shallow"
+cue_admitted, cue_suppressed = asyncio.run(
+    cue_service._dynamic_bucket_candidate_items(
+        "给予别人善意也是在善待自己",
+        "simulation",
+        [watermelon],
+        semantic_recall_debug={"retrieval_budget": cue_budget},
+        allow_semantic_session_dedupe=False,
+    )
+)
+assert cue_admitted == []
+assert len(cue_suppressed) == 1
+assert cue_suppressed[0]["admission_reason"] == "candidate_only_requires_reranker"
+assert cue_suppressed[0]["authored_cue_match"] is False
+assert cue_suppressed[0]["authored_cue_candidate_match"] is True
+cue_service._finalize_retrieval_budget_candidate_debug(
+    cue_budget,
+    cue_admitted,
+    cue_suppressed,
+)
+cue_debug = cue_budget["cheap_retrieval"]["candidates"][0]
+assert cue_debug["cue_lexical_match"] is True
+assert cue_debug["cue_lexical_role"] == "candidate_only"
+assert cue_debug["matched_cues"] == ["给予别人善意也是在善待自己"]
+assert cue_debug["final_admission_source"] == "candidate_only_requires_reranker"
+assert cue_debug["reranker_shadow"]["status"] == "eligible_not_called"
+
+strong_body_cue_service = service({"scene-watermelon": 0.72})
+strong_body_cue_service._bucket_authored_cue_terms = cue_service._bucket_authored_cue_terms
+strong_body_cue_budget = strong_body_cue_service._build_retrieval_budget_debug(
+    "给予别人善意也是在善待自己",
+    route_debug(),
+)
+strong_body_admitted, strong_body_suppressed = asyncio.run(
+    strong_body_cue_service._dynamic_bucket_candidate_items(
+        "给予别人善意也是在善待自己",
+        "simulation",
+        [watermelon],
+        semantic_recall_debug={"retrieval_budget": strong_body_cue_budget},
+        allow_semantic_session_dedupe=False,
+    )
+)
+assert [item["bucket"]["id"] for item in strong_body_admitted] == ["scene-watermelon"]
+assert strong_body_suppressed == []
+assert strong_body_admitted[0]["authored_cue_match"] is False
+assert strong_body_admitted[0]["authored_cue_candidate_match"] is True
+
+without_cues_budget = cue_service._build_retrieval_budget_debug(
+    "给予别人善意也是在善待自己",
+    route_debug(),
+)
+without_cues_budget["recall_ablation"] = {"mode": "without_cues"}
+without_cues_admitted, _ = asyncio.run(
+    cue_service._dynamic_bucket_candidate_items(
+        "给予别人善意也是在善待自己",
+        "simulation",
+        [watermelon],
+        semantic_recall_debug={"retrieval_budget": without_cues_budget},
+        allow_semantic_session_dedupe=False,
+    )
+)
+assert without_cues_admitted == []
+assert without_cues_budget["cheap_retrieval"]["stop_reason"] == "no_candidate_over_absolute_floor"
+
+
+class ForbiddenCueSemanticIndex:
+    def search_by_vector(self, *_args, **_kwargs):
+        raise AssertionError("ordinary Hook retrieval must not query the cue shadow index")
+
+
+ordinary_service = service({"scene-watermelon": 0.72})
+ordinary_service.cue_semantic_index = ForbiddenCueSemanticIndex()
+ordinary_admitted, ordinary_suppressed = asyncio.run(
+    ordinary_service._dynamic_bucket_candidate_items(
+        "巨型西瓜",
+        "ordinary-hook",
+        [watermelon],
+        query_embedding=[0.1, 0.2],
+        semantic_recall_debug={},
+        allow_semantic_session_dedupe=False,
+        allow_rerank=False,
+    )
+)
+assert [item["bucket"]["id"] for item in ordinary_admitted] == ["scene-watermelon"]
+assert ordinary_suppressed == []
+assert "cue_semantic_candidate_match" not in ordinary_admitted[0]
 
 print("retrieval budget router verification passed")

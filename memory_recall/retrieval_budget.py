@@ -166,14 +166,21 @@ def _budget_channels(budget: str) -> list[str]:
     if budget == BUDGET_SKIP:
         return []
     if budget == BUDGET_SHALLOW:
-        return ["exact_anchor", "lexical", "body_semantic"]
-    if budget == BUDGET_NORMAL:
         return ["exact_anchor", "lexical", "authored_cue", "body_semantic"]
+    if budget == BUDGET_NORMAL:
+        return [
+            "exact_anchor",
+            "lexical",
+            "authored_cue",
+            "body_semantic",
+            "cue_semantic",
+        ]
     return [
         "exact_anchor",
         "lexical",
         "authored_cue",
         "body_semantic",
+        "cue_semantic",
         "cue_expansion",
         "evidence",
         "relations",
@@ -514,9 +521,10 @@ def partition_candidates_by_absolute_floor(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Keep only cheap candidates eligible for a later reranker shadow call.
 
-    Explicit lexical evidence remains floor-qualified even when its numeric
-    score is absent; this preserves exact/cue entrances without treating a
-    broad semantic similarity as proof.
+    Explicit lexical evidence and shadow-only cue discovery remain
+    floor-qualified even when their numeric score is absent. A
+    ``authored_cue_candidate_match`` is only candidate eligibility; callers
+    must not treat it as admission evidence.
     """
 
     floor = max(0.0, min(1.0, float(absolute_floor)))
@@ -534,13 +542,21 @@ def partition_candidates_by_absolute_floor(
             )
         except (TypeError, ValueError):
             score = 0.0
+        cue_semantic_score = 0.0
+        try:
+            cue_semantic_score = float(item.get("cue_semantic_score") or 0.0)
+        except (TypeError, ValueError):
+            cue_semantic_score = 0.0
+        discovery_score = max(score, cue_semantic_score)
         explicit_evidence = bool(
             item.get("exact_anchor_match")
             or item.get("authored_cue_match")
+            or item.get("authored_cue_candidate_match")
             or item.get("title_anchor_terms")
         )
-        passes = score >= floor or explicit_evidence
+        passes = discovery_score >= floor or explicit_evidence
         item["budget_floor"] = round(floor, 4)
+        item["budget_discovery_score"] = round(discovery_score, 4)
         item["budget_floor_qualified"] = passes
         if passes:
             qualified.append(item)

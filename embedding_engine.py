@@ -251,6 +251,12 @@ class EmbeddingEngine:
             return []
         return await self._generate_embedding(text, kind="query")
 
+    async def embed_document(self, text: str) -> list[float]:
+        """Generate one document-space vector without writing the body index."""
+        if not self.enabled or not str(text or "").strip():
+            return []
+        return await self._generate_embedding(text, kind="document")
+
     def _store_embedding(self, bucket_id: str, embedding: list[float]):
         """Store embedding in SQLite."""
         from utils import now_iso

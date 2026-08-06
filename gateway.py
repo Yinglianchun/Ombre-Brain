@@ -97,6 +97,12 @@ from recall_eval import RECALL_EVAL_BLOCKED_SECTIONS, RECALL_EVAL_DEFAULT_CASES
 from recall_policy import QueryAnchorPlan, RecallPolicy, diffusion_seed_topic_term_has_specific_residue
 from memory_nodes import MemoryNodeStore
 from memory_recall import DomainRecallPolicy, SemanticRecallRouter
+from memory_recall.cue_semantic import (
+    CueSemanticIndex,
+    scene_cue_hash,
+    scene_cues_are_reviewed,
+    scene_is_cue_indexable,
+)
 from memory_recall.retrieval_budget import (
     build_retrieval_budget,
     finalize_retrieval_budget,
@@ -342,6 +348,7 @@ def recall_ablation_debug_payload(mode: str, *, source: str = "") -> dict[str, A
         "source": str(source or "").strip() or "default_gateway",
         "authored_cues_enabled": normalized != "without_cues",
         "body_embedding_enabled": normalized != "without_embedding",
+        "cue_embedding_enabled": normalized not in {"without_cues", "without_embedding"},
         "route_embedding_enabled": True,
         "route_decision_unchanged": True,
         "evidence_veto_unchanged": True,
@@ -378,6 +385,7 @@ class GatewayService:
         self.dehydrator = dehydrator or Dehydrator(config)
         self.embedding_engine = embedding_engine or EmbeddingEngine(config)
         self.semantic_recall_router = SemanticRecallRouter(config, self.embedding_engine)
+        self.cue_semantic_index = CueSemanticIndex(config, self.embedding_engine)
         self.domain_recall_policy = DomainRecallPolicy(config)
         self.reranker_engine = reranker_engine or RerankerEngine(config)
         self.memory_edge_store = MemoryEdgeStore(config)
@@ -13422,8 +13430,12 @@ class GatewayService:
             sources.append("title_anchor")
         if item.get("planner_lexical_match"):
             sources.append("lexical")
-        if item.get("authored_cue_match"):
+        cue_candidate_only = bool(item.get("authored_cue_candidate_match"))
+        if item.get("authored_cue_match") or cue_candidate_only:
             sources.append("cue_lexical")
+        cue_semantic_match = bool(item.get("cue_semantic_candidate_match"))
+        if cue_semantic_match:
+            sources.append("cue_semantic")
         if self._safe_float(item.get("semantic_score"), 0.0) > 0:
             sources.append("body_semantic")
         if item.get("retrieval_alias_match"):
@@ -13440,14 +13452,45 @@ class GatewayService:
             ),
             "semantic_score": round(self._safe_float(item.get("semantic_score"), 0.0), 4),
             "body_semantic_score": round(self._safe_float(item.get("semantic_score"), 0.0), 4),
-            "cue_semantic": {"status": "unavailable", "score": None},
-            "cue_lexical_match": bool(item.get("authored_cue_match")),
-            "matched_cues": list(item.get("authored_cue_terms") or [])[:4],
+            "cue_semantic": {
+                "status": (
+                    "matched"
+                    if cue_semantic_match
+                    else "not_matched"
+                    if item.get("cue_semantic_index_status") == "available"
+                    else "unavailable"
+                ),
+                "reason": str(item.get("cue_semantic_index_reason") or ""),
+                "score": (
+                    round(self._safe_float(item.get("cue_semantic_score"), 0.0), 4)
+                    if cue_semantic_match
+                    else None
+                ),
+                "matched_cues": list(item.get("cue_semantic_terms") or [])[:4],
+                "role": "candidate_only" if cue_semantic_match else "none",
+            },
+            "cue_lexical_match": bool(item.get("authored_cue_match") or cue_candidate_only),
+            "cue_lexical_role": (
+                "candidate_only" if cue_candidate_only else "direct_evidence"
+                if item.get("authored_cue_match") else "none"
+            ),
+            "matched_cues": list(
+                item.get("authored_cue_candidate_terms")
+                or item.get("authored_cue_terms")
+                or []
+            )[:4],
             "title_anchor_match": bool(item.get("title_anchor_terms")),
             "title_anchor_terms": list(item.get("title_anchor_terms") or [])[:4],
             "exact_anchor_match": bool(item.get("exact_anchor_match")),
             "candidate_sources": sources,
             "combined_score": round(self._safe_float(item.get("score"), 0.0), 4),
+            "discovery_score": round(
+                self._safe_float(
+                    item.get("budget_discovery_score"),
+                    item.get("score"),
+                ),
+                4,
+            ),
             "absolute_floor": round(self._safe_float(item.get("budget_floor"), 0.0), 4),
             "floor_qualified": floor_qualified,
             "final_admission_source": (
@@ -14364,8 +14407,70 @@ class GatewayService:
         else:
             semantic_scores = {}
         mark("semantic_candidates", stage_started_at)
+        stage_started_at = time.perf_counter()
+        cue_semantic_result: dict[str, Any] = {
+            "status": "unavailable",
+            "reason": "simulation_shadow_only",
+            "matches": [],
+        }
+        if budget_shadow:
+            if recall_ablation_mode == "without_cues":
+                cue_semantic_result["reason"] = "disabled_by_without_cues"
+            elif recall_ablation_mode == "without_embedding":
+                cue_semantic_result["reason"] = "disabled_by_without_embedding"
+            elif "cue_semantic" not in budget_channels:
+                cue_semantic_result["reason"] = "disabled_by_budget"
+            elif not query_embedding:
+                cue_semantic_result["reason"] = "query_embedding_unavailable"
+            else:
+                cue_indexable = {
+                    str(bucket.get("id") or ""): bucket
+                    for bucket in semantic_eligible
+                    if scene_is_cue_indexable(bucket)
+                }
+                current_cue_hashes = {
+                    scene_id: scene_cue_hash(
+                        (bucket.get("metadata") or {}).get("scene_cues")
+                    )
+                    for scene_id, bucket in cue_indexable.items()
+                }
+                cue_index = getattr(self, "cue_semantic_index", None)
+                search_cues = getattr(cue_index, "search_by_vector", None)
+                if callable(search_cues):
+                    try:
+                        cue_semantic_result = search_cues(
+                            query_embedding,
+                            current_cue_hashes=current_cue_hashes,
+                            top_k=int(retrieval_budget.get("semantic_top_k") or 8),
+                        )
+                    except Exception as exc:
+                        logger.warning("Gateway cue semantic shadow failed: %s", exc)
+                        cue_semantic_result = {
+                            "status": "unavailable",
+                            "reason": f"cue_semantic_search_failed:{type(exc).__name__}",
+                            "matches": [],
+                        }
+                else:
+                    cue_semantic_result["reason"] = "cue_semantic_index_unavailable"
+        cue_semantic_rows = {
+            str(row.get("scene_id") or ""): row
+            for row in cue_semantic_result.get("matches") or []
+            if str(row.get("scene_id") or "") in semantic_bucket_map
+        }
+        if budget_shadow:
+            retrieval_budget["cue_semantic"] = {
+                key: value
+                for key, value in cue_semantic_result.items()
+                if key != "matches"
+            }
+            retrieval_budget["cue_semantic"]["candidate_count"] = len(cue_semantic_rows)
+        mark("cue_semantic_candidates", stage_started_at)
         bucket_map = dict(eligible_map)
         for bucket_id in semantic_scores:
+            bucket = semantic_bucket_map.get(bucket_id)
+            if bucket:
+                bucket_map[bucket_id] = bucket
+        for bucket_id in cue_semantic_rows:
             bucket = semantic_bucket_map.get(bucket_id)
             if bucket:
                 bucket_map[bucket_id] = bucket
@@ -14420,6 +14525,7 @@ class GatewayService:
             | set(semantic_scores)
             | set(exact_scores)
             | set(authored_cue_debug)
+            | set(cue_semantic_rows)
             | lexical_ids
             | set(retrieval_alias_scores)
         )
@@ -14439,10 +14545,18 @@ class GatewayService:
         stage_started_at = time.perf_counter()
         semantic_norms = self._normalized_score_map(semantic_scores)
         # Ordinary full-body keyword matches only expand the candidate pool.
-        # Only explicit lexical evidence contributes to the fusion score.
+        # Only admission-capable explicit lexical evidence contributes to the
+        # fusion score. Shallow cue discovery is candidate-only in shadow mode.
+        shallow_cue_candidate_only = bool(
+            budget_shadow
+            and str(retrieval_budget.get("effective_budget") or "") == "shallow"
+        )
+        authored_cue_score_debug = (
+            {} if shallow_cue_candidate_only else authored_cue_debug
+        )
         keyword_basis = self._explicit_lexical_score_basis(
             exact_scores,
-            authored_cue_debug,
+            authored_cue_score_debug,
         )
         keyword_norms = self._normalized_score_map(keyword_basis)
         alpha_debug = self._dynamic_alpha_debug(semantic_scores)
@@ -14462,6 +14576,17 @@ class GatewayService:
             exact_score = self._clamp(exact_scores.get(bucket_id, 0.0))
             authored_cue_terms = list(authored_cue_debug.get(bucket_id) or [])
             authored_cue_match = bool(authored_cue_terms)
+            authored_cue_candidate_match = bool(
+                shallow_cue_candidate_only and authored_cue_match
+            )
+            authored_cue_admission_match = bool(
+                authored_cue_match and not authored_cue_candidate_match
+            )
+            cue_semantic_row = cue_semantic_rows.get(bucket_id) or {}
+            cue_semantic_score = self._clamp(
+                self._safe_float(cue_semantic_row.get("score"), 0.0)
+            )
+            cue_semantic_candidate_match = bool(cue_semantic_row)
             lexical_match = bucket_id in lexical_ids
             exact_match = bucket_id in exact_scores
             alias_hits = retrieval_alias_by_bucket.get(bucket_id, [])
@@ -14520,7 +14645,7 @@ class GatewayService:
                 final_score = self._canonical_scene_recall_score(
                     semantic_score,
                     exact_match=exact_match,
-                    authored_cue_match=authored_cue_match,
+                    authored_cue_match=authored_cue_admission_match,
                 )
             elif self.recall_fusion_mode == "dynamic":
                 fusion_score = self._clamp((alpha * vector_norm + (1.0 - alpha) * keyword_norm) * relevance_score)
@@ -14542,7 +14667,7 @@ class GatewayService:
                     + freshness_score * self.freshness_weight
                 ) * relevance_score
                 final_score = round(fusion_score * cooldown_multiplier, 4)
-            if not canonical_scene and (exact_match or authored_cue_match):
+            if not canonical_scene and (exact_match or authored_cue_admission_match):
                 final_score = max(final_score, self.first_card_min_score)
             scored_candidates.append(
                 {
@@ -14554,8 +14679,31 @@ class GatewayService:
                     "exact_anchor_match": exact_match,
                     "exact_anchor_terms": list((exact_debug.get(bucket_id) or {}).get("terms") or []),
                     "exact_anchor_fields": list((exact_debug.get(bucket_id) or {}).get("fields") or []),
-                    "authored_cue_match": authored_cue_match,
-                    "authored_cue_terms": authored_cue_terms,
+                    "authored_cue_match": authored_cue_admission_match,
+                    "authored_cue_terms": (
+                        authored_cue_terms if authored_cue_admission_match else []
+                    ),
+                    **(
+                        {
+                            "authored_cue_candidate_match": authored_cue_candidate_match,
+                            "authored_cue_candidate_terms": (
+                                authored_cue_terms if authored_cue_candidate_match else []
+                            ),
+                            "cue_semantic_candidate_match": cue_semantic_candidate_match,
+                            "cue_semantic_score": cue_semantic_score,
+                            "cue_semantic_terms": list(
+                                cue_semantic_row.get("matched_cues") or []
+                            )[:4],
+                            "cue_semantic_index_status": str(
+                                cue_semantic_result.get("status") or "unavailable"
+                            ),
+                            "cue_semantic_index_reason": str(
+                                cue_semantic_result.get("reason") or ""
+                            ),
+                        }
+                        if budget_shadow
+                        else {}
+                    ),
                     "canonical_scene_semantic_threshold": (
                         scene_route_guard.get("semantic_threshold")
                         if scene_route_guard
@@ -15014,23 +15162,7 @@ class GatewayService:
 
     @staticmethod
     def _bucket_scene_cues_are_reviewed(meta: dict) -> bool:
-        if str(meta.get("scene_cues_reviewed_at") or "").strip():
-            return True
-        if str(meta.get("last_edit_source") or "") != "edit_scene":
-            return False
-        history = meta.get("scene_revision_history")
-        if not isinstance(history, list) or not history:
-            return False
-        cue_revisions = [
-            normalize_scene_cues(item.get("cues"))
-            for item in history
-            if isinstance(item, dict)
-        ]
-        cue_revisions.append(normalize_scene_cues(meta.get("scene_cues")))
-        return any(
-            previous != current
-            for previous, current in zip(cue_revisions, cue_revisions[1:])
-        )
+        return scene_cues_are_reviewed(meta)
 
     def _bucket_authored_cue_terms(self, query: str, bucket: dict) -> list[str]:
         if not query or not isinstance(bucket, dict):
