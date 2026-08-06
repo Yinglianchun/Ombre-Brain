@@ -230,10 +230,11 @@ def verify_scene_and_legacy_moment_paths_are_isolated() -> None:
 
     scene_item = service._canonical_scene_recall_item(scene)
     assert scene_item is not None
-    assert scene_item["moment_id"] == "scene-direct"
-    assert scene_item["node_id"] == "scene-direct"
+    assert scene_item["moment_id"] == ""
+    assert scene_item["bucket_id"] == "scene-direct"
+    assert scene_item["source_id"] == "scene-direct"
     assert scene_item["node_kind"] == "scene"
-    assert ":" not in scene_item["moment_id"]
+    assert "node_id" not in scene_item
 
     legacy_items = service._context_moments_for_bucket(legacy)
     assert legacy_items
