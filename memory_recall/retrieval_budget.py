@@ -206,6 +206,7 @@ def build_retrieval_budget(
     anchor_plan: Mapping[str, Any] | None = None,
     date_hint: Mapping[str, Any] | bool | None = None,
     absolute_floor: float = 0.55,
+    reranker_entry_floor: float = 0.50,
     rescue_floor: float = DEFAULT_SENTINEL_RESCUE_FLOOR,
 ) -> dict[str, Any]:
     """Return a simulation/shadow budget without making an injection decision.
@@ -402,6 +403,10 @@ def build_retrieval_budget(
     )
     surface_route = route_name or ("date_only" if date_only else "mixed_query")
     absolute_floor = _bounded_float(absolute_floor, 0.55)
+    reranker_entry_floor = min(
+        absolute_floor,
+        _bounded_float(reranker_entry_floor, 0.50),
+    )
     rescue_floor = _bounded_float(rescue_floor, DEFAULT_SENTINEL_RESCUE_FLOOR)
 
     return {
@@ -439,6 +444,7 @@ def build_retrieval_budget(
         "surface_residue": text,
         "date_only": date_only,
         "absolute_floor": round(absolute_floor, 4),
+        "reranker_entry_floor": round(reranker_entry_floor, 4),
         "rescue_floor": round(rescue_floor, 4),
         "channels": _budget_channels(effective_budget),
         "semantic_top_k": _budget_top_k(effective_budget),
@@ -454,7 +460,7 @@ def build_retrieval_budget(
         },
         "skip_ready": False,
         "rerank": {
-            "policy": "after_absolute_floor",
+            "policy": "after_reranker_entry_floor",
             "mode": "shadow",
             "enabled": False,
             "would_call": False,
@@ -464,6 +470,8 @@ def build_retrieval_budget(
         "cheap_retrieval": {
             "candidate_count": 0,
             "floor_qualified_count": 0,
+            "gray_zone_count": 0,
+            "reranker_eligible_count": 0,
             "stop_reason": "pending_candidates",
         },
         "route_skip_deferred": False,
@@ -518,16 +526,25 @@ def partition_candidates_by_absolute_floor(
     candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...],
     *,
     absolute_floor: float,
+    reranker_entry_floor: float | None = None,
+    allow_gray_zone: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Keep only cheap candidates eligible for a later reranker shadow call.
+    """Partition cheap candidates for a later reranker shadow call.
 
-    Explicit lexical evidence and shadow-only cue discovery remain
-    floor-qualified even when their numeric score is absent. A
-    ``authored_cue_candidate_match`` is only candidate eligibility; callers
-    must not treat it as admission evidence.
+    The absolute floor keeps its existing meaning for strong cheap candidates.
+    Normal/deep anchored simulations may additionally expose a lower body-only
+    gray zone to the reranker.  Cue semantic similarity alone never qualifies
+    that gray zone.  An ``authored_cue_candidate_match`` remains candidate
+    eligibility only; callers must not treat it as admission evidence.
     """
 
     floor = max(0.0, min(1.0, float(absolute_floor)))
+    entry_floor = floor
+    if reranker_entry_floor is not None:
+        entry_floor = min(
+            floor,
+            max(0.0, min(1.0, float(reranker_entry_floor))),
+        )
     qualified: list[dict[str, Any]] = []
     suppressed: list[dict[str, Any]] = []
     for raw in candidates or ():
@@ -554,13 +571,31 @@ def partition_candidates_by_absolute_floor(
             or item.get("authored_cue_candidate_match")
             or item.get("title_anchor_terms")
         )
-        passes = discovery_score >= floor or explicit_evidence
+        absolute_passes = discovery_score >= floor or explicit_evidence
+        body_score = 0.0
+        try:
+            body_score = float(item.get("semantic_score") or 0.0)
+        except (TypeError, ValueError):
+            body_score = 0.0
+        gray_zone_passes = bool(
+            allow_gray_zone
+            and not absolute_passes
+            and body_score >= entry_floor
+        )
+        passes = absolute_passes or gray_zone_passes
         item["budget_floor"] = round(floor, 4)
+        item["budget_reranker_entry_floor"] = round(entry_floor, 4)
         item["budget_discovery_score"] = round(discovery_score, 4)
-        item["budget_floor_qualified"] = passes
+        item["budget_floor_qualified"] = absolute_passes
+        item["budget_gray_zone_qualified"] = gray_zone_passes
+        item["budget_reranker_eligible"] = passes
         if passes:
             qualified.append(item)
         else:
-            item["admission_reason"] = "below_absolute_floor"
+            item["admission_reason"] = (
+                "below_reranker_entry_floor"
+                if allow_gray_zone and entry_floor < floor
+                else "below_absolute_floor"
+            )
             suppressed.append(item)
     return qualified, suppressed

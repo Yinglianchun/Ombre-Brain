@@ -40,12 +40,49 @@ class RerankerEngine:
         self.enabled = bool(self.api_key and self.base_url) and _bool_value(
             rerank_cfg.get("enabled", True)
         )
+        self.simulation_shadow_enabled = _bool_value(
+            rerank_cfg.get("simulation_shadow_enabled", False),
+            False,
+        )
+        self.shadow_ready = bool(
+            self.api_key and self.base_url and self.simulation_shadow_enabled
+        )
         self.timeout = _float_between(rerank_cfg.get("timeout_seconds", 12), 12, 1, 120)
         self.candidate_limit = _int_between(rerank_cfg.get("candidate_limit", 20), 20, 1, 100)
         self.score_weight = _float_between(rerank_cfg.get("score_weight", 0.65), 0.65, 0.0, 1.0)
 
     async def rerank(self, query: str, documents: list[str], top_n: int | None = None) -> list[RerankResult]:
-        if not self.enabled or not query or not documents:
+        return await self._rerank(
+            query,
+            documents,
+            top_n=top_n,
+            enabled=self.enabled,
+        )
+
+    async def rerank_shadow(
+        self,
+        query: str,
+        documents: list[str],
+        top_n: int | None = None,
+    ) -> list[RerankResult]:
+        """Run the separately gated explicit-simulation shadow client."""
+
+        return await self._rerank(
+            query,
+            documents,
+            top_n=top_n,
+            enabled=self.shadow_ready,
+        )
+
+    async def _rerank(
+        self,
+        query: str,
+        documents: list[str],
+        *,
+        top_n: int | None,
+        enabled: bool,
+    ) -> list[RerankResult]:
+        if not enabled or not query or not documents:
             return []
         endpoint = f"{self.base_url}/rerank"
         payload: dict[str, Any] = {

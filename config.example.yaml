@@ -166,6 +166,7 @@ embedding:
 # 留空时复用 embedding 的 base_url/api_key。
 reranker:
   enabled: true
+  simulation_shadow_enabled: false # separate opt-in; explicit simulation only, never changes admission
   model: "Qwen/Qwen3-Reranker-4B"
   base_url: ""
   # api_key: ""                   # Use OMBRE_RERANKER_API_KEY or reuse embedding key
@@ -177,6 +178,7 @@ reranker:
   #   OMBRE_RERANKER_BASE_URL
   #   OMBRE_RERANKER_MODEL
   #   OMBRE_RERANKER_ENABLED
+  #   OMBRE_RERANKER_SIMULATION_SHADOW_ENABLED
 
 # --- Recall diagnostics / 召回诊断 ---
 # Admin-only append log for recall debugging. It records query, candidate ids,
@@ -417,6 +419,7 @@ gateway:
   importance_weight: 0.03            # legacy main score only; dynamic caps it as a tiny adjustment
   freshness_weight: 0.03             # legacy main score only; dynamic caps it as a tiny adjustment
   first_card_min_score: 0.55
+  retrieval_budget_reranker_entry_floor: 0.50 # simulation only: anchored body-semantic gray zone; never direct admission
   second_card_min_score: 0.50
   second_card_relative_score: 0.85
   high_confidence_semantic_score: 0.72

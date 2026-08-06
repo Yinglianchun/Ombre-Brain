@@ -135,4 +135,87 @@ assert len(empty_suppressed) == 1
 assert empty_budget["cheap_retrieval"]["stop_reason"] == "no_candidate_over_absolute_floor"
 assert empty_budget["rerank"]["would_call"] is False
 
+# A structural reference plus a concrete entity may use a lower, shadow-only
+# reranker entry floor.  Passing this floor makes the candidate eligible for
+# later reranking; it is not an admission decision.
+for anchored_budget_name in ("normal", "deep"):
+    anchored_budget = build_retrieval_budget(
+        "那天餐桌上的水果",
+        route="present_chitchat",
+        route_action="skip",
+        semantic_debug={
+            "route": "present_chitchat",
+            "route_action": "skip",
+            "confidence": 0.51,
+            "margin": 0.01,
+            "threshold": 0.72,
+        },
+        planner={"locatable_terms": ["水果"], "specific_terms": ["水果"]},
+        date_hint={"reference": "那天"},
+    )
+    assert anchored_budget["anchor_override"] is True
+    assert anchored_budget["effective_budget"] == "normal"
+    anchored_budget["effective_budget"] = anchored_budget_name
+    anchored_qualified, anchored_suppressed = service._apply_retrieval_budget_candidate_floor(
+        [
+            {
+                "bucket": {"id": f"scene-fruit-{anchored_budget_name}"},
+                "score": 0.515,
+                "semantic_score": 0.515,
+            }
+        ],
+        anchored_budget,
+        candidate_count=1,
+    )
+    assert len(anchored_qualified) == 1, (
+        f"{anchored_budget_name} structural-anchor body semantic 0.515 must "
+        "enter the simulation-only reranker gray zone"
+    )
+    assert anchored_suppressed == []
+    assert anchored_qualified[0]["budget_floor"] == 0.55
+    assert anchored_qualified[0]["budget_reranker_entry_floor"] <= 0.515
+    assert anchored_qualified[0]["budget_floor_qualified"] is False
+    assert anchored_qualified[0]["budget_gray_zone_qualified"] is True
+    assert anchored_qualified[0]["budget_reranker_eligible"] is True
+    assert anchored_budget["rerank"]["would_call"] is True
+    assert anchored_budget["cheap_retrieval"]["stop_reason"] == (
+        "candidates_over_reranker_entry_floor"
+    )
+
+# A date by itself and a broad cue-semantic resemblance must not receive the
+# structural-anchor gray-zone exception.
+date_only_budget = build_retrieval_budget(
+    "昨天好热",
+    route="present_chitchat",
+    route_action="skip",
+    semantic_debug={
+        "route": "present_chitchat",
+        "route_action": "skip",
+        "confidence": 0.51,
+        "margin": 0.01,
+        "threshold": 0.72,
+    },
+    date_hint={"reference": "昨天"},
+)
+assert date_only_budget["date_only"] is True
+assert date_only_budget["anchor_override"] is False
+date_only_qualified, date_only_suppressed = service._apply_retrieval_budget_candidate_floor(
+    [
+        {
+            "bucket": {"id": "scene-broad-cue"},
+            "score": 0.20,
+            "semantic_score": 0.20,
+            "cue_semantic_candidate_match": True,
+            "cue_semantic_score": 0.515,
+            "cue_semantic_terms": ["餐桌上的东西"],
+        }
+    ],
+    date_only_budget,
+    candidate_count=1,
+)
+assert date_only_qualified == []
+assert len(date_only_suppressed) == 1
+assert date_only_suppressed[0]["admission_reason"] == "below_absolute_floor"
+assert date_only_budget["rerank"]["would_call"] is False
+
 print("retrieval budget candidate verification passed")

@@ -117,6 +117,7 @@ from persona_event_selection import (
 from raw_events import RawEventStore, raw_event_text_looks_injected, strip_raw_client_context
 from reminder_store import ReminderStore
 from reranker_engine import RerankerEngine
+from scene_evidence import SceneEvidenceStore
 from self_anchor import is_self_anchor_bucket, is_self_anchor_metadata
 from source_refs import source_ref_window
 from utils import (
@@ -373,6 +374,7 @@ class GatewayService:
         persona_engine: PersonaStateEngine | None = None,
         dream_engine: DreamEngine | None = None,
         memory_node_store: MemoryNodeStore | None = None,
+        scene_evidence_store: SceneEvidenceStore | None = None,
         http_client: httpx.AsyncClient | None = None,
     ):
         self.config = config
@@ -388,6 +390,7 @@ class GatewayService:
         self.cue_semantic_index = CueSemanticIndex(config, self.embedding_engine)
         self.domain_recall_policy = DomainRecallPolicy(config)
         self.reranker_engine = reranker_engine or RerankerEngine(config)
+        self.scene_evidence_store = scene_evidence_store or SceneEvidenceStore(config)
         self.memory_edge_store = MemoryEdgeStore(config)
         self.scene_edge_store = SceneEdgeStore(config, create=False)
         self.memory_node_store = memory_node_store or MemoryNodeStore(config)
@@ -609,6 +612,14 @@ class GatewayService:
             embedding_timeout = 3.0
         self.embedding_query_timeout_seconds = max(0.0, min(30.0, embedding_timeout))
         self.first_card_min_score = float(self.gateway_cfg.get("first_card_min_score", 0.55))
+        self.retrieval_budget_reranker_entry_floor = self._clamp(
+            float(
+                self.gateway_cfg.get(
+                    "retrieval_budget_reranker_entry_floor",
+                    min(self.first_card_min_score, 0.50),
+                )
+            )
+        )
         self.retrieval_budget_sentinel_rescue_floor = self._clamp(
             float(
                 self.gateway_cfg.get(
@@ -846,6 +857,12 @@ class GatewayService:
                 "recall_fusion_mode": self.recall_fusion_mode,
                 "reranker": {
                     "enabled": bool(getattr(self.reranker_engine, "enabled", False)),
+                    "simulation_shadow_enabled": bool(
+                        getattr(self.reranker_engine, "simulation_shadow_enabled", False)
+                    ),
+                    "shadow_ready": bool(
+                        getattr(self.reranker_engine, "shadow_ready", False)
+                    ),
                     "model": getattr(self.reranker_engine, "model", ""),
                     "base_url": getattr(self.reranker_engine, "base_url", ""),
                     "candidate_limit": getattr(self.reranker_engine, "candidate_limit", 0),
@@ -951,6 +968,10 @@ class GatewayService:
     def _reranker_config_payload(self) -> dict[str, Any]:
         return {
             "enabled": bool(getattr(self.reranker_engine, "enabled", False)),
+            "simulation_shadow_enabled": bool(
+                getattr(self.reranker_engine, "simulation_shadow_enabled", False)
+            ),
+            "shadow_ready": bool(getattr(self.reranker_engine, "shadow_ready", False)),
             "model": getattr(self.reranker_engine, "model", ""),
             "base_url": getattr(self.reranker_engine, "base_url", ""),
             "api_ready": bool(getattr(self.reranker_engine, "api_key", "")),
@@ -1437,6 +1458,15 @@ class GatewayService:
             reranker_cfg["enabled"] = self._bool_config_value(payload["enabled"], True)
             os.environ["OMBRE_RERANKER_ENABLED"] = "true" if reranker_cfg["enabled"] else "false"
             updated.append("reranker.enabled")
+        if "simulation_shadow_enabled" in payload:
+            reranker_cfg["simulation_shadow_enabled"] = self._bool_config_value(
+                payload["simulation_shadow_enabled"],
+                False,
+            )
+            os.environ["OMBRE_RERANKER_SIMULATION_SHADOW_ENABLED"] = (
+                "true" if reranker_cfg["simulation_shadow_enabled"] else "false"
+            )
+            updated.append("reranker.simulation_shadow_enabled")
         for key in ("model", "base_url"):
             if key in payload:
                 reranker_cfg[key] = str(payload[key] or "").strip()
@@ -13374,6 +13404,11 @@ class GatewayService:
             anchor_plan=self._query_anchor_plan_debug(anchor_plan),
             date_hint=date_hint,
             absolute_floor=getattr(self, "first_card_min_score", 0.55),
+            reranker_entry_floor=getattr(
+                self,
+                "retrieval_budget_reranker_entry_floor",
+                min(getattr(self, "first_card_min_score", 0.55), 0.50),
+            ),
             rescue_floor=getattr(
                 self,
                 "retrieval_budget_sentinel_rescue_floor",
@@ -13388,19 +13423,45 @@ class GatewayService:
         *,
         candidate_count: int,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        effective_budget = str(retrieval_budget.get("effective_budget") or "")
+        allow_gray_zone = bool(
+            effective_budget in {"normal", "deep"}
+            and retrieval_budget.get("anchor_override")
+            and not retrieval_budget.get("date_only")
+        )
         qualified, suppressed = partition_candidates_by_absolute_floor(
             candidates,
             absolute_floor=float(
                 retrieval_budget.get("absolute_floor") or self.first_card_min_score
             ),
+            reranker_entry_floor=float(
+                retrieval_budget.get("reranker_entry_floor")
+                or getattr(
+                    self,
+                    "retrieval_budget_reranker_entry_floor",
+                    min(self.first_card_min_score, 0.50),
+                )
+            ),
+            allow_gray_zone=allow_gray_zone,
+        )
+        absolute_count = sum(
+            1 for item in qualified if item.get("budget_floor_qualified")
+        )
+        gray_zone_count = sum(
+            1 for item in qualified if item.get("budget_gray_zone_qualified")
+        )
+        eligible_floor_name = (
+            "reranker_entry_floor" if allow_gray_zone else "absolute_floor"
         )
         retrieval_budget["cheap_retrieval"].update(
             candidate_count=max(0, int(candidate_count)),
-            floor_qualified_count=len(qualified),
+            floor_qualified_count=absolute_count,
+            gray_zone_count=gray_zone_count,
+            reranker_eligible_count=len(qualified),
             stop_reason=(
-                "candidates_over_absolute_floor"
+                f"candidates_over_{eligible_floor_name}"
                 if qualified
-                else "no_candidate_over_absolute_floor"
+                else f"no_candidate_over_{eligible_floor_name}"
             ),
             candidates=[
                 self._retrieval_budget_candidate_debug_row(item)
@@ -13414,7 +13475,7 @@ class GatewayService:
             reason=(
                 "shadow_only_reranker_disabled"
                 if qualified
-                else "no_candidate_over_absolute_floor"
+                else f"no_candidate_over_{eligible_floor_name}"
             ),
         )
         return qualified, suppressed
@@ -13441,6 +13502,10 @@ class GatewayService:
         if item.get("retrieval_alias_match"):
             sources.append("retrieval_alias")
         floor_qualified = bool(item.get("budget_floor_qualified"))
+        gray_zone_qualified = bool(item.get("budget_gray_zone_qualified"))
+        reranker_eligible = bool(item.get("budget_reranker_eligible"))
+        shadow_score = item.get("reranker_shadow_score")
+        shadow_called = bool(item.get("reranker_shadow_called"))
         return {
             "bucket_id": bucket_id,
             "title": str(meta.get("name") or bucket.get("name") or ""),
@@ -13492,18 +13557,210 @@ class GatewayService:
                 4,
             ),
             "absolute_floor": round(self._safe_float(item.get("budget_floor"), 0.0), 4),
+            "reranker_entry_floor": round(
+                self._safe_float(item.get("budget_reranker_entry_floor"), 0.0),
+                4,
+            ),
             "floor_qualified": floor_qualified,
+            "gray_zone_qualified": gray_zone_qualified,
+            "reranker_eligible": reranker_eligible,
             "final_admission_source": (
-                "pending_normal_admission" if floor_qualified else "below_absolute_floor"
+                "pending_reranker_shadow_gray_zone"
+                if gray_zone_qualified
+                else "pending_normal_admission"
+                if floor_qualified
+                else str(item.get("admission_reason") or "below_absolute_floor")
             ),
             "reranker_shadow": {
-                "called": False,
-                "score": None,
+                "called": shadow_called,
+                "score": (
+                    round(self._safe_float(shadow_score, 0.0), 4)
+                    if shadow_score is not None
+                    else None
+                ),
+                "model": str(item.get("reranker_shadow_model") or ""),
+                "evidence_status": str(
+                    item.get("reranker_shadow_evidence_status") or "unknown"
+                ),
+                "evidence_count": max(
+                    0,
+                    int(item.get("reranker_shadow_evidence_count") or 0),
+                ),
+                "decision_applied": False,
                 "status": (
-                    "eligible_not_called" if floor_qualified else "ineligible_below_floor"
+                    "scored_shadow_only"
+                    if shadow_score is not None
+                    else "called_without_score"
+                    if shadow_called
+                    else "eligible_gray_zone_not_called"
+                    if gray_zone_qualified
+                    else "eligible_not_called"
+                    if reranker_eligible
+                    else "ineligible_below_entry_floor"
                 ),
             },
         }
+
+    def _simulation_reranker_shadow_document(
+        self,
+        bucket: dict[str, Any],
+        *,
+        include_cues: bool = True,
+    ) -> tuple[str, dict[str, Any]]:
+        """Build a Scene-aware reranker document without changing recall evidence."""
+
+        meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+        bucket_id = str(bucket.get("id") or "")
+        title = str(meta.get("name") or bucket.get("name") or bucket_id).strip()
+        body = bucket_content_for_recall(bucket).strip()
+        cues = normalize_scene_cues(meta.get("scene_cues")) if include_cues else []
+        evidence_status = "unknown"
+        evidence_snippets: list[str] = []
+        if self._is_canonical_scene_bucket(bucket) and bucket_id:
+            store = getattr(self, "scene_evidence_store", None)
+            list_for_scene = getattr(store, "list_for_scene", None)
+            if callable(list_for_scene):
+                try:
+                    refs = list_for_scene(bucket_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Simulation reranker Scene evidence read failed for %s: %s",
+                        bucket_id,
+                        exc,
+                    )
+                    refs = []
+                for ref in refs or []:
+                    if not isinstance(ref, dict):
+                        continue
+                    content = " ".join(str(ref.get("content") or "").split()).strip()
+                    if content:
+                        evidence_snippets.append(content[:900])
+                    if len(evidence_snippets) >= 3:
+                        break
+                if evidence_snippets:
+                    evidence_status = "bound"
+
+        fields = [
+            f"title: {title}",
+            f"body: {body}",
+            f"cues: {' | '.join(cues)}",
+            f"source_evidence_status: {evidence_status}",
+        ]
+        if evidence_snippets:
+            fields.append("source_evidence:\n" + "\n---\n".join(evidence_snippets))
+        return "\n".join(fields)[:6000], {
+            "evidence_status": evidence_status,
+            "evidence_count": len(evidence_snippets),
+        }
+
+    async def _apply_simulation_reranker_shadow(
+        self,
+        query: str,
+        candidates: list[dict[str, Any]],
+        retrieval_budget: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Attach scalar scores to explicit-simulation debug only.
+
+        This method never writes ``rerank_score``, ``score`` or
+        ``combined_score``.  Normal ranking and admission therefore remain
+        byte-for-byte consumers of their pre-shadow values.
+        """
+
+        rerank_debug = retrieval_budget.setdefault("rerank", {})
+        if not candidates:
+            rerank_debug.update(called=False, score_count=0)
+            return candidates
+        engine = getattr(self, "reranker_engine", None)
+        shadow_ready = bool(getattr(engine, "shadow_ready", False))
+        shadow_call = getattr(engine, "rerank_shadow", None)
+        rerank_debug.update(
+            simulation_shadow_enabled=bool(
+                getattr(engine, "simulation_shadow_enabled", False)
+            ),
+            model=str(getattr(engine, "model", "")),
+            decision_applied=False,
+        )
+        if not shadow_ready or not callable(shadow_call):
+            rerank_debug.update(
+                called=False,
+                score_count=0,
+                reason=(
+                    "simulation_shadow_disabled"
+                    if not bool(getattr(engine, "simulation_shadow_enabled", False))
+                    else "simulation_shadow_credentials_unavailable"
+                ),
+            )
+            return candidates
+
+        candidate_limit = min(
+            len(candidates),
+            max(1, int(getattr(engine, "candidate_limit", 20) or 20)),
+        )
+        ranked_pool = sorted(
+            enumerate(candidates),
+            key=lambda pair: self._bucket_rerank_candidate_priority(query, pair[1]),
+        )[:candidate_limit]
+        documents: list[str] = []
+        document_meta: list[dict[str, Any]] = []
+        recall_ablation_mode = str(
+            (retrieval_budget.get("recall_ablation") or {}).get("mode") or "normal"
+        )
+        for _original_index, item in ranked_pool:
+            document, meta = self._simulation_reranker_shadow_document(
+                item.get("bucket") or {},
+                include_cues=recall_ablation_mode != "without_cues",
+            )
+            documents.append(document)
+            document_meta.append(meta)
+
+        rerank_debug.update(
+            called=True,
+            candidate_count=len(documents),
+            score_count=0,
+            reason="simulation_shadow_call_pending",
+        )
+        try:
+            results = await shadow_call(query, documents, top_n=len(documents))
+        except Exception as exc:
+            logger.warning("Simulation reranker shadow failed: %s", exc)
+            rerank_debug.update(reason="simulation_shadow_failed", error=type(exc).__name__)
+            results = []
+        by_index = {
+            int(result.index): self._clamp(self._safe_float(result.score, 0.0))
+            for result in results or []
+            if 0 <= int(result.index) < len(ranked_pool)
+        }
+        for local_index, (_original_index, item) in enumerate(ranked_pool):
+            item["reranker_shadow_called"] = True
+            item["reranker_shadow_model"] = str(getattr(engine, "model", ""))
+            item["reranker_shadow_evidence_status"] = str(
+                document_meta[local_index].get("evidence_status") or "unknown"
+            )
+            item["reranker_shadow_evidence_count"] = int(
+                document_meta[local_index].get("evidence_count") or 0
+            )
+            if local_index in by_index:
+                item["reranker_shadow_score"] = round(by_index[local_index], 4)
+
+        rerank_debug["score_count"] = len(by_index)
+        rerank_debug["reason"] = (
+            "scored_shadow_only" if by_index else "simulation_shadow_no_scores"
+        )
+        rows = (retrieval_budget.get("cheap_retrieval") or {}).get("candidates")
+        if isinstance(rows, list):
+            item_by_id = {
+                str((item.get("bucket") or {}).get("id") or ""): item
+                for item in candidates
+            }
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                item = item_by_id.get(str(row.get("bucket_id") or ""))
+                if item is not None:
+                    row["reranker_shadow"] = self._retrieval_budget_candidate_debug_row(
+                        item
+                    )["reranker_shadow"]
+        return candidates
 
     @staticmethod
     def _finalize_retrieval_budget_candidate_debug(
@@ -13537,7 +13794,14 @@ class GatewayService:
             if bucket_id in selected_ids:
                 row["final_admission_source"] = "selected_after_normal_admission"
             elif bucket_id in suppression_by_id:
-                row["final_admission_source"] = suppression_by_id[bucket_id]
+                reason = suppression_by_id[bucket_id]
+                row["final_admission_source"] = reason
+                if reason.startswith("pending_reranker_shadow"):
+                    reranker_shadow = row.get("reranker_shadow")
+                    if isinstance(reranker_shadow, dict):
+                        reranker_shadow["admission_status"] = reason
+                        if not reranker_shadow.get("called"):
+                            reranker_shadow["status"] = reason
 
     async def _retrieval_budget_sentinel_debug(
         self,
@@ -14780,6 +15044,11 @@ class GatewayService:
                     candidate_count=len(candidate_ids),
                 )
             )
+            scored_candidates = await self._apply_simulation_reranker_shadow(
+                policy_query,
+                scored_candidates,
+                retrieval_budget,
+            )
         stage_started_at = time.perf_counter()
         if allow_rerank:
             scored_candidates = await self._rerank_scored_bucket_candidates(query, scored_candidates)
@@ -14811,9 +15080,59 @@ class GatewayService:
                     }
                     suppressed.append(item)
                     continue
+                if budget_shadow and item.get("budget_gray_zone_qualified"):
+                    item["admission_reason"] = "pending_reranker_shadow_gray_zone"
+                    item["recall_policy_debug"] = {
+                        "simulation_shadow": True,
+                        "reranker_required": True,
+                        "body_semantic_score": round(
+                            self._safe_float(item.get("semantic_score"), 0.0),
+                            4,
+                        ),
+                        "reranker_entry_floor": round(
+                            self._safe_float(
+                                item.get("budget_reranker_entry_floor"),
+                                0.0,
+                            ),
+                            4,
+                        ),
+                        "absolute_floor": round(
+                            self._safe_float(item.get("budget_floor"), 0.0),
+                            4,
+                        ),
+                        "auto": True,
+                    }
+                    suppressed.append(item)
+                    continue
                 if self._admit_bucket_for_recall(policy_query, item):
                     admitted.append(item)
                 else:
+                    normal_reason = str(item.get("admission_reason") or "")
+                    if (
+                        budget_shadow
+                        and item.get("budget_reranker_eligible")
+                        and self._is_canonical_scene_bucket(item.get("bucket"))
+                        and normal_reason
+                        in {
+                            "scene_below_semantic_route_threshold",
+                            "scene_without_authored_or_semantic_evidence",
+                        }
+                    ):
+                        item["admission_reason"] = (
+                            "pending_reranker_shadow_route_guard"
+                            if normal_reason == "scene_below_semantic_route_threshold"
+                            else "pending_reranker_shadow_candidate_only"
+                        )
+                        item["recall_policy_debug"] = {
+                            **(
+                                item.get("recall_policy_debug")
+                                if isinstance(item.get("recall_policy_debug"), dict)
+                                else {}
+                            ),
+                            "simulation_shadow": True,
+                            "reranker_required": True,
+                            "normal_admission_reason": normal_reason,
+                        }
                     suppressed.append(item)
             return admitted, suppressed
 

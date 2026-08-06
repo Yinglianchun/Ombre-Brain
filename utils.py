@@ -555,6 +555,16 @@ def load_config(config_path: str = None) -> dict:
             "on",
         )
 
+    env_reranker_simulation_shadow_enabled = os.environ.get(
+        "OMBRE_RERANKER_SIMULATION_SHADOW_ENABLED",
+        "",
+    )
+    if env_reranker_simulation_shadow_enabled:
+        config.setdefault("reranker", {})["simulation_shadow_enabled"] = (
+            env_reranker_simulation_shadow_enabled.lower()
+            in {"1", "true", "yes", "on"}
+        )
+
     env_recall_diagnostics_enabled = os.environ.get("OMBRE_RECALL_DIAGNOSTICS_ENABLED", "")
     if env_recall_diagnostics_enabled:
         config.setdefault("recall_diagnostics", {})["enabled"] = env_recall_diagnostics_enabled.lower() in (
