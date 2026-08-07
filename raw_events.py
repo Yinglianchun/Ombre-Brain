@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -258,30 +258,6 @@ class RawEventStore:
             conversation_id=conversation_id,
             session_id=session_id,
         )
-        conn = self._connect()
-        if safe_limit > 0:
-            rows = conn.execute(
-                f"""
-                SELECT e.*
-                FROM raw_events e
-                WHERE 1 = 1 {filters}
-                ORDER BY e.id DESC
-                LIMIT ?
-                """,
-                [*params, max(safe_limit, 500)],
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                f"""
-                SELECT e.*
-                FROM raw_events e
-                WHERE 1 = 1 {filters}
-                ORDER BY e.id DESC
-                """,
-                params,
-            ).fetchall()
-        conn.close()
-
         compare_tz = start_at.tzinfo or end_at.tzinfo
 
         def parse_local(value: Any) -> datetime | None:
@@ -310,6 +286,24 @@ class RawEventStore:
             start = start.replace(tzinfo=None)
         elif end.tzinfo is not None:
             end = end.replace(tzinfo=None)
+
+        # Keep the exact timezone-aware comparison below, but narrow the SQL
+        # query first so older ranges are not lost behind a recent-row LIMIT.
+        # One day of padding on each side covers ISO timestamps stored with a
+        # different UTC offset while still using idx_raw_events_created.
+        coarse_start = (start - timedelta(days=1)).date().isoformat()
+        coarse_end = (end + timedelta(days=1)).date().isoformat()
+        conn = self._connect()
+        rows = conn.execute(
+            f"""
+            SELECT e.*
+            FROM raw_events e
+            WHERE e.created_at >= ? AND e.created_at < ? {filters}
+            ORDER BY e.created_at DESC, e.id DESC
+            """,
+            [coarse_start, coarse_end, *params],
+        ).fetchall()
+        conn.close()
 
         selected: list[dict[str, Any]] = []
         for row in rows:
