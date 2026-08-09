@@ -80,6 +80,7 @@ from diary_sources import DiarySourceImporter
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
 from favorite_tags import has_favorite_memory_tag, has_favorite_policy_tag
+from fact_events import FactEventStore
 from gateway_state import GatewayStateStore
 from identity import identity_names
 from identity_semantics import IdentitySemanticStore
@@ -252,6 +253,7 @@ reminder_store = ReminderStore(config)                    # Standalone care memo
 narrative_roll_store = NarrativeRollStore(config)          # Reviewed sourced Narrative Projection arcs / 审阅后发布的叙事卷
 narrative_revision_inbox_store = NarrativeRevisionInbox(config) # Derived source-to-roll review queue / 派生叙事修订箱
 scene_evidence_store = SceneEvidenceStore(config)           # Independent Scene/source evidence sidecar / Scene 原文证据旁路索引
+fact_event_store = FactEventStore(config)                    # Canonical raw-source Fact/Event store / 原文绑定事实与事件主存储
 legacy_memory_review_store = LegacyMemoryReviewStore(config) # Admin-only legacy lifecycle / bridge review cards
 legacy_memory_lifecycle_publisher = LegacyMemoryLifecyclePublisher(
     config,
@@ -3695,6 +3697,7 @@ async def health_check(request):
             },
             "scene_linker": scene_linker.status(),
             "diary": diary_store.stats(),
+            "fact_events": fact_event_store.stats(),
             "mcp_surface": mcp.surface_status(),
             "memory_object_writes": memory_object_write_status(config),
         })
@@ -11606,17 +11609,32 @@ async def recall_memory(
 
 @mcp.tool()
 async def read_memory(
-    memory_type: Literal["scene", "shadow", "narrative"],
+    memory_type: Literal["scene", "shadow", "narrative", "fact", "event"],
     memory_id: str,
     include_content: bool = True,
 ) -> dict:
-    """按明确类型和 ID 精确读取一个对象，不做语义搜索或关联扩展。memory_type 选 scene、shadow、narrative；memory_id 填真实 ID。读取最新窗影时用 shadow + latest。"""
+    """按明确类型和 ID 精确读取一个对象，不做语义搜索或关联扩展。memory_type 选 scene、shadow、narrative、fact、event；memory_id 填真实 ID。读取最新窗影时用 shadow + latest。"""
     safe_id = _coerce_memory_id(memory_id)
     safe_type = str(memory_type or "").strip().lower()
     if not safe_id:
         return {"status": "invalid", "reason": "memory_id_required", "memory_type": safe_type}
     if safe_type == "narrative":
         return await _read_narrative_memory(safe_id)
+    if safe_type in {"fact", "event"}:
+        try:
+            item = fact_event_store.read(safe_id, include_sources=bool(include_content))
+        except ValueError as exc:
+            return {"status": "invalid", "reason": str(exc), "memory_type": safe_type}
+        if not item or str(item.get("item_type") or "") != safe_type:
+            return {"status": "not_found", "memory_type": safe_type, "memory_id": safe_id}
+        if not include_content:
+            item = {**item, "body": ""}
+        return {
+            "status": "ok",
+            "mode": "fact_event",
+            "ordinary_recall": False,
+            "item": item,
+        }
     if safe_type == "shadow":
         if safe_id.lower() == "latest":
             window = window_shadow_store.latest()
@@ -11669,6 +11687,32 @@ def _scene_write_contract_result(
     if error:
         lines.append(f"[evidence_error:{_clip_text(error, 240)}]")
     return "\n".join(line for line in lines if line)
+
+
+def _archive_scene_covered_events(
+    scene_id: str,
+    evidence_refs: list[dict[str, Any]],
+) -> None:
+    """Archive only Events whose complete raw-source set is covered by a Scene."""
+
+    try:
+        result = fact_event_store.archive_events_covered_by_scene(scene_id, evidence_refs)
+        if int(result.get("archived") or 0):
+            logger.info(
+                "Archived %s Event items covered by Scene %s",
+                result["archived"],
+                scene_id,
+            )
+    except Exception as exc:
+        logger.warning("Fact/Event Scene coverage update failed: %s", exc)
+
+
+def _reconcile_scene_covered_events() -> dict[str, Any]:
+    """Apply current Scene evidence coverage after a Fact/Event batch write."""
+
+    return fact_event_store.archive_events_covered_by_scenes(
+        scene_evidence_store.list_active_scene_groups()
+    )
 
 
 @mcp.tool()
@@ -11734,6 +11778,10 @@ async def write_scene(
             evidence_status="error",
             error=str(exc),
         )
+    _archive_scene_covered_events(
+        requested_scene_id,
+        list(binding.get("evidence_refs") or normalized_refs),
+    )
     return _scene_write_contract_result(
         write_result,
         scene_id=requested_scene_id,
@@ -11769,6 +11817,10 @@ async def bind_scene_evidence(
     except Exception as exc:
         logger.warning("Scene evidence binding failed: %s", exc)
         return {"status": "error", "error": str(exc), "scene_id": safe_scene_id}
+    _archive_scene_covered_events(
+        safe_scene_id,
+        list(binding.get("evidence_refs") or evidence_refs),
+    )
     return {
         "status": "already_bound" if binding.get("idempotent") else "bound",
         **binding,
@@ -13760,6 +13812,85 @@ async def api_search_raw(request):
         return JSONResponse(result)
     except Exception as exc:
         logger.warning("raw search failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/fact-events/batch", methods=["POST"])
+async def api_write_fact_events(request):
+    """Write reviewed source-bound Facts and Events in one idempotent batch."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    try:
+        result = fact_event_store.write_many(body.get("items"))
+        result["scene_coverage"] = _reconcile_scene_covered_events()
+        return JSONResponse(result)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Fact/Event batch write failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/fact-events", methods=["GET"])
+async def api_list_fact_events(request):
+    """List canonical Facts or Events by exact source-derived local date."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    params = request.query_params
+    include_sources = str(params.get("include_sources") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    try:
+        result = fact_event_store.list(
+            item_type=str(params.get("type") or ""),
+            status=str(params.get("status") or "active"),
+            date=str(params.get("date") or ""),
+            limit=_int_between(params.get("limit"), 100, 1, 500),
+            offset=_int_between(params.get("offset"), 0, 0, 1_000_000),
+            include_sources=include_sources,
+        )
+        return JSONResponse(result)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Fact/Event list failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/fact-events/injected", methods=["POST"])
+async def api_mark_fact_events_injected(request):
+    """Record only successfully injected Fact/Event IDs for later surfacing policy."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    try:
+        return JSONResponse(fact_event_store.mark_injected(body.get("item_ids")))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Fact/Event injection count failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 

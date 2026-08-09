@@ -112,6 +112,9 @@ def main() -> None:
             "supporting",
             "adjacent_context",
         }
+        grouped = store.list_active_scene_groups()
+        assert list(grouped) == ["scene_test"]
+        assert len(grouped["scene_test"]) == 3
 
     print("scene evidence binding verification passed")
 

@@ -344,6 +344,28 @@ class SceneEvidenceStore:
             conn.close()
         return [_row_to_ref(row) for row in rows]
 
+    def list_active_scene_groups(self) -> dict[str, list[dict[str, Any]]]:
+        """Return active evidence grouped by Scene for exact coverage checks."""
+
+        if not os.path.exists(self.db_path):
+            return {}
+        self._init_db()
+        conn = self._connect()
+        try:
+            scene_rows = conn.execute(
+                "SELECT DISTINCT scene_id FROM scene_evidence ORDER BY scene_id"
+            ).fetchall()
+            return {
+                str(row["scene_id"]): [
+                    _row_to_ref(ref)
+                    for ref in _active_scene_evidence_rows(conn, str(row["scene_id"]))
+                ]
+                for row in scene_rows
+                if str(row["scene_id"])
+            }
+        finally:
+            conn.close()
+
 
 def _latest_evidence_action(conn: sqlite3.Connection, evidence_id: int) -> str:
     row = conn.execute(
