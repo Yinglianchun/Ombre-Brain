@@ -1061,6 +1061,67 @@ function sereinMemoryBridge() {
         }
       });
 
+      server.middlewares.use("/__serein/live/fact-events", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const type = body.type === "fact" ? "fact" : "event";
+          const status = ["active", "archived", "superseded", "all"].includes(body.status)
+            ? body.status
+            : "all";
+          const params = new URLSearchParams({
+            type,
+            status,
+            include_sources: "1",
+            limit: "500",
+          });
+          const upstream = await callOmbreDashboard(`/api/fact-events?${params.toString()}`);
+          response.statusCode = upstream.status;
+          response.end(JSON.stringify(upstream.payload));
+        } catch (error) {
+          response.statusCode = error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            error: "fact_events_read_failed",
+            message: error?.name === "AbortError" ? "读取事实和事件超时。" : "暂时没有读到事实和事件。",
+            items: [],
+          }));
+        }
+      });
+
+      server.middlewares.use("/__serein/memory/revise-fact-event", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const upstream = await callOmbreDashboard("/api/fact-events/revise", {
+            method: "POST",
+            body: {
+              item_id: String(body.itemId || "").trim(),
+              title: body.title,
+              body: body.body,
+              importance: body.importance,
+            },
+          });
+          response.statusCode = upstream.status;
+          response.end(JSON.stringify(upstream.payload));
+        } catch (error) {
+          response.statusCode = error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            error: "fact_event_revision_failed",
+            message: error?.name === "AbortError" ? "保存修订超时。" : "没有完成这次修订。",
+          }));
+        }
+      });
+
       server.middlewares.use("/__serein/live/diaries", async (request, response) => {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
         if (request.method !== "POST") {

@@ -336,6 +336,73 @@ class FactEventStore:
                 "offset": safe_offset,
             }
 
+    def revise(
+        self,
+        item_id: str,
+        *,
+        title: Any = None,
+        body: Any = None,
+        importance: Any = None,
+    ) -> dict[str, Any]:
+        """Revise prose by superseding the item; update importance as metadata."""
+
+        current = self.read(item_id, include_sources=True)
+        if current is None:
+            raise ValueError("item not found")
+        if str(current["status"]) not in {"active", "archived"}:
+            raise ValueError("only active or archived items may be revised")
+
+        item_type = str(current["item_type"])
+        next_title = str(current["title"] if title is None else title).strip()
+        next_body = str(current["body"] if body is None else body).strip()
+        next_importance = current["importance"] if importance is None else importance
+        candidate = _normalize_item(
+            {
+                "type": item_type,
+                "title": next_title,
+                "body": next_body,
+                "importance": next_importance,
+                "supersedes_item_id": str(current["item_id"]),
+                "source_refs": current["source_refs"],
+            }
+        )
+
+        if candidate["fingerprint"] == str(current["fingerprint"]):
+            now = _now()
+            with closing(self._connect()) as conn:
+                conn.execute(
+                    "UPDATE fact_events SET importance=?, updated_at=? WHERE item_id=?",
+                    (candidate["importance"], now, str(current["item_id"])),
+                )
+                conn.commit()
+            return {
+                "ok": True,
+                "status": "updated",
+                "item": self.read(str(current["item_id"]), include_sources=True),
+            }
+
+        result = self.write_many(
+            [
+                {
+                    "type": item_type,
+                    "title": next_title,
+                    "body": next_body,
+                    "importance": candidate["importance"],
+                    "supersedes_item_id": str(current["item_id"]),
+                    "source_refs": current["source_refs"],
+                }
+            ]
+        )
+        written = result["items"][0]
+        if written["status"] != "inserted":
+            raise ValueError(written.get("error") or "revision did not create a new item")
+        return {
+            "ok": True,
+            "status": "superseded",
+            "previous_item_id": str(current["item_id"]),
+            "item": self.read(str(written["item_id"]), include_sources=True),
+        }
+
     def mark_injected(self, item_ids: Any) -> dict[str, Any]:
         ids = _normalize_ids(item_ids, "item_ids", limit=500)
         if not ids or not os.path.exists(self.db_path):

@@ -81,6 +81,121 @@ function ombreSourceIdForScene(scene) {
   return source ? source.id.slice("manual_source:".length) : "";
 }
 
+const memoryTypeLabels = { scene: "Scene", event: "事件", fact: "事实" };
+
+function sourceTimeLabel(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || "").replace("T", " ").slice(0, 16);
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date).replaceAll("/", "-");
+}
+
+function FactEventDetail({ item, onClose, onRevised }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(() => ({
+    title: item.title || "",
+    body: item.body || "",
+    importance: Number(item.importance) || 1,
+  }));
+  const [state, setState] = useState("idle");
+  const [message, setMessage] = useState("");
+
+  const save = async () => {
+    if (!draft.body.trim() || (item.item_type === "event" && !draft.title.trim())) return;
+    setState("saving");
+    setMessage("");
+    try {
+      const response = await fetch("/__serein/memory/revise-fact-event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ itemId: item.item_id, ...draft }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.item) throw new Error(payload.message || payload.error || "保存失败");
+      onRevised(item.item_id, payload.item);
+      setEditing(false);
+      setState("saved");
+      setMessage(payload.status === "superseded" ? "已保存为新的修订版" : "重要度已更新");
+    } catch (error) {
+      setState("error");
+      setMessage(error.message || "保存失败");
+    }
+  };
+  const timeLabel = item.local_start_time === item.local_end_time
+    ? item.local_start_time
+    : `${item.local_start_time}–${item.local_end_time}`;
+
+  return (
+    <div className="scene-detail__content fact-event-detail" key={item.item_id}>
+      <button className="scene-detail__close" type="button" aria-label="关闭详情" onClick={onClose}>
+        <X size={24} weight="light" aria-hidden="true" />
+      </button>
+      <header className="scene-detail__header">
+        <div className="scene-detail__header-top">
+          <time dateTime={item.local_date}>{item.local_date} · {timeLabel}</time>
+          <div className="scene-detail__edit-actions">
+            {editing ? (
+              <>
+                <button type="button" onClick={() => setEditing(false)} disabled={state === "saving"}>取消</button>
+                <button className="is-primary" type="button" onClick={save} disabled={state === "saving"}>
+                  <Check size={14} weight="light" aria-hidden="true" />
+                  {state === "saving" ? "保存中…" : "保存修订"}
+                </button>
+              </>
+            ) : (
+              <button type="button" onClick={() => setEditing(true)}>
+                <PencilSimple size={14} weight="light" aria-hidden="true" />修改
+              </button>
+            )}
+          </div>
+        </div>
+        {editing && item.item_type === "event" ? (
+          <input className="scene-editor__title" value={draft.title} maxLength={160} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
+        ) : <h2>{item.title || item.body}</h2>}
+        <div className="scene-detail__meta">
+          <span>{memoryTypeLabels[item.item_type]}</span>
+          <span><LinkSimple size={15} weight="light" aria-hidden="true" />{item.source_refs?.length || 0} 条原文</span>
+          <label className="fact-event-importance">
+            重要度
+            <select value={draft.importance} disabled={!editing} onChange={(event) => setDraft({ ...draft, importance: Number(event.target.value) })}>
+              {[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}
+            </select>
+          </label>
+          {item.status !== "active" ? <span>{item.status === "archived" ? "已归档" : "旧版本"}</span> : null}
+        </div>
+        {message ? <p className={`fact-event-detail__message${state === "error" ? " is-error" : ""}`} role={state === "error" ? "alert" : "status"}>{message}</p> : null}
+      </header>
+      {editing ? (
+        <div className="scene-editor fact-event-editor">
+          <label>
+            <span>{item.item_type === "event" ? "经过" : "事实"}</span>
+            <textarea rows={item.item_type === "event" ? 9 : 4} maxLength={item.item_type === "event" ? 1600 : 500} value={draft.body} onChange={(event) => setDraft({ ...draft, body: event.target.value })} />
+          </label>
+          <p>修改正文会留下旧版本，并继续沿用已绑定的原文。</p>
+        </div>
+      ) : item.item_type === "event" ? (
+        <div className="scene-detail__body"><p>{item.body}</p></div>
+      ) : null}
+      <section className="fact-event-sources">
+        <header><h3>原文</h3><span>{item.source_refs?.length || 0}</span></header>
+        {(item.source_refs || []).map((source) => (
+          <article key={`${source.source_system}:${source.session_id}:${source.message_id}`}>
+            <div><strong>{source.role === "user" ? "小雨" : "Haven"}</strong><time>{sourceTimeLabel(source.created_at)}</time></div>
+            <p>{source.content || `原文 #${source.message_id}`}</p>
+          </article>
+        ))}
+      </section>
+    </div>
+  );
+}
+
 function SceneDomainEditor({ scene, onSaved }) {
   const currentDomain = canonicalDomainPolicies.find((item) => item.key === scene.bucketDomain);
   const sourceId = ombreSourceIdForScene(scene);
@@ -159,11 +274,14 @@ function SceneDomainEditor({ scene, onSaved }) {
 
 export function MemoryPage() {
   const [sceneRecords, setSceneRecords] = useState(readMemoryScenes);
+  const [memoryType, setMemoryType] = useState("scene");
+  const [factEvents, setFactEvents] = useState({ fact: [], event: [] });
+  const [factEventLoadState, setFactEventLoadState] = useState("loading");
+  const [factEventError, setFactEventError] = useState("");
   const [query, setQuery] = useState("");
   const [view, setView] = useState("all");
-  const [timeRange, setTimeRange] = useState("month");
-  const [selectedDate, setSelectedDate] = useState("");
   const [selectedSceneId, setSelectedSceneId] = useState(null);
+  const [selectedFactEventId, setSelectedFactEventId] = useState(null);
   const [editingSceneId, setEditingSceneId] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
   const [annotationDraft, setAnnotationDraft] = useState("");
@@ -193,6 +311,37 @@ export function MemoryPage() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      setFactEventLoadState("loading");
+      setFactEventError("");
+      try {
+        const entries = await Promise.all(["fact", "event"].map(async (type) => {
+          const response = await fetch("/__serein/live/fact-events", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type, status: "all" }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(payload.message || payload.error || "读取失败");
+          return [type, Array.isArray(payload.items) ? payload.items : []];
+        }));
+        if (!cancelled) {
+          setFactEvents(Object.fromEntries(entries));
+          setFactEventLoadState("ready");
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setFactEventLoadState("error");
+          setFactEventError(error.message || "暂时没有读到事实和事件。");
+        }
+      }
+    };
+    load();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
     const openFromRecall = (event) => {
       const sourceId = String(event.detail?.sourceId || "").trim();
       if (sourceId) setPendingSourceSceneId(sourceId);
@@ -212,25 +361,6 @@ export function MemoryPage() {
     window.localStorage.removeItem("serein.memory.open-source-id");
   }, [pendingSourceSceneId, sceneRecords]);
 
-  const latestSceneDate = useMemo(() => (
-    sceneRecords.reduce((latest, scene) => (
-      scene.date > latest ? scene.date : latest
-    ), "")
-  ), [sceneRecords]);
-  const earliestSceneDate = useMemo(() => (
-    sceneRecords.reduce((earliest, scene) => (
-      !earliest || scene.date < earliest ? scene.date : earliest
-    ), "")
-  ), [sceneRecords]);
-  const recentMonthStart = useMemo(() => {
-    if (!latestSceneDate) return "";
-    const [year, month, day] = latestSceneDate.split("-").map(Number);
-    const cutoff = new Date(Date.UTC(year, month - 1, day));
-    cutoff.setUTCMonth(cutoff.getUTCMonth() - 1);
-    return cutoff.toISOString().slice(0, 10);
-  }, [latestSceneDate]);
-  const latestSceneYear = latestSceneDate.slice(0, 4);
-
   const filteredScenes = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
     return sceneRecords.filter((scene) => {
@@ -239,30 +369,34 @@ export function MemoryPage() {
         || (view === "favorite" && scene.favorite)
         || (view === "sunken" && scene.status === "已沉底")
         || (view === "emergent" && scene.status === "可浮现");
-      const matchesTime = timeRange === "month"
-        ? scene.date >= recentMonthStart
-        : timeRange === "year"
-          ? scene.date.startsWith(`${latestSceneYear}-`)
-          : scene.date === selectedDate;
       const haystack = [
         scene.title,
         scene.excerpt,
         ...scene.body,
         ...scene.annotations.map((annotation) => `${annotation.author} ${annotation.content}`),
       ].join(" ").toLocaleLowerCase("zh-CN");
-      return matchesView && matchesTime && (!normalizedQuery || haystack.includes(normalizedQuery));
+      return matchesView && (!normalizedQuery || haystack.includes(normalizedQuery));
     });
   }, [
-    latestSceneYear,
     query,
-    recentMonthStart,
     sceneRecords,
-    selectedDate,
-    timeRange,
     view,
   ]);
 
+  const activeFactEvents = useMemo(() => {
+    if (memoryType === "scene") return [];
+    const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
+    return (factEvents[memoryType] || []).filter((item) => {
+      const matchesView = view === "archived" ? item.status === "archived" : item.status === "active";
+      const haystack = `${item.title || ""} ${item.body || ""}`.toLocaleLowerCase("zh-CN");
+      return matchesView && (!normalizedQuery || haystack.includes(normalizedQuery));
+    });
+  }, [factEvents, memoryType, query, view]);
+
   const selectedScene = sceneRecords.find((scene) => scene.id === selectedSceneId) ?? null;
+  const selectedFactEvent = memoryType === "scene"
+    ? null
+    : (factEvents[memoryType] || []).find((item) => item.item_id === selectedFactEventId) ?? null;
   const selectedSceneCount = selectedSceneIds.size;
   const allFilteredScenesSelected = Boolean(filteredScenes.length)
     && filteredScenes.every((scene) => selectedSceneIds.has(scene.id));
@@ -417,18 +551,38 @@ export function MemoryPage() {
     setAnnotationComposerOpen(false);
   };
 
+  const switchMemoryType = (type) => {
+    setMemoryType(type);
+    setView("all");
+    setQuery("");
+    setSelectedSceneId(null);
+    setSelectedFactEventId(null);
+    exitSelectionMode();
+  };
+
+  const acceptFactEventRevision = (previousId, revisedItem) => {
+    setFactEvents((current) => ({
+      ...current,
+      [revisedItem.item_type]: current[revisedItem.item_type]
+        .filter((item) => item.item_id !== previousId && item.item_id !== revisedItem.item_id)
+        .concat(revisedItem),
+    }));
+    setSelectedFactEventId(revisedItem.item_id);
+  };
+
   const selectedSceneIsEditing = selectedScene && editingSceneId === selectedScene.id;
+  const detailOpen = Boolean(selectedScene || selectedFactEvent);
 
   return (
     <div className="memory-layout">
       <aside className="memory-filters" aria-label="记忆筛选">
         <label className="memory-search">
           <MagnifyingGlass size={18} weight="light" aria-hidden="true" />
-          <span className="sr-only">搜索 Scene</span>
+          <span className="sr-only">搜索{memoryTypeLabels[memoryType]}</span>
           <input
             type="search"
             value={query}
-            placeholder="搜索 Scene"
+            placeholder={`搜索${memoryTypeLabels[memoryType]}`}
             onChange={(event) => setQuery(event.target.value)}
           />
           {query ? (
@@ -438,8 +592,24 @@ export function MemoryPage() {
           ) : null}
         </label>
 
+        <div className="memory-type-switch" aria-label="记忆类型">
+          {["scene", "event", "fact"].map((type) => (
+            <button
+              className={memoryType === type ? "is-active" : ""}
+              type="button"
+              aria-pressed={memoryType === type}
+              onClick={() => switchMemoryType(type)}
+              key={type}
+            >
+              {memoryTypeLabels[type]}
+            </button>
+          ))}
+        </div>
+
         <div className="memory-filter-group">
           <h2>视图</h2>
+          {memoryType === "scene" ? (
+            <>
           <button
             className={view === "all" ? "is-active" : ""}
             type="button"
@@ -454,11 +624,7 @@ export function MemoryPage() {
             className={view === "self" ? "is-active" : ""}
             type="button"
             aria-pressed={view === "self"}
-            onClick={() => {
-              setView("self");
-              setTimeRange("year");
-              setSelectedDate("");
-            }}
+            onClick={() => setView("self")}
           >
             <UserFocus size={17} weight="light" aria-hidden="true" />
             <span>自我</span>
@@ -494,57 +660,39 @@ export function MemoryPage() {
             <span>可浮现</span>
             <small>{sceneRecords.filter((scene) => scene.status === "可浮现").length}</small>
           </button>
-        </div>
-
-        <div className="memory-filter-group">
-          <h2>时间范围</h2>
-          <button
-            className={timeRange === "month" ? "is-active" : ""}
-            type="button"
-            aria-pressed={timeRange === "month"}
-            onClick={() => setTimeRange("month")}
-          >
-            <CalendarBlank size={17} weight="light" aria-hidden="true" />
-            <span>最近一月</span>
-          </button>
-          <button
-            className={timeRange === "year" ? "is-active" : ""}
-            type="button"
-            aria-pressed={timeRange === "year"}
-            onClick={() => setTimeRange("year")}
-          >
-            <CalendarBlank size={17} weight="light" aria-hidden="true" />
-            <span>{latestSceneYear ? `${latestSceneYear} 年` : "本年"}</span>
-          </button>
-          <label className={`memory-date-filter${timeRange === "date" ? " is-active" : ""}`}>
-            <CalendarBlank size={17} weight="light" aria-hidden="true" />
-            <span>具体日期</span>
-            <input
-              type="date"
-              min={earliestSceneDate}
-              max={latestSceneDate}
-              value={selectedDate}
-              aria-label="按具体日期筛选 Scene"
-              onChange={(event) => {
-                setSelectedDate(event.target.value);
-                setTimeRange(event.target.value ? "date" : "month");
-              }}
-            />
-          </label>
+            </>
+          ) : (
+            <>
+              <button className={view === "all" ? "is-active" : ""} type="button" aria-pressed={view === "all"} onClick={() => setView("all")}>
+                <ListBullets size={17} weight="light" aria-hidden="true" />
+                <span>正在使用</span>
+                <small>{(factEvents[memoryType] || []).filter((item) => item.status === "active").length}</small>
+              </button>
+              <button className={view === "archived" ? "is-active" : ""} type="button" aria-pressed={view === "archived"} onClick={() => setView("archived")}>
+                <Archive size={17} weight="light" aria-hidden="true" />
+                <span>已归档</span>
+                <small>{(factEvents[memoryType] || []).filter((item) => item.status === "archived").length}</small>
+              </button>
+            </>
+          )}
         </div>
 
       </aside>
 
-      <div className={`memory-workspace${selectedScene ? " is-detail-open" : ""}`}>
+      <div className={`memory-workspace${detailOpen ? " is-detail-open" : ""}`}>
         <section className="memory-stream" aria-labelledby="memory-title">
           <header className="memory-stream__header">
             <div>
               <h1 id="memory-title">记忆</h1>
-              <p>Scene 按发生时间排列，保留它们原来的语气。</p>
+              <p>{memoryType === "scene"
+                ? "Scene 按发生时间排列，保留它们原来的语气。"
+                : memoryType === "event"
+                  ? "事件只记录经过，不替我们判断它意味着什么。"
+                  : "事实保持短小、独立，并带着它来自哪一刻。"}</p>
             </div>
             <div className="memory-stream__header-actions">
-              <span aria-live="polite">{filteredScenes.length} 个 Scene</span>
-              {!selectionMode ? (
+              <span aria-live="polite">{memoryType === "scene" ? filteredScenes.length : activeFactEvents.length} 个{memoryTypeLabels[memoryType]}</span>
+              {memoryType === "scene" && !selectionMode ? (
                 <button type="button" onClick={enterSelectionMode}>
                   <CheckSquare size={15} weight="light" aria-hidden="true" />
                   批量整理
@@ -553,7 +701,7 @@ export function MemoryPage() {
             </div>
           </header>
 
-          {selectionMode ? (
+          {memoryType === "scene" && selectionMode ? (
             <div className="memory-batch-toolbar" aria-label="批量整理 Scene">
               <div>
                 <button type="button" onClick={exitSelectionMode}>退出批量</button>
@@ -603,7 +751,7 @@ export function MemoryPage() {
             </div>
           ) : null}
 
-          {filteredScenes.length ? (
+          {memoryType === "scene" ? (filteredScenes.length ? (
             <ol className={`scene-timeline${selectionMode ? " is-batch-mode" : ""}`}>
               {filteredScenes.map((scene, index) => {
                 const isSelected = selectedSceneId === scene.id;
@@ -671,11 +819,48 @@ export function MemoryPage() {
                 onClick={() => {
                   setQuery("");
                   setView("all");
-                  setTimeRange("year");
                 }}
               >
                 查看全部 Scene
               </button>
+            </div>
+          )) : factEventLoadState === "loading" ? (
+            <div className="memory-empty" role="status"><CalendarBlank size={24} weight="light" /><h2>正在翻这一页</h2></div>
+          ) : factEventLoadState === "error" ? (
+            <div className="memory-empty" role="alert"><h2>暂时没有读到</h2><p>{factEventError}</p></div>
+          ) : activeFactEvents.length ? (
+            <ol className="scene-timeline fact-event-timeline">
+              {activeFactEvents.map((item, index) => {
+                const isSelected = selectedFactEventId === item.item_id;
+                const timeLabel = item.local_start_time === item.local_end_time
+                  ? item.local_start_time
+                  : `${item.local_start_time}–${item.local_end_time}`;
+                return (
+                  <li className={`scene-entry${isSelected ? " is-selected" : ""}`} key={item.item_id} style={{ "--scene-index": index }}>
+                    <span className="scene-entry__marker" aria-hidden="true" />
+                    <button className="scene-entry__button" type="button" aria-pressed={isSelected} aria-controls="scene-detail" onClick={() => setSelectedFactEventId(item.item_id)}>
+                      <time dateTime={item.local_date}>{item.local_date} · {timeLabel}</time>
+                      {item.item_type === "event" ? (
+                        <span className="scene-entry__title"><strong>{item.title}</strong></span>
+                      ) : null}
+                      <p className={`scene-entry__excerpt${item.item_type === "fact" ? " is-fact" : ""}`}>{item.body}</p>
+                      <span className="scene-entry__meta">
+                        <span><LinkSimple size={15} weight="light" aria-hidden="true" />{item.source_refs?.length || 0} 条原文</span>
+                        <span>重要度 {item.importance}</span>
+                        {item.injection_count ? <span>已注入 {item.injection_count} 次</span> : null}
+                      </span>
+                      <CaretRight className="scene-entry__chevron" size={18} weight="light" aria-hidden="true" />
+                    </button>
+                  </li>
+                );
+              })}
+            </ol>
+          ) : (
+            <div className="memory-empty" role="status">
+              <MagnifyingGlass size={24} weight="light" aria-hidden="true" />
+              <h2>这一页还是空的</h2>
+              <p>换一天、换一个月，或者清空搜索。</p>
+              <button type="button" onClick={() => { setQuery(""); setView("all"); }}>查看全部</button>
             </div>
           )}
         </section>
@@ -684,8 +869,8 @@ export function MemoryPage() {
           className="scene-detail__veil"
           type="button"
           aria-label="关闭记忆详情"
-          tabIndex={selectedScene ? 0 : -1}
-          onClick={() => setSelectedSceneId(null)}
+          tabIndex={detailOpen ? 0 : -1}
+          onClick={() => { setSelectedSceneId(null); setSelectedFactEventId(null); }}
         />
 
         <aside
@@ -693,8 +878,8 @@ export function MemoryPage() {
           className="scene-detail"
           id="scene-detail"
           aria-label="记忆详情"
-          aria-hidden={!selectedScene}
-          inert={!selectedScene}
+          aria-hidden={!detailOpen}
+          inert={!detailOpen}
         >
           {selectedScene ? (
             <div className="scene-detail__content" key={selectedScene.id}>
@@ -914,6 +1099,12 @@ export function MemoryPage() {
                 ) : null}
               </div>
             </div>
+          ) : selectedFactEvent ? (
+            <FactEventDetail
+              item={selectedFactEvent}
+              onClose={() => setSelectedFactEventId(null)}
+              onRevised={acceptFactEventRevision}
+            />
           ) : null}
         </aside>
       </div>

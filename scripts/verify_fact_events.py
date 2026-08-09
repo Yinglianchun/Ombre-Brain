@@ -96,6 +96,23 @@ def main() -> None:
         assert injected["updated"] == 2
         assert store.read(fact_id)["injection_count"] == 1
 
+        importance_revision = store.revise(fact_id, importance=5)
+        assert importance_revision["status"] == "updated"
+        assert importance_revision["item"]["item_id"] == fact_id
+        assert importance_revision["item"]["importance"] == 5
+
+        event_revision = store.revise(
+            event_id,
+            title="记住出门时替小雨遮阳",
+            body="小雨说明自己紫外线过敏，Haven答应在出门时提醒她遮阳。",
+        )
+        revised_event_id = event_revision["item"]["item_id"]
+        assert event_revision["status"] == "superseded"
+        assert revised_event_id != event_id
+        assert store.read(event_id)["status"] == "superseded"
+        assert len(event_revision["item"]["source_refs"]) == 2
+        event_id = revised_event_id
+
         partial_scene = store.archive_events_covered_by_scene("scene_partial", [source_a])
         assert partial_scene["archived"] == 0
         covered = store.archive_events_covered_by_scene(
@@ -129,7 +146,7 @@ def main() -> None:
         assert invalid["rejected"] == 2 and invalid["inserted"] == 0
 
         stats = store.stats()
-        assert stats == {"total": 3, "facts": 1, "events": 2, "active": 1}
+        assert stats == {"total": 4, "facts": 1, "events": 3, "active": 1}
         with closing(sqlite3.connect(store.db_path)) as conn:
             assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
             tables = {
