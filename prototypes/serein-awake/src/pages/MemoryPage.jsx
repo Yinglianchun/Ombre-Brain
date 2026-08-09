@@ -115,7 +115,12 @@ function FactEventDetail({ item, onClose, onRevised }) {
       const response = await fetch("/__serein/memory/revise-fact-event", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ itemId: item.item_id, ...draft }),
+        body: JSON.stringify({
+          itemId: item.item_id,
+          ...(draft.title.trim() !== (item.title || "") ? { title: draft.title.trim() } : {}),
+          ...(draft.body.trim() !== item.body ? { body: draft.body.trim() } : {}),
+          ...(draft.importance !== Number(item.importance) ? { importance: draft.importance } : {}),
+        }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || !payload.item) throw new Error(payload.message || payload.error || "保存失败");
@@ -1101,6 +1106,7 @@ export function MemoryPage() {
             </div>
           ) : selectedFactEvent ? (
             <FactEventDetail
+              key={selectedFactEvent.item_id}
               item={selectedFactEvent}
               onClose={() => setSelectedFactEventId(null)}
               onRevised={acceptFactEventRevision}
