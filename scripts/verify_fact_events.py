@@ -101,6 +101,12 @@ def main() -> None:
         assert importance_revision["item"]["item_id"] == fact_id
         assert importance_revision["item"]["importance"] == 5
 
+        archived_fact = store.set_status(fact_id, "archived")
+        assert archived_fact["item"]["status"] == "archived"
+        assert store.list(item_type="fact", status="active")["count"] == 0
+        restored_fact = store.set_status(fact_id, "active")
+        assert restored_fact["item"]["status"] == "active"
+
         event_revision = store.revise(
             event_id,
             title="记住出门时替小雨遮阳",
@@ -124,6 +130,10 @@ def main() -> None:
         assert store.read(event_id)["covered_by_scene_id"] == "scene_covering_event"
         assert store.read(fact_id)["status"] == "active"
 
+        deleted_fact = store.set_status(fact_id, "tombstoned")
+        assert deleted_fact["item"]["status"] == "tombstoned"
+        assert store.list(item_type="fact", status="active")["count"] == 0
+
         late_event = {
             **event,
             "origin_id": "bridge-candidate-event-late",
@@ -146,7 +156,7 @@ def main() -> None:
         assert invalid["rejected"] == 2 and invalid["inserted"] == 0
 
         stats = store.stats()
-        assert stats == {"total": 4, "facts": 1, "events": 3, "active": 1}
+        assert stats == {"total": 4, "facts": 1, "events": 3, "active": 0}
         with closing(sqlite3.connect(store.db_path)) as conn:
             assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
             tables = {

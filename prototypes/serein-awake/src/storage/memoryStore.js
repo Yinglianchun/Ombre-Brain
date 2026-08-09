@@ -77,6 +77,7 @@ function mergeLiveMemoryProjection(snapshotScenes, liveProjection) {
       bucketDomain: String(liveScene.bucket_domain || fallback?.bucketDomain || ""),
       selfAnchor: liveScene.self_anchor === true || fallback?.selfAnchor === true,
       sourceKind: "ombre-live-readonly",
+      sourceUpdatedAt: String(liveScene.updated_at || "").trim(),
       sourceRevision: [liveScene.updated_at, liveScene.content_hash]
         .map((value) => String(value || "").trim())
         .filter(Boolean)
@@ -172,6 +173,9 @@ function normalizeMemoryScene(savedScene, fallbackScene) {
       ))
       : fallbackScene.annotations,
     sources: fallbackScene.sources,
+    sourceKind: fallbackScene.sourceKind,
+    sourceUpdatedAt: fallbackScene.sourceUpdatedAt,
+    sourceRevision: fallbackScene.sourceRevision,
     relatedScenes: fallbackScene.relatedScenes ?? [],
     relatedSceneIds: fallbackScene.relatedSceneIds,
     relationCount: fallbackScene.relationCount,

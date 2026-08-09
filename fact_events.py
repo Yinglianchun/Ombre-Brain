@@ -403,6 +403,31 @@ class FactEventStore:
             "item": self.read(str(written["item_id"]), include_sources=True),
         }
 
+    def set_status(self, item_id: str, status: str) -> dict[str, Any]:
+        """Archive, restore, or soft-delete one current Fact/Event item."""
+
+        safe_id = _required_identifier(item_id, "item_id", 128)
+        target = str(status or "").strip().lower()
+        if target not in {"active", "archived", "tombstoned"}:
+            raise ValueError("status must be active, archived, or tombstoned")
+        current = self.read(safe_id, include_sources=False)
+        if current is None:
+            raise ValueError("item not found")
+        if str(current["status"]) not in {"active", "archived"}:
+            raise ValueError("only active or archived items may change status")
+        now = _now()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "UPDATE fact_events SET status=?, updated_at=? WHERE item_id=?",
+                (target, now, safe_id),
+            )
+            conn.commit()
+        return {
+            "ok": True,
+            "status": target,
+            "item": self.read(safe_id, include_sources=True),
+        }
+
     def mark_injected(self, item_ids: Any) -> dict[str, Any]:
         ids = _normalize_ids(item_ids, "item_ids", limit=500)
         if not ids or not os.path.exists(self.db_path):

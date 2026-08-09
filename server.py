@@ -13927,6 +13927,34 @@ async def api_revise_fact_event(request):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@mcp.custom_route("/api/fact-events/status", methods=["POST"])
+async def api_set_fact_event_status(request):
+    """Archive, restore, or soft-delete a canonical Fact/Event."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    try:
+        return JSONResponse(
+            fact_event_store.set_status(
+                str(body.get("item_id") or ""),
+                str(body.get("status") or ""),
+            )
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Fact/Event status update failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @mcp.custom_route("/api/network", methods=["GET"])
 async def api_network(request):
     """Get embedding similarity network for visualization."""

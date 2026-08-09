@@ -1122,6 +1122,33 @@ function sereinMemoryBridge() {
         }
       });
 
+      server.middlewares.use("/__serein/memory/set-fact-event-status", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const upstream = await callOmbreDashboard("/api/fact-events/status", {
+            method: "POST",
+            body: {
+              item_id: String(body.itemId || "").trim(),
+              status: String(body.status || "").trim(),
+            },
+          });
+          response.statusCode = upstream.status;
+          response.end(JSON.stringify(upstream.payload));
+        } catch (error) {
+          response.statusCode = error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            error: "fact_event_status_failed",
+            message: error?.name === "AbortError" ? "更新状态超时。" : "没有完成这次状态修改。",
+          }));
+        }
+      });
+
       server.middlewares.use("/__serein/live/diaries", async (request, response) => {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
         if (request.method !== "POST") {
@@ -1460,6 +1487,107 @@ function sereinMemoryBridge() {
           response.end(JSON.stringify({
             error: "memory_bridge_failed",
             message: error?.name === "AbortError" ? "保存 Scene 超时。" : "没有完成这次 Scene 修订。",
+          }));
+        }
+      });
+
+      server.middlewares.use("/__serein/memory/edit-scene", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const sceneId = String(body.sceneId || "").trim();
+          const expectedUpdatedAt = String(body.expectedUpdatedAt || "").trim();
+          const title = String(body.title || "").trim();
+          const content = String(body.content || "").trim();
+          if (!/^[A-Za-z0-9_.:#-]{1,160}$/.test(sceneId) || !expectedUpdatedAt || !title || !content) {
+            response.statusCode = 400;
+            response.end(JSON.stringify({ error: "invalid_scene_revision", message: "标题、正文或 Scene 版本不完整。" }));
+            return;
+          }
+          const result = await callOmbreTool("edit_scene", {
+            scene_id: sceneId,
+            expected_updated_at: expectedUpdatedAt,
+            title,
+            content,
+          });
+          response.statusCode = result?.status === "conflict" ? 409 : result?.status === "invalid" ? 400 : 200;
+          response.end(JSON.stringify(result));
+        } catch (error) {
+          response.statusCode = error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            error: "scene_revision_failed",
+            message: error?.name === "AbortError" ? "保存 Scene 超时。" : "没有完成这次 Scene 修订。",
+          }));
+        }
+      });
+
+      server.middlewares.use("/__serein/memory/set-scene-status", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const sceneId = String(body.sceneId || "").trim();
+          const expectedUpdatedAt = String(body.expectedUpdatedAt || "").trim();
+          const status = body.status === "archived" ? "archived" : "active";
+          if (!/^[A-Za-z0-9_.:#-]{1,160}$/.test(sceneId) || !expectedUpdatedAt) {
+            response.statusCode = 400;
+            response.end(JSON.stringify({ error: "invalid_scene_status", message: "缺少 Scene 或版本信息。" }));
+            return;
+          }
+          const result = await callOmbreTool("set_scene_status", {
+            scene_id: sceneId,
+            expected_updated_at: expectedUpdatedAt,
+            status,
+          });
+          response.statusCode = result?.status === "conflict" ? 409 : result?.status === "invalid" ? 400 : 200;
+          response.end(JSON.stringify(result));
+        } catch (error) {
+          response.statusCode = error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            error: "scene_status_failed",
+            message: error?.name === "AbortError" ? "更新 Scene 状态超时。" : "没有完成这次 Scene 状态修改。",
+          }));
+        }
+      });
+
+      server.middlewares.use("/__serein/memory/delete-scenes", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const sceneIds = Array.isArray(body.sceneIds)
+            ? [...new Set(body.sceneIds.map((value) => String(value || "").trim()))]
+              .filter((value) => /^[A-Za-z0-9_.:#-]{1,160}$/.test(value))
+            : [];
+          if (!sceneIds.length) {
+            response.statusCode = 400;
+            response.end(JSON.stringify({ error: "invalid_scene_ids", message: "没有找到要删除的 Scene。" }));
+            return;
+          }
+          const upstream = await callOmbreDashboard("/api/buckets/delete", {
+            method: "POST",
+            body: { bucket_ids: sceneIds, confirm: "DELETE" },
+          });
+          response.statusCode = upstream.status;
+          response.end(JSON.stringify(upstream.payload));
+        } catch (error) {
+          response.statusCode = error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            error: "scene_delete_failed",
+            message: error?.name === "AbortError" ? "删除 Scene 超时。" : "没有完成这次删除。",
           }));
         }
       });

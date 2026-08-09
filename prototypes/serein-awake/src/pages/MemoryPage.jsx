@@ -83,6 +83,11 @@ function ombreSourceIdForScene(scene) {
 
 const memoryTypeLabels = { scene: "Scene", event: "事件", fact: "事实" };
 
+function sceneExcerpt(body) {
+  const plain = String(body[0] || "").replace(/[*_`>#-]+/gu, "").replace(/\s+/gu, " ").trim();
+  return plain.length <= 108 ? plain : `${plain.slice(0, 107)}…`;
+}
+
 function sourceTimeLabel(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value || "").replace("T", " ").slice(0, 16);
@@ -97,7 +102,7 @@ function sourceTimeLabel(value) {
   }).format(date).replaceAll("/", "-");
 }
 
-function FactEventDetail({ item, onClose, onRevised }) {
+function FactEventDetail({ item, onClose, onRevised, onStatusChanged }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(() => ({
     title: item.title || "",
@@ -133,6 +138,25 @@ function FactEventDetail({ item, onClose, onRevised }) {
       setMessage(error.message || "保存失败");
     }
   };
+
+  const setItemStatus = async (status) => {
+    if (status === "tombstoned" && !window.confirm(`删除这条${memoryTypeLabels[item.item_type]}？原文和审计记录会保留。`)) return;
+    setState("saving");
+    setMessage("");
+    try {
+      const response = await fetch("/__serein/memory/set-fact-event-status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ itemId: item.item_id, status }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.item) throw new Error(payload.message || payload.error || "操作失败");
+      onStatusChanged(item.item_id, payload.item);
+    } catch (error) {
+      setState("error");
+      setMessage(error.message || "操作失败");
+    }
+  };
   const timeLabel = item.local_start_time === item.local_end_time
     ? item.local_start_time
     : `${item.local_start_time}–${item.local_end_time}`;
@@ -155,9 +179,19 @@ function FactEventDetail({ item, onClose, onRevised }) {
                 </button>
               </>
             ) : (
-              <button type="button" onClick={() => setEditing(true)}>
-                <PencilSimple size={14} weight="light" aria-hidden="true" />修改
-              </button>
+              <>
+                <button type="button" onClick={() => setEditing(true)} disabled={state === "saving"}>
+                  <PencilSimple size={14} weight="light" aria-hidden="true" />编辑正文
+                </button>
+                <button type="button" onClick={() => setItemStatus(item.status === "archived" ? "active" : "archived")} disabled={state === "saving"}>
+                  {item.status === "archived"
+                    ? <><ArrowCounterClockwise size={14} weight="light" aria-hidden="true" />恢复</>
+                    : <><Archive size={14} weight="light" aria-hidden="true" />归档</>}
+                </button>
+                <button className="is-danger" type="button" onClick={() => setItemStatus("tombstoned")} disabled={state === "saving"}>
+                  <Trash size={14} weight="light" aria-hidden="true" />删除
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -294,6 +328,8 @@ export function MemoryPage() {
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedSceneIds, setSelectedSceneIds] = useState(() => new Set());
   const [deleteConfirmationOpen, setDeleteConfirmationOpen] = useState(false);
+  const [sceneActionState, setSceneActionState] = useState("idle");
+  const [sceneActionMessage, setSceneActionMessage] = useState("");
   const [pendingSourceSceneId, setPendingSourceSceneId] = useState(() => (
     window.localStorage.getItem("serein.memory.open-source-id") || ""
   ));
@@ -470,42 +506,104 @@ export function MemoryPage() {
     });
   };
 
-  const updateSelectedSceneStatus = (status) => {
+  const updateSelectedSceneStatus = async (status) => {
     if (!selectedSceneCount) return;
-    setSceneRecords((current) => current.map((scene) => (
-      selectedSceneIds.has(scene.id) ? { ...scene, status } : scene
-    )));
-    setSelectedSceneIds(new Set());
+    const targets = sceneRecords.filter((scene) => selectedSceneIds.has(scene.id));
+    if (targets.some((scene) => !ombreSourceIdForScene(scene) || !scene.sourceUpdatedAt)) {
+      setSceneActionState("error");
+      setSceneActionMessage("所选内容里有尚未接入德国机写入的 Scene。");
+      return;
+    }
+    setSceneActionState("saving");
+    setSceneActionMessage("");
+    try {
+      const responses = await Promise.all(targets.map(async (scene) => {
+        const response = await fetch("/__serein/memory/set-scene-status", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sceneId: ombreSourceIdForScene(scene),
+            expectedUpdatedAt: scene.sourceUpdatedAt,
+            status: status === "已沉底" ? "archived" : "active",
+          }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !["updated", "unchanged"].includes(payload.status)) {
+          throw new Error(payload.message || payload.reason || "Scene 状态修改失败");
+        }
+        return [scene.id, payload.updated_at || scene.sourceUpdatedAt];
+      }));
+      const revisions = new Map(responses);
+      setSceneRecords((current) => current.map((scene) => (
+        revisions.has(scene.id)
+          ? { ...scene, status, sourceUpdatedAt: revisions.get(scene.id) }
+          : scene
+      )));
+      setSelectedSceneIds(new Set());
+      setSceneActionState("saved");
+      setSceneActionMessage(status === "已沉底" ? "已归档" : "已恢复可浮现");
+    } catch (error) {
+      setSceneActionState("error");
+      setSceneActionMessage(error.message || "Scene 状态修改失败");
+    }
   };
 
-  const confirmSelectedSceneDeletion = () => {
+  const confirmSelectedSceneDeletion = async () => {
     if (!selectedSceneCount) return;
     const deletedIds = new Set(selectedSceneIds);
-    tombstoneMemoryScenes(deletedIds);
-    setSceneRecords((current) => current
-      .filter((scene) => !deletedIds.has(scene.id))
-      .map((scene) => {
-        const relatedScenes = relatedScenesFor(scene)
-          .filter((relatedScene) => !deletedIds.has(relatedScene.id));
-        return {
-          ...scene,
-          relatedScenes,
-          relatedSceneIds: relatedScenes.map((relatedScene) => relatedScene.id),
-          relationCount: relatedScenes.length,
-        };
-      }));
-    setSelectedSceneId(null);
-    setSelectedSceneIds(new Set());
-    setDeleteConfirmationOpen(false);
+    const sourceIds = sceneRecords
+      .filter((scene) => deletedIds.has(scene.id))
+      .map(ombreSourceIdForScene)
+      .filter(Boolean);
+    if (sourceIds.length !== deletedIds.size) {
+      setSceneActionState("error");
+      setSceneActionMessage("所选内容里有尚未接入德国机删除的 Scene。");
+      setDeleteConfirmationOpen(false);
+      return;
+    }
+    setSceneActionState("saving");
+    try {
+      const response = await fetch("/__serein/memory/delete-scenes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sceneIds: sourceIds }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || Number(payload.deleted) !== sourceIds.length) {
+        throw new Error(payload.message || payload.error || "Scene 删除未全部完成");
+      }
+      tombstoneMemoryScenes(deletedIds);
+      setSceneRecords((current) => current
+        .filter((scene) => !deletedIds.has(scene.id))
+        .map((scene) => {
+          const relatedScenes = relatedScenesFor(scene)
+            .filter((relatedScene) => !deletedIds.has(relatedScene.id));
+          return {
+            ...scene,
+            relatedScenes,
+            relatedSceneIds: relatedScenes.map((relatedScene) => relatedScene.id),
+            relationCount: relatedScenes.length,
+          };
+        }));
+      setSelectedSceneId(null);
+      setSelectedSceneIds(new Set());
+      setDeleteConfirmationOpen(false);
+      setSceneActionState("saved");
+      setSceneActionMessage("已删除");
+    } catch (error) {
+      setSceneActionState("error");
+      setSceneActionMessage(error.message || "Scene 删除失败");
+    }
   };
 
   const beginEditingScene = (scene) => {
     setEditingSceneId(scene.id);
     setEditDraft({
       title: scene.title,
-      excerpt: scene.excerpt,
       bodyText: scene.body.join("\n\n"),
     });
+    setSceneActionState("idle");
+    setSceneActionMessage("");
   };
 
   const cancelEditingScene = () => {
@@ -513,17 +611,45 @@ export function MemoryPage() {
     setEditDraft(null);
   };
 
-  const saveEditedScene = () => {
+  const saveEditedScene = async () => {
     if (!selectedScene || !editDraft) return;
     const title = editDraft.title.trim();
-    const excerpt = editDraft.excerpt.trim();
     const body = editDraft.bodyText
       .split(/\n\s*\n/)
       .map((paragraph) => paragraph.trim())
       .filter(Boolean);
-    if (!title || !excerpt || !body.length) return;
-    updateScene(selectedScene.id, () => ({ title, excerpt, body }));
-    cancelEditingScene();
+    const sourceId = ombreSourceIdForScene(selectedScene);
+    if (!title || !body.length || !sourceId || !selectedScene.sourceUpdatedAt) return;
+    setSceneActionState("saving");
+    setSceneActionMessage("");
+    try {
+      const response = await fetch("/__serein/memory/edit-scene", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sceneId: sourceId,
+          expectedUpdatedAt: selectedScene.sourceUpdatedAt,
+          title,
+          content: body.join("\n\n"),
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !["updated", "unchanged"].includes(payload.status)) {
+        throw new Error(payload.message || payload.reason || "Scene 保存失败");
+      }
+      updateScene(selectedScene.id, () => ({
+        title,
+        excerpt: sceneExcerpt(body),
+        body,
+        sourceUpdatedAt: payload.updated_at || selectedScene.sourceUpdatedAt,
+      }));
+      cancelEditingScene();
+      setSceneActionState("saved");
+      setSceneActionMessage(payload.status === "updated" ? "已写回德国机" : "内容没有变化");
+    } catch (error) {
+      setSceneActionState("error");
+      setSceneActionMessage(error.message || "Scene 保存失败");
+    }
   };
 
   const deleteAnnotation = (sceneId, annotationId) => {
@@ -573,6 +699,16 @@ export function MemoryPage() {
         .concat(revisedItem),
     }));
     setSelectedFactEventId(revisedItem.item_id);
+  };
+
+  const acceptFactEventStatus = (previousId, updatedItem) => {
+    setFactEvents((current) => ({
+      ...current,
+      [updatedItem.item_type]: current[updatedItem.item_type]
+        .filter((item) => item.item_id !== previousId)
+        .concat(updatedItem.status === "tombstoned" ? [] : [updatedItem]),
+    }));
+    setSelectedFactEventId(null);
   };
 
   const selectedSceneIsEditing = selectedScene && editingSceneId === selectedScene.id;
@@ -705,6 +841,11 @@ export function MemoryPage() {
               ) : null}
             </div>
           </header>
+          {memoryType === "scene" && sceneActionMessage ? (
+            <p className={`memory-action-message${sceneActionState === "error" ? " is-error" : ""}`} role={sceneActionState === "error" ? "alert" : "status"}>
+              {sceneActionMessage}
+            </p>
+          ) : null}
 
           {memoryType === "scene" && selectionMode ? (
             <div className="memory-batch-toolbar" aria-label="批量整理 Scene">
@@ -730,7 +871,7 @@ export function MemoryPage() {
                 <button
                   type="button"
                   onClick={() => updateSelectedSceneStatus("已沉底")}
-                  disabled={!selectedSceneCount}
+                  disabled={!selectedSceneCount || sceneActionState === "saving"}
                 >
                   <Archive size={15} weight="light" aria-hidden="true" />
                   归档
@@ -738,7 +879,7 @@ export function MemoryPage() {
                 <button
                   type="button"
                   onClick={() => updateSelectedSceneStatus("可浮现")}
-                  disabled={!selectedSceneCount}
+                  disabled={!selectedSceneCount || sceneActionState === "saving"}
                 >
                   <ArrowCounterClockwise size={15} weight="light" aria-hidden="true" />
                   恢复可浮现
@@ -747,7 +888,7 @@ export function MemoryPage() {
                   className="is-danger"
                   type="button"
                   onClick={() => setDeleteConfirmationOpen(true)}
-                  disabled={!selectedSceneCount}
+                  disabled={!selectedSceneCount || sceneActionState === "saving"}
                 >
                   <Trash size={15} weight="light" aria-hidden="true" />
                   删除
@@ -903,14 +1044,14 @@ export function MemoryPage() {
                   <div className="scene-detail__edit-actions">
                     {selectedSceneIsEditing ? (
                       <>
-                        <button type="button" onClick={cancelEditingScene}>取消</button>
-                        <button className="is-primary" type="button" onClick={saveEditedScene}>
+                        <button type="button" onClick={cancelEditingScene} disabled={sceneActionState === "saving"}>取消</button>
+                        <button className="is-primary" type="button" onClick={saveEditedScene} disabled={sceneActionState === "saving"}>
                           <Check size={14} weight="light" aria-hidden="true" />
-                          保存
+                          {sceneActionState === "saving" ? "保存中…" : "保存"}
                         </button>
                       </>
                     ) : (
-                      <button type="button" onClick={() => beginEditingScene(selectedScene)}>
+                      <button type="button" onClick={() => beginEditingScene(selectedScene)} disabled={!ombreSourceIdForScene(selectedScene) || !selectedScene.sourceUpdatedAt}>
                         <PencilSimple size={14} weight="light" aria-hidden="true" />
                         编辑记忆
                       </button>
@@ -943,6 +1084,7 @@ export function MemoryPage() {
                     {selectedScene.favorite ? "已收藏" : "收藏"}
                   </button>
                 </div>
+                {sceneActionMessage ? <p className={`fact-event-detail__message${sceneActionState === "error" ? " is-error" : ""}`}>{sceneActionMessage}</p> : null}
                 <SceneDomainEditor
                   key={`scene-domain-${selectedScene.id}-${selectedScene.bucketDomain}`}
                   scene={selectedScene}
@@ -953,14 +1095,6 @@ export function MemoryPage() {
               {selectedSceneIsEditing ? (
                 <div className="scene-editor">
                   <label>
-                    <span>时间线摘要</span>
-                    <textarea
-                      rows={3}
-                      value={editDraft.excerpt}
-                      onChange={(event) => setEditDraft((current) => ({ ...current, excerpt: event.target.value }))}
-                    />
-                  </label>
-                  <label>
                     <span>正文</span>
                     <textarea
                       rows={10}
@@ -968,7 +1102,7 @@ export function MemoryPage() {
                       onChange={(event) => setEditDraft((current) => ({ ...current, bodyText: event.target.value }))}
                     />
                   </label>
-                  <p>用空行分开段落。修改会保存在这个浏览器里。</p>
+                  <p>用空行分开段落。保存后会写回德国机，并保留上一版。</p>
                 </div>
               ) : (
                 <MarkdownProjection
@@ -1110,6 +1244,7 @@ export function MemoryPage() {
               item={selectedFactEvent}
               onClose={() => setSelectedFactEventId(null)}
               onRevised={acceptFactEventRevision}
+              onStatusChanged={acceptFactEventStatus}
             />
           ) : null}
         </aside>
@@ -1130,9 +1265,9 @@ export function MemoryPage() {
               删除后，这些 Scene 会从搜索、关联和召回中消失；正式数据层会同时清除 Scene 与 cue 的 embedding。此操作不能在这里恢复。
             </p>
             <div>
-              <button type="button" onClick={() => setDeleteConfirmationOpen(false)}>取消</button>
-              <button className="is-danger" type="button" onClick={confirmSelectedSceneDeletion}>
-                删除 {selectedSceneCount} 条
+              <button type="button" onClick={() => setDeleteConfirmationOpen(false)} disabled={sceneActionState === "saving"}>取消</button>
+              <button className="is-danger" type="button" onClick={confirmSelectedSceneDeletion} disabled={sceneActionState === "saving"}>
+                {sceneActionState === "saving" ? "删除中…" : `删除 ${selectedSceneCount} 条`}
               </button>
             </div>
           </section>
