@@ -75,6 +75,9 @@ function relationLabel(relation) {
 
 function ombreSourceIdForScene(scene) {
   if (scene?.sourceKind !== "ombre-live-readonly") return "";
+  if (typeof scene.canonicalSceneId === "string" && scene.canonicalSceneId) {
+    return scene.canonicalSceneId;
+  }
   const source = scene.sources?.find((candidate) => (
     typeof candidate?.id === "string" && candidate.id.startsWith("manual_source:")
   ));
