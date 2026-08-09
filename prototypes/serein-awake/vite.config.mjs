@@ -1149,6 +1149,30 @@ function sereinMemoryBridge() {
         }
       });
 
+      server.middlewares.use("/__serein/memory/delete-fact-event", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const upstream = await callOmbreDashboard("/api/fact-events/delete", {
+            method: "POST",
+            body: { item_id: String(body.itemId || "").trim() },
+          });
+          response.statusCode = upstream.status;
+          response.end(JSON.stringify(upstream.payload));
+        } catch (error) {
+          response.statusCode = error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            error: "fact_event_deletion_failed",
+            message: error?.name === "AbortError" ? "永久删除超时。" : "没有完成永久删除。",
+          }));
+        }
+      });
+
       server.middlewares.use("/__serein/live/diaries", async (request, response) => {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
         if (request.method !== "POST") {

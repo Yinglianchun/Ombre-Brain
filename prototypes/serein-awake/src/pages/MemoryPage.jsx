@@ -105,7 +105,7 @@ function sourceTimeLabel(value) {
   }).format(date).replaceAll("/", "-");
 }
 
-function FactEventDetail({ item, onClose, onRevised, onStatusChanged }) {
+function FactEventDetail({ item, onClose, onRevised, onStatusChanged, onDeleted }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(() => ({
     title: item.title || "",
@@ -143,7 +143,6 @@ function FactEventDetail({ item, onClose, onRevised, onStatusChanged }) {
   };
 
   const setItemStatus = async (status) => {
-    if (status === "tombstoned" && !window.confirm(`删除这条${memoryTypeLabels[item.item_type]}？原文和审计记录会保留。`)) return;
     setState("saving");
     setMessage("");
     try {
@@ -158,6 +157,25 @@ function FactEventDetail({ item, onClose, onRevised, onStatusChanged }) {
     } catch (error) {
       setState("error");
       setMessage(error.message || "操作失败");
+    }
+  };
+
+  const deleteItem = async () => {
+    if (!window.confirm(`永久删除这条${memoryTypeLabels[item.item_type]}？它的历史修订和来源副本也会删除，且无法撤销。Haven Bridge 原始聊天不受影响。`)) return;
+    setState("saving");
+    setMessage("");
+    try {
+      const response = await fetch("/__serein/memory/delete-fact-event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ itemId: item.item_id }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !Number(payload.deleted)) throw new Error(payload.message || payload.error || "永久删除失败");
+      onDeleted(payload.item_ids || [item.item_id], payload.item_type || item.item_type);
+    } catch (error) {
+      setState("error");
+      setMessage(error.message || "永久删除失败");
     }
   };
   const timeLabel = item.local_start_time === item.local_end_time
@@ -191,7 +209,7 @@ function FactEventDetail({ item, onClose, onRevised, onStatusChanged }) {
                     ? <><ArrowCounterClockwise size={14} weight="light" aria-hidden="true" />恢复</>
                     : <><Archive size={14} weight="light" aria-hidden="true" />归档</>}
                 </button>
-                <button className="is-danger" type="button" onClick={() => setItemStatus("tombstoned")} disabled={state === "saving"}>
+                <button className="is-danger" type="button" onClick={deleteItem} disabled={state === "saving"}>
                   <Trash size={14} weight="light" aria-hidden="true" />删除
                 </button>
               </>
@@ -709,7 +727,16 @@ export function MemoryPage() {
       ...current,
       [updatedItem.item_type]: current[updatedItem.item_type]
         .filter((item) => item.item_id !== previousId)
-        .concat(updatedItem.status === "tombstoned" ? [] : [updatedItem]),
+        .concat(updatedItem),
+    }));
+    setSelectedFactEventId(null);
+  };
+
+  const acceptFactEventDeletion = (deletedIds, itemType) => {
+    const deleted = new Set(deletedIds);
+    setFactEvents((current) => ({
+      ...current,
+      [itemType]: current[itemType].filter((item) => !deleted.has(item.item_id)),
     }));
     setSelectedFactEventId(null);
   };
@@ -1248,6 +1275,7 @@ export function MemoryPage() {
               onClose={() => setSelectedFactEventId(null)}
               onRevised={acceptFactEventRevision}
               onStatusChanged={acceptFactEventStatus}
+              onDeleted={acceptFactEventDeletion}
             />
           ) : null}
         </aside>

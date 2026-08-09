@@ -130,8 +130,10 @@ def main() -> None:
         assert store.read(event_id)["covered_by_scene_id"] == "scene_covering_event"
         assert store.read(fact_id)["status"] == "active"
 
-        deleted_fact = store.set_status(fact_id, "tombstoned")
-        assert deleted_fact["item"]["status"] == "tombstoned"
+        deleted_fact = store.delete(fact_id)
+        assert deleted_fact["deleted"] == 1
+        assert deleted_fact["item_ids"] == [fact_id]
+        assert store.read(fact_id) is None
         assert store.list(item_type="fact", status="active")["count"] == 0
 
         late_event = {
@@ -155,8 +157,17 @@ def main() -> None:
         )
         assert invalid["rejected"] == 2 and invalid["inserted"] == 0
 
+        deleted_event = store.delete(event_id)
+        assert deleted_event["deleted"] == 2
+        assert set(deleted_event["item_ids"]) == {
+            event_id,
+            event_revision["previous_item_id"],
+        }
+        assert store.read(event_id) is None
+        assert store.read(event_revision["previous_item_id"]) is None
+
         stats = store.stats()
-        assert stats == {"total": 4, "facts": 1, "events": 3, "active": 0}
+        assert stats == {"total": 1, "facts": 0, "events": 1, "active": 0}
         with closing(sqlite3.connect(store.db_path)) as conn:
             assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
             tables = {

@@ -13929,7 +13929,7 @@ async def api_revise_fact_event(request):
 
 @mcp.custom_route("/api/fact-events/status", methods=["POST"])
 async def api_set_fact_event_status(request):
-    """Archive, restore, or soft-delete a canonical Fact/Event."""
+    """Archive or restore a canonical Fact/Event."""
     from starlette.responses import JSONResponse
 
     err = _require_raw_api_auth(request)
@@ -13952,6 +13952,31 @@ async def api_set_fact_event_status(request):
         return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception as exc:
         logger.warning("Fact/Event status update failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/fact-events/delete", methods=["POST"])
+async def api_delete_fact_event(request):
+    """Permanently delete a canonical Fact/Event revision family."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    try:
+        return JSONResponse(
+            fact_event_store.delete(str(body.get("item_id") or ""))
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Fact/Event deletion failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 

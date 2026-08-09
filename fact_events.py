@@ -404,12 +404,12 @@ class FactEventStore:
         }
 
     def set_status(self, item_id: str, status: str) -> dict[str, Any]:
-        """Archive, restore, or soft-delete one current Fact/Event item."""
+        """Archive or restore one current Fact/Event item."""
 
         safe_id = _required_identifier(item_id, "item_id", 128)
         target = str(status or "").strip().lower()
-        if target not in {"active", "archived", "tombstoned"}:
-            raise ValueError("status must be active, archived, or tombstoned")
+        if target not in {"active", "archived"}:
+            raise ValueError("status must be active or archived")
         current = self.read(safe_id, include_sources=False)
         if current is None:
             raise ValueError("item not found")
@@ -426,6 +426,59 @@ class FactEventStore:
             "ok": True,
             "status": target,
             "item": self.read(safe_id, include_sources=True),
+        }
+
+    def delete(self, item_id: str) -> dict[str, Any]:
+        """Permanently delete one Fact/Event and its complete revision family."""
+
+        safe_id = _required_identifier(item_id, "item_id", 128)
+        self._init_db()
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                current = conn.execute(
+                    "SELECT item_id, item_type FROM fact_events WHERE item_id=?",
+                    (safe_id,),
+                ).fetchone()
+                if current is None:
+                    raise ValueError("item not found")
+
+                family = {safe_id}
+                changed = True
+                while changed:
+                    changed = False
+                    rows = conn.execute(
+                        "SELECT item_id, supersedes_item_id FROM fact_events"
+                    ).fetchall()
+                    for row in rows:
+                        candidate = str(row["item_id"])
+                        previous = str(row["supersedes_item_id"] or "")
+                        if candidate in family and previous and previous not in family:
+                            family.add(previous)
+                            changed = True
+                        if previous in family and candidate not in family:
+                            family.add(candidate)
+                            changed = True
+
+                item_ids = sorted(family)
+                placeholders = ",".join("?" for _ in item_ids)
+                conn.execute(
+                    f"DELETE FROM fact_event_sources WHERE item_id IN ({placeholders})",
+                    item_ids,
+                )
+                conn.execute(
+                    f"DELETE FROM fact_events WHERE item_id IN ({placeholders})",
+                    item_ids,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {
+            "ok": True,
+            "deleted": len(item_ids),
+            "item_ids": item_ids,
+            "item_type": str(current["item_type"]),
         }
 
     def mark_injected(self, item_ids: Any) -> dict[str, Any]:
