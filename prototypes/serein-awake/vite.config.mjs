@@ -1050,6 +1050,7 @@ function sereinMemoryBridge() {
           response.statusCode = 200;
           response.end(JSON.stringify(await readLiveMemoryProjection(body.sourceIds)));
         } catch (error) {
+          console.error("[serein-memory-bridge] live Scene projection failed", error);
           response.statusCode = error?.name === "AbortError" ? 504 : 502;
           response.end(JSON.stringify({
             status: "error",

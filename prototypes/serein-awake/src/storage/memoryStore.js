@@ -3,6 +3,7 @@ import { defaultMemoryScenes } from "../data/memory.js";
 const memoryScenesStorageKey = "serein.memory.scene-records.v1";
 const memorySnapshotStorageKey = "serein.memory.snapshot.v1";
 const memorySceneTombstonesStorageKey = "serein.memory.scene-tombstones.v1";
+let memorySnapshotLoadInFlight = null;
 
 function splitParagraphs(content) {
   return String(content || "")
@@ -34,7 +35,7 @@ function relationDirection(edge, endpoint) {
   return endpoint === "source" ? "outgoing" : "incoming";
 }
 
-function mergeLiveMemoryProjection(snapshotScenes, liveProjection) {
+function mergeLiveMemoryProjection(snapshotScenes, liveProjection, { includeSnapshotOnly = true } = {}) {
   if (!Array.isArray(liveProjection?.scenes) || !liveProjection.scenes.length) {
     return snapshotScenes;
   }
@@ -46,7 +47,9 @@ function mergeLiveMemoryProjection(snapshotScenes, liveProjection) {
   });
 
   const sceneIdBySourceId = new Map();
-  const mergedById = new Map(snapshotScenes.map((scene) => [scene.id, scene]));
+  const mergedById = new Map(
+    includeSnapshotOnly ? snapshotScenes.map((scene) => [scene.id, scene]) : [],
+  );
   liveProjection.scenes.forEach((liveScene) => {
     const sourceId = String(liveScene?.source_id || "").trim();
     if (!sourceId) return;
@@ -65,17 +68,17 @@ function mergeLiveMemoryProjection(snapshotScenes, liveProjection) {
       excerpt: excerptFrom(body) || fallback?.excerpt || "",
       body: body.length ? body : fallback?.body || [],
       author: String(liveScene.author || fallback?.author || "legacy_unknown"),
-      annotations: fallback?.annotations || [],
+      annotations: [],
       sources,
       sourceCount: sources.length,
       relatedScenes: fallback?.relatedScenes || [],
       relatedSceneIds: fallback?.relatedSceneIds || [],
       relationCount: fallback?.relationCount || 0,
       narrativeRefs: fallback?.narrativeRefs || [],
-      favorite: liveScene.favorite === true || fallback?.favorite === true,
+      favorite: liveScene.favorite === true,
       status: liveScene.status === "已沉底" ? "已沉底" : "可浮现",
       bucketDomain: String(liveScene.bucket_domain || fallback?.bucketDomain || ""),
-      selfAnchor: liveScene.self_anchor === true || fallback?.selfAnchor === true,
+      selfAnchor: liveScene.self_anchor === true,
       sourceKind: "ombre-live-readonly",
       canonicalSceneId: sourceId,
       sourceUpdatedAt: String(liveScene.updated_at || "").trim(),
@@ -211,61 +214,69 @@ export function readMemoryScenes() {
   }
 }
 
-export async function loadMemorySnapshot() {
+async function loadMemorySnapshotOnce() {
+  let snapshot = null;
   try {
     const response = await fetch(`${import.meta.env.BASE_URL}private/memory-snapshot.json`, { cache: "no-store" });
-    if (!response.ok) return null;
-    const snapshot = await response.json();
-    if (
-      !snapshot
-      || typeof snapshot.snapshotId !== "string"
-      || !Array.isArray(snapshot.scenes)
-    ) return null;
-
-    let liveProjection = null;
-    try {
-      const sourceIds = snapshot.scenes.map(sourceIdFromScene).filter(Boolean);
-      const liveResponse = await fetch("/__serein/live/memory-scenes", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceIds }),
-      });
-      if (liveResponse.ok) {
-        const payload = await liveResponse.json();
-        if (payload?.status === "ok") liveProjection = payload;
+    if (response.ok && response.headers.get("content-type")?.includes("application/json")) {
+      const payload = await response.json();
+      if (payload && typeof payload.snapshotId === "string" && Array.isArray(payload.scenes)) {
+        snapshot = payload;
       }
-    } catch {
-      liveProjection = null;
     }
+  } catch {
+    snapshot = null;
+  }
 
-    const projectedScenes = mergeLiveMemoryProjection(snapshot.scenes, liveProjection);
+  let liveProjection = null;
+  try {
+    const liveResponse = await fetch("/__serein/live/memory-scenes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceIds: [] }),
+    });
+    if (liveResponse.ok) {
+      const payload = await liveResponse.json();
+      if (payload?.status === "ok" && Array.isArray(payload.scenes) && payload.scenes.length) {
+        liveProjection = payload;
+      }
+    }
+  } catch {
+    liveProjection = null;
+  }
+
+  if (!liveProjection && !snapshot) return null;
+
+  try {
+    const snapshotScenes = snapshot?.scenes || [];
+    const projectedScenes = liveProjection
+      ? mergeLiveMemoryProjection(snapshotScenes, liveProjection, { includeSnapshotOnly: false })
+      : snapshotScenes;
     const saved = JSON.parse(window.localStorage.getItem(memoryScenesStorageKey));
     const savedById = new Map(
       Array.isArray(saved) ? saved.map((scene) => [scene?.id, scene]) : [],
     );
-    const explicitSelfAnchorIds = new Set(
-      snapshot.scenes.filter((scene) => scene.selfAnchor === true).map((scene) => scene.id),
-    );
+    const explicitSelfAnchorIds = new Set(snapshotScenes
+      .filter((scene) => scene.selfAnchor === true)
+      .map((scene) => scene.id));
 
     const tombstonedSceneIds = readMemorySceneTombstones();
     const scenes = projectedScenes
-      .filter((scene) => !tombstonedSceneIds.has(scene.id))
+      .filter((scene) => (
+        scene.sourceKind === "ombre-live-readonly" || !tombstonedSceneIds.has(scene.id)
+      ))
       .map((scene) => {
         const storedScene = savedById.get(scene.id);
-        const sourceRevisionMatches = (
-          scene.sourceKind !== "ombre-live-readonly"
-          || (
-            Boolean(storedScene?.sourceRevision)
-            && storedScene.sourceRevision === scene.sourceRevision
-          )
-        );
-        const storedOverlay = !storedScene
-          ? null
-          : sourceRevisionMatches
-            ? storedScene
-            : {
-              annotations: storedScene.annotations,
-            };
+        if (scene.sourceKind === "ombre-live-readonly") {
+          return normalizeMemoryScene(
+            {
+              ...scene,
+              annotations: storedScene?.annotations,
+            },
+            scene,
+          );
+        }
+        const storedOverlay = storedScene || null;
         const normalized = !storedScene
           ? normalizeMemoryScene(scene, scene)
           : normalizeMemoryScene(
@@ -287,12 +298,22 @@ export async function loadMemorySnapshot() {
 
     window.localStorage.setItem(
       memorySnapshotStorageKey,
-      `${snapshot.snapshotId}:${liveProjection?.snapshotId || "fallback"}`,
+      `${snapshot?.snapshotId || "no-snapshot"}:${liveProjection?.snapshotId || "fallback"}`,
     );
     return scenes;
   } catch {
     return null;
   }
+}
+
+export function loadMemorySnapshot() {
+  if (!memorySnapshotLoadInFlight) {
+    memorySnapshotLoadInFlight = loadMemorySnapshotOnce()
+      .finally(() => {
+        memorySnapshotLoadInFlight = null;
+      });
+  }
+  return memorySnapshotLoadInFlight;
 }
 
 export function storeMemoryScenes(sceneRecords) {
