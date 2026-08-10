@@ -340,7 +340,7 @@ def verify_scene_tech_guard_uses_declared_domain_and_absolute_semantics() -> Non
     ) is None
 
 
-def verify_scene_admission_uses_only_authored_or_absolute_semantic_evidence() -> None:
+def verify_scene_admission_requires_body_or_exact_evidence() -> None:
     service = build_service()
     scene = {
         "id": "scene-admission",
@@ -368,8 +368,20 @@ def verify_scene_admission_uses_only_authored_or_absolute_semantic_evidence() ->
         "authored_cue_match": True,
         "authored_cue_terms": ["修网关"],
     }
-    assert service._admit_bucket_for_recall("为什么修网关时会担心", cue_item) is True
-    assert cue_item["admission_reason"] == "scene_authored_evidence"
+    assert service._admit_bucket_for_recall("为什么修网关时会担心", cue_item) is False
+    assert cue_item["admission_reason"] == "scene_candidate_only_without_body_evidence"
+
+    cue_and_body_item = {
+        "bucket": scene,
+        "semantic_score": 0.58,
+        "authored_cue_match": True,
+        "authored_cue_terms": ["修网关"],
+    }
+    assert service._admit_bucket_for_recall(
+        "为什么修网关时会担心",
+        cue_and_body_item,
+    ) is True
+    assert cue_and_body_item["admission_reason"] == "scene_strong_semantic"
 
     assert service._canonical_scene_recall_score(0.50) == 0.50
     assert service._dynamic_bucket_item_has_reliable_recall_signal(
@@ -379,7 +391,64 @@ def verify_scene_admission_uses_only_authored_or_absolute_semantic_evidence() ->
     assert service._canonical_scene_recall_score(
         0.10,
         authored_cue_match=True,
-    ) == service.first_card_min_score
+    ) == 0.10
+
+
+def verify_title_and_multiple_cues_cannot_admit_unrelated_scenes() -> None:
+    service = build_service()
+    original_title_terms = service._bucket_title_anchor_terms
+    star_scene = {
+        "id": "scene-star",
+        "metadata": {
+            "memory_value_source": "authored_scene",
+            "name": "小小宇宙与恒星",
+            "scene_cues": ["恒星照片", "天才物理学家", "小小宇宙"],
+            "domain": ["未分类"],
+        },
+        "content": "我们曾经用小小宇宙形容彼此相遇后的世界。",
+    }
+    query = "知名物理学家博士学位被撤销，曾用香肠冒充恒星照片，是天才吗"
+    service._bucket_title_anchor_terms = lambda _query, bucket: (
+        ["恒星"] if bucket.get("id") == "scene-star" else original_title_terms(_query, bucket)
+    )
+    title_item = {"bucket": star_scene, "semantic_score": 0.32}
+    assert service._admit_bucket_for_recall(query, title_item) is False
+    assert title_item["title_anchor_terms"] == ["恒星"]
+    assert title_item["admission_reason"] == "scene_candidate_only_without_body_evidence"
+    assert service._dynamic_bucket_item_has_reliable_recall_signal(query, title_item) is False
+
+    multi_cue_item = {
+        "bucket": star_scene,
+        "semantic_score": 0.32,
+        "authored_cue_match": True,
+        "authored_cue_terms": ["恒星照片", "天才物理学家", "小小宇宙"],
+    }
+    assert service._admit_bucket_for_recall(query, multi_cue_item) is False
+    assert multi_cue_item["admission_reason"] == "scene_candidate_only_without_body_evidence"
+    assert service._canonical_scene_recall_score(
+        0.32,
+        authored_cue_match=True,
+    ) == 0.32
+
+    red_book_scene = {
+        "id": "scene-red-book",
+        "metadata": {
+            "memory_value_source": "authored_scene",
+            "name": "第一次真的一起逛小红书",
+            "scene_cues": ["一起逛小红书"],
+            "domain": ["未分类"],
+        },
+        "content": "我们第一次共享浏览器，一起翻看小红书里的帖子。",
+    }
+    red_book_item = {"bucket": red_book_scene, "semantic_score": 0.41}
+    red_book_query = "雨小了！本来说给你修记忆系统呢，刷上小红书了"
+    service._bucket_title_anchor_terms = lambda _query, bucket: (
+        ["小红书"]
+        if bucket.get("id") == "scene-red-book"
+        else original_title_terms(_query, bucket)
+    )
+    assert service._admit_bucket_for_recall(red_book_query, red_book_item) is False
+    assert red_book_item["admission_reason"] == "scene_candidate_only_without_body_evidence"
 
 
 def verify_scene_bypasses_semantic_session_dedupe() -> None:
@@ -573,7 +642,8 @@ def main() -> int:
     verify_scene_and_legacy_moment_paths_are_isolated()
     verify_scene_recall_ignores_legacy_facets()
     verify_scene_tech_guard_uses_declared_domain_and_absolute_semantics()
-    verify_scene_admission_uses_only_authored_or_absolute_semantic_evidence()
+    verify_scene_admission_requires_body_or_exact_evidence()
+    verify_title_and_multiple_cues_cannot_admit_unrelated_scenes()
     verify_scene_bypasses_semantic_session_dedupe()
     verify_year_ring_cannot_promote_scene_during_ordinary_recall()
     verify_date_topic_can_live_in_either_role()

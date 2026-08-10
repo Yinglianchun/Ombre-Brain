@@ -241,6 +241,7 @@ function RecallSimulator() {
   const cheapRetrieval = retrievalBudget.cheap_retrieval ?? {};
   const rerankerShadow = retrievalBudget.rerank ?? {};
   const cueSemanticShadow = retrievalBudget.cue_semantic ?? {};
+  const factEventProbe = retrievalBudget.fact_event_probe ?? {};
   const ablationDebug = retrievalBudget.recall_ablation ?? semantic.recall_ablation ?? {
     mode: recallAblation,
   };
@@ -385,12 +386,14 @@ function RecallSimulator() {
           <section className="recall-result-section">
             <div className="recall-result-section__heading">
               <h3>预算 Router（simulation shadow）</h3>
-              <span>{retrievalBudget.effective_budget || "未返回"}</span>
+              <span>{retrievalBudget.final_budget || retrievalBudget.effective_budget || "未返回"}</span>
             </div>
             <dl className="recall-decision__facts">
               <div><dt>surface_route</dt><dd>{retrievalBudget.surface_route || "—"}</dd></div>
               <div><dt>route_budget</dt><dd>{retrievalBudget.route_budget || "—"}</dd></div>
               <div><dt>effective_budget</dt><dd>{retrievalBudget.effective_budget || "—"}</dd></div>
+              <div><dt>三态预算</dt><dd>{retrievalBudget.initial_budget || "—"} → {retrievalBudget.final_budget || "—"}</dd></div>
+              <div><dt>升级原因</dt><dd>{retrievalBudget.escalation_reason || retrievalBudget.budget_decision_source || "默认浅查"}</dd></div>
               <div><dt>anchor_override</dt><dd>{retrievalBudget.anchor_override ? "是" : "否"}</dd></div>
               <div><dt>pure chitchat prior</dt><dd>{retrievalBudget.pure_chitchat_prior ? "高置信候选" : "否"}</dd></div>
               <div><dt>prototype confidence</dt><dd>{prototypePrior.confidence == null ? "—" : percent(prototypePrior.confidence)}</dd></div>
@@ -398,6 +401,7 @@ function RecallSimulator() {
               <div><dt>absolute floor</dt><dd>{cheapRetrieval.floor_qualified_count ?? 0} / {cheapRetrieval.candidate_count ?? 0}</dd></div>
               <div><dt>reranker gray zone</dt><dd>{cheapRetrieval.gray_zone_count ?? 0} / {cheapRetrieval.reranker_eligible_count ?? 0} eligible</dd></div>
               <div><dt>cue embedding</dt><dd>{cueSemanticShadow.status === "available" ? `${cueSemanticShadow.candidate_count ?? 0} 条候选 · v${cueSemanticShadow.dataset_version ?? "?"}` : cueSemanticShadow.reason || "未建立索引"}</dd></div>
+              <div><dt>Fact / Event probe</dt><dd>{factEventProbe.status === "ok" ? `${factEventProbe.candidate_count ?? 0} 条 · ${(factEventProbe.matches || []).slice(0, 3).map((item) => `${item.memory_kind}:${percent(item.score)}`).join(" · ") || "无达标候选"}` : factEventProbe.reason || factEventProbe.status || "未启用"}</dd></div>
               <div><dt>reranker shadow</dt><dd>{rerankerShadow.called ? `${rerankerShadow.score_count ?? 0} / ${rerankerShadow.candidate_count ?? 0} 已评分 · 不参与决定` : rerankerShadow.would_call ? rerankerShadowReasonLabels[rerankerShadow.reason] || rerankerShadow.reason || "有资格，尚未调用" : rerankerShadowReasonLabels[rerankerShadow.reason] || rerankerShadow.reason || "未进入"}</dd></div>
               <div><dt>query_facets</dt><dd>{(retrievalBudget.query_facets || []).map((facet) => `${facet.kind}:${facet.value}`).join(" · ") || "—"}</dd></div>
             </dl>

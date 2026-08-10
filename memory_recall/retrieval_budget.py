@@ -75,6 +75,31 @@ RECALL_MARKERS = (
     "记忆",
 )
 
+DEEP_RECALL_MARKERS = (
+    "记不记得",
+    "是否记得",
+    "还记得",
+    "想起来",
+    "回忆一下",
+    "找出来",
+    "翻一下",
+    "搜一下",
+    "看那段",
+    "原话",
+)
+
+_RECALL_REACTION_MARKERS = (
+    "竟然还记得",
+    "居然还记得",
+    "原来还记得",
+    "竟然记得",
+    "居然记得",
+)
+_PRIOR_MENTION_QUESTION_RE = re.compile(
+    r"(?:我|你|我们).{0,12}(?:之前|以前|上次)?.{0,12}"
+    r"(?:提过|说过|聊过|讲过).{0,48}[吗嘛么？?]"
+)
+
 DATE_ONLY_MARKERS = (
     "今天",
     "昨天",
@@ -122,6 +147,21 @@ def _contains_any(text: str, markers: tuple[str, ...]) -> list[str]:
         if marker and marker in text and not any(marker in existing for existing in found):
             found.append(marker)
     return found
+
+
+def _explicit_deep_recall_markers(text: str) -> list[str]:
+    """Return only unmistakable requests to retrieve earlier material.
+
+    Broad temporal words such as ``之前`` and ``上次`` still veto a hard skip,
+    but they do not justify deep retrieval by themselves.
+    """
+
+    found = _contains_any(text, DEEP_RECALL_MARKERS)
+    if any(marker in text for marker in _RECALL_REACTION_MARKERS):
+        found = [marker for marker in found if marker not in {"还记得"}]
+    if _PRIOR_MENTION_QUESTION_RE.search(text):
+        found.append("prior_mention_question")
+    return list(dict.fromkeys(found))
 
 
 def _append_facet(
@@ -194,6 +234,86 @@ def _budget_top_k(budget: str) -> int:
         BUDGET_NORMAL: 8,
         BUDGET_DEEP: 10,
     }.get(budget, 8)
+
+
+def apply_fact_event_probe(
+    budget: dict[str, Any],
+    probe: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Escalate the public three-state budget from typed shadow candidates."""
+    if not isinstance(budget, dict):
+        return budget
+    probe = probe if isinstance(probe, Mapping) else {}
+    budget["fact_event_probe"] = dict(probe)
+    if str(probe.get("status") or "") != "ok":
+        return budget
+    floor = _bounded_float(
+        budget.get("rescue_floor"),
+        _bounded_float(budget.get("absolute_floor"), 0.55),
+    )
+    qualified = [
+        item
+        for item in probe.get("matches") or []
+        if isinstance(item, Mapping)
+        and _bounded_float(item.get("score"), 0.0) >= floor
+    ]
+    if not qualified:
+        return budget
+    covered = next(
+        (
+            item
+            for item in qualified
+            if str(item.get("covered_by_scene_id") or "").strip()
+        ),
+        None,
+    )
+    event = next(
+        (
+            item
+            for item in qualified
+            if str(item.get("memory_kind") or "") == "event"
+        ),
+        None,
+    )
+    fact = next(
+        (
+            item
+            for item in qualified
+            if str(item.get("memory_kind") or "") == "fact"
+        ),
+        None,
+    )
+    if covered is not None:
+        final_budget = BUDGET_DEEP
+        reason = "typed_candidate_covered_by_scene"
+        winner = covered
+    elif event is not None:
+        final_budget = BUDGET_DEEP
+        reason = "event_candidate_over_rescue_floor"
+        winner = event
+    elif fact is not None:
+        final_budget = BUDGET_SHALLOW
+        reason = "fact_candidate_over_rescue_floor"
+        winner = fact
+    else:
+        return budget
+    budget["final_budget"] = final_budget
+    budget["budget_decision_source"] = "typed_candidate_probe"
+    budget["escalation_reason"] = reason
+    budget["typed_candidate_id"] = str(winner.get("memory_id") or "")
+    budget["typed_candidate_kind"] = str(winner.get("memory_kind") or "")
+    budget["typed_candidate_score"] = round(
+        _bounded_float(winner.get("score"), 0.0),
+        4,
+    )
+    budget["skip_ready"] = False
+    budget["pure_surface_chitchat"] = False
+    budget["route_skip_deferred"] = True
+    sentinel = budget.get("sentinel")
+    if isinstance(sentinel, dict):
+        sentinel["skip_allowed"] = False
+        sentinel["reason"] = reason
+    return budget
 
 
 def build_retrieval_budget(
@@ -402,6 +522,16 @@ def build_retrieval_budget(
         else route_budget
     )
     surface_route = route_name or ("date_only" if date_only else "mixed_query")
+    explicit_deep_reasons: list[str] = []
+    if route_name == "recall_needed":
+        explicit_deep_reasons.append("semantic_recall_route")
+    if any(facet.get("kind") in {"exact_anchor", "reference_entity"} for facet in strong_facets):
+        explicit_deep_reasons.append("exact_or_reference_entity")
+    deep_recall_markers = _explicit_deep_recall_markers(text)
+    if deep_recall_markers:
+        explicit_deep_reasons.append("explicit_recall_language")
+    initial_budget = BUDGET_SHALLOW
+    final_budget = BUDGET_DEEP if explicit_deep_reasons else BUDGET_SHALLOW
     absolute_floor = _bounded_float(absolute_floor, 0.55)
     reranker_entry_floor = min(
         absolute_floor,
@@ -416,6 +546,15 @@ def build_retrieval_budget(
         "anchor_override": anchor_override,
         "anchor_override_reasons": anchor_reasons,
         "effective_budget": effective_budget,
+        "initial_budget": initial_budget,
+        "final_budget": final_budget,
+        "budget_decision_source": (
+            "query_structure" if explicit_deep_reasons else "default_shallow_probe"
+        ),
+        "escalation_reason": (
+            explicit_deep_reasons[0] if explicit_deep_reasons else ""
+        ),
+        "explicit_deep_reasons": explicit_deep_reasons,
         "pure_surface_chitchat": False,
         "pure_chitchat_prior": pure_chitchat_prior,
         "pure_chitchat_prior_reasons": pure_prior_reasons,
@@ -433,6 +572,7 @@ def build_retrieval_budget(
             "status": "ready" if pure_chitchat_prior else "vetoed_or_low_confidence",
         },
         "recall_markers": recall_markers,
+        "deep_recall_markers": deep_recall_markers,
         "budget_order": {
             "skip": BUDGET_ORDER[BUDGET_SKIP],
             "shallow": BUDGET_ORDER[BUDGET_SHALLOW],
@@ -508,6 +648,9 @@ def finalize_retrieval_budget(
         budget["route_budget"] = BUDGET_SKIP
         budget["effective_budget"] = BUDGET_SKIP
         budget["sentinel"]["reason"] = "below_rescue_floor"
+        budget["final_budget"] = BUDGET_SKIP
+        budget["budget_decision_source"] = "pure_chitchat_sentinel"
+        budget["escalation_reason"] = "no_candidate_over_rescue_floor"
     elif called and floor_qualified_count > 0:
         budget["route_budget"] = BUDGET_NORMAL
         budget["effective_budget"] = BUDGET_NORMAL

@@ -135,9 +135,17 @@ async def run_probe(service: GatewayService, query: str = "query") -> tuple[bool
 async def verify_probe_contracts() -> None:
     cue_scene = scene("cue", cues=["shared vow"], reviewed=True)
     skip, debug = await run_probe(service_for([cue_scene]), "shared vow")
-    assert skip is False
-    assert debug["applied"] is True
-    assert debug["candidate_field"] == "authored_cue"
+    assert skip is True
+    assert debug["applied"] is False
+    assert debug["candidates"][0]["field"] == "authored_cue"
+    assert debug["candidates"][0]["reason"] == "candidate_only_requires_body_evidence"
+
+    title_scene = scene("title", title="小小宇宙与恒星")
+    skip, debug = await run_probe(service_for([title_scene]), "小小宇宙与恒星")
+    assert skip is True
+    assert debug["applied"] is False
+    assert debug["candidates"][0]["field"] == "title"
+    assert debug["candidates"][0]["reason"] == "candidate_only_requires_body_evidence"
 
     legacy_tag_scene = scene("legacy", tags=["shared vow"])
     skip, debug = await run_probe(
@@ -208,15 +216,22 @@ async def verify_probe_contracts() -> None:
     assert skip is True
     assert debug["candidates"][0]["reason"] == "domain_explicit_only"
     skip, debug = await run_probe(service_for([explicit_only]), "private name")
+    assert skip is True
+    assert debug["applied"] is False
+    explicit_with_body = service_for(
+        [explicit_only],
+        [{"scene_id": "explicit", "score": 0.99, "field": "scene_body"}],
+    )
+    skip, debug = await run_probe(explicit_with_body, "private name")
     assert skip is False
-    assert debug["candidate_field"] == "authored_cue"
+    assert debug["candidate_field"] == "scene_body"
 
     shadow = service_for([cue_scene], mode="shadow")
     skip, debug = await run_probe(shadow, "shared vow")
     assert skip is True
-    assert debug["would_apply"] is True
+    assert debug["would_apply"] is False
     assert debug["applied"] is False
-    assert debug["reason"] == "shadow_would_veto"
+    assert debug["reason"] == "no_strong_trusted_scene_evidence"
 
 
 async def verify_veto_never_injects() -> None:
@@ -239,15 +254,18 @@ async def verify_veto_never_injects() -> None:
         RequestStub({"query": "shared vow", "include_debug": True})
     )
     body = json.loads(response.body)
-    assert called["normal_retrieval"] is True
+    assert called["normal_retrieval"] is False
     assert body["cards"] == []
     assert body["recalled_ids"] == []
-    assert body["debug"]["semantic_recall_debug"]["scene_evidence_veto"]["applied"] is True
+    assert body["debug"]["semantic_recall_debug"]["scene_evidence_veto"]["applied"] is False
 
 
 async def verify_full_hook_reuses_route_vector() -> None:
     target = scene("cue", cues=["shared vow"], reviewed=True)
-    service = service_for([target])
+    service = service_for(
+        [target],
+        [{"scene_id": "cue", "score": 0.55, "field": "scene_body"}],
+    )
     service._authorize = lambda authorization: None
     service.upstream_default_model = ""
     service.upstream_models = []

@@ -124,12 +124,12 @@ async def verify() -> None:
 
         explicit_item = {
             "bucket": scene("inner"),
-            "semantic_score": 0.01,
+            "semantic_score": 0.55,
             "authored_cue_match": True,
             "authored_cue_terms": ["我们的心事"],
         }
         assert service._admit_bucket_for_recall("我们的心事", explicit_item) is True
-        assert explicit_item["admission_reason"] == "scene_authored_evidence"
+        assert explicit_item["admission_reason"] == "scene_strong_semantic"
 
         assert service._canonical_scene_domain_policy_rejection(
             scene("relationship"),

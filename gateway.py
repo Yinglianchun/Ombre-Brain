@@ -27,6 +27,7 @@ from dehydrator import Dehydrator
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
 from favorite_tags import has_favorite_memory_tag, is_flavor_tag
+from fact_events import FactEventStore
 from identity import identity_names
 from gateway_state import GatewayStateStore
 from memory_diffusion import (
@@ -103,7 +104,9 @@ from memory_recall.cue_semantic import (
     scene_cues_are_reviewed,
     scene_is_cue_indexable,
 )
+from memory_recall.fact_event_semantic import FactEventSemanticIndex
 from memory_recall.retrieval_budget import (
+    apply_fact_event_probe,
     build_retrieval_budget,
     finalize_retrieval_budget,
     partition_candidates_by_absolute_floor,
@@ -388,6 +391,11 @@ class GatewayService:
         self.embedding_engine = embedding_engine or EmbeddingEngine(config)
         self.semantic_recall_router = SemanticRecallRouter(config, self.embedding_engine)
         self.cue_semantic_index = CueSemanticIndex(config, self.embedding_engine)
+        self.fact_event_store = FactEventStore(config, create=False)
+        self.fact_event_semantic_index = FactEventSemanticIndex(
+            config,
+            self.embedding_engine,
+        )
         self.domain_recall_policy = DomainRecallPolicy(config)
         self.reranker_engine = reranker_engine or RerankerEngine(config)
         self.scene_evidence_store = scene_evidence_store or SceneEvidenceStore(config)
@@ -2189,6 +2197,13 @@ class GatewayService:
                 retrieval_budget,
             )
             finalize_retrieval_budget(retrieval_budget, sentinel_debug)
+            apply_fact_event_probe(
+                retrieval_budget,
+                self.fact_event_semantic_index.search_by_embedding(
+                    semantic_query_vector or [],
+                    top_k=max(3, int(retrieval_budget.get("semantic_top_k") or 3)),
+                ),
+            )
         route_skip_proposed = self.semantic_recall_router.should_apply_skip(
             semantic_recall_debug
         )
@@ -13814,6 +13829,26 @@ class GatewayService:
             for bucket in selected_buckets or []
             if isinstance(bucket, dict) and str(bucket.get("id") or "")
         }
+        selected_scene = next(
+            (
+                bucket
+                for bucket in selected_buckets or []
+                if isinstance(bucket, dict)
+                and (
+                    str((bucket.get("metadata") or {}).get("memory_value_source") or "")
+                    == "authored_scene"
+                    or str((bucket.get("metadata") or {}).get("object_kind") or "").lower()
+                    == "scene"
+                )
+            ),
+            None,
+        )
+        if selected_scene is not None:
+            retrieval_budget["final_budget"] = "deep"
+            retrieval_budget["budget_decision_source"] = "selected_memory_kind"
+            retrieval_budget["escalation_reason"] = "scene_selected_after_admission"
+            retrieval_budget["selected_memory_kind"] = "scene"
+            retrieval_budget["selected_memory_id"] = str(selected_scene.get("id") or "")
         suppression_by_id: dict[str, str] = {}
         for item in suppressed_candidates or []:
             if not isinstance(item, dict):
@@ -15155,6 +15190,7 @@ class GatewayService:
                         and normal_reason
                         in {
                             "scene_below_semantic_route_threshold",
+                            "scene_candidate_only_without_body_evidence",
                             "scene_without_authored_or_semantic_evidence",
                         }
                     ):
@@ -16145,14 +16181,19 @@ class GatewayService:
         item["evidence_labels"] = evidence_labels
         item["hard_evidence_labels"] = hard_evidence_labels
         if self._is_canonical_scene_bucket(bucket):
-            direct_labels = [
+            candidate_entrance_labels = [
                 label
-                for label in ("authored_cue", "exact_anchor", "title_anchor")
+                for label in ("authored_cue", "title_anchor")
+                if label in hard_evidence_labels
+            ]
+            exact_labels = [
+                label
+                for label in ("exact_anchor",)
                 if label in hard_evidence_labels
             ]
             domain_rejection = self._canonical_scene_domain_policy_rejection(
                 bucket,
-                direct_evidence=direct_labels,
+                direct_evidence=[*candidate_entrance_labels, *exact_labels],
             )
             if domain_rejection:
                 item["admission_reason"] = str(domain_rejection["reason"])
@@ -16175,22 +16216,25 @@ class GatewayService:
             semantic_admitted = semantic_score >= semantic_threshold
             item["recall_policy_debug"] = {
                 "canonical_scene": True,
-                "direct_evidence": direct_labels,
+                "candidate_entrances": candidate_entrance_labels,
+                "direct_evidence": exact_labels,
                 "semantic_score": round(semantic_score, 4),
                 "semantic_threshold": round(semantic_threshold, 4),
                 "semantic_route_guard": semantic_route_guard,
                 "auto": True,
             }
-            if not direct_labels and not semantic_admitted:
+            if not exact_labels and not semantic_admitted:
                 item["admission_reason"] = (
                     "scene_below_semantic_route_threshold"
                     if semantic_route_guard
+                    else "scene_candidate_only_without_body_evidence"
+                    if candidate_entrance_labels
                     else "scene_without_authored_or_semantic_evidence"
                 )
                 return False
             item["admission_reason"] = (
-                "scene_authored_evidence"
-                if direct_labels
+                "scene_exact_evidence"
+                if exact_labels
                 else "scene_strong_semantic"
             )
             policy_store = getattr(self, "domain_recall_policy", None)
@@ -16463,7 +16507,11 @@ class GatewayService:
         authored_cue_match: bool = False,
     ) -> float:
         score = self._clamp(self._safe_float(semantic_score, 0.0))
-        if exact_match or authored_cue_match:
+        # Authored cues are retrieval entrances, not independent evidence that
+        # the Scene body answers this query.  Even several matching cues must
+        # still pass the body-semantic admission check below.  Exact anchors
+        # remain direct evidence because they bind literal source text/IDs.
+        if exact_match:
             score = max(score, self.first_card_min_score)
         return round(score, 4)
 
@@ -16605,6 +16653,7 @@ class GatewayService:
             return True
 
         candidates: list[dict[str, Any]] = []
+        direct_labels_by_scene: dict[str, list[str]] = {}
         for scene_id, bucket in scene_map.items():
             meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
             cue_terms = self._bucket_authored_cue_terms(query, bucket)
@@ -16614,6 +16663,7 @@ class GatewayService:
             if not field:
                 continue
             direct_label = "authored_cue" if field == "authored_cue" else "title_anchor"
+            direct_labels_by_scene[scene_id] = [direct_label]
             rejection = self._canonical_scene_domain_policy_rejection(
                 bucket,
                 direct_evidence=[direct_label],
@@ -16625,8 +16675,11 @@ class GatewayService:
                     "field": field,
                     "score": 1.0,
                     "threshold": 1.0,
-                    "qualified": rejection is None,
-                    "reason": str((rejection or {}).get("reason") or "trusted_direct_scene_evidence"),
+                    "qualified": False,
+                    "reason": str(
+                        (rejection or {}).get("reason")
+                        or "candidate_only_requires_body_evidence"
+                    ),
                 }
             )
 
@@ -16664,7 +16717,7 @@ class GatewayService:
                         continue
                     rejection = self._canonical_scene_domain_policy_rejection(
                         bucket,
-                        direct_evidence=[],
+                        direct_evidence=direct_labels_by_scene.get(scene_id, []),
                     )
                     score = self._clamp(self._safe_float(row.get("score"), 0.0))
                     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
@@ -16908,11 +16961,7 @@ class GatewayService:
         return chosen
 
     def _dynamic_bucket_item_has_reliable_recall_signal(self, query: str, item: dict) -> bool:
-        if (
-            item.get("exact_anchor_match")
-            or item.get("authored_cue_match")
-            or item.get("title_anchor_terms")
-        ):
+        if item.get("exact_anchor_match"):
             return True
         bucket = item.get("bucket") if isinstance(item, dict) else None
         if self._is_canonical_scene_bucket(bucket):

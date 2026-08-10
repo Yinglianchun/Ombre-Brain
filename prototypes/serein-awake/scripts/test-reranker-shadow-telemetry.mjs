@@ -8,6 +8,7 @@ import {
   createRecallSimulationTrainingLabel,
   evaluationGroupIdFor,
   normalizeCandidateTelemetrySnapshot,
+  normalizeSimulationTelemetrySnapshot,
   normalizeSimulationQuery,
   queryFamilyIdFor,
   upsertRecallSimulationTrainingLabel,
@@ -111,6 +112,50 @@ const normalizedRoundTrip = normalizeCandidateTelemetrySnapshot(normalLabel.cand
 assert.equal(normalizedRoundTrip[0].sourceTelemetry.bodySemantic.score, 0.63);
 assert.equal(normalizedRoundTrip[0].sourceTelemetry.cueSemantic.score, 0.77);
 assert.equal(normalizedRoundTrip[0].eligibility.absoluteFloorQualified, true);
+
+const threeStateTelemetry = normalizeSimulationTelemetrySnapshot({
+  retrieval_budget: {
+    mode: "simulation_shadow",
+    initial_budget: "shallow",
+    final_budget: "deep",
+    budget_decision_source: "typed_candidate_probe",
+    escalation_reason: "event_candidate_over_rescue_floor",
+    typed_candidate_id: "event-postcard",
+    typed_candidate_kind: "event",
+    typed_candidate_score: 0.73,
+    fact_event_probe: {
+      status: "ok",
+      candidate_count: 2,
+      matches: [
+        {
+          memory_id: "event-postcard",
+          memory_kind: "event",
+          score: 0.73,
+          importance: 5,
+          local_date: "2026-08-08",
+          local_start_time: "20:17",
+          covered_by_scene_id: "",
+        },
+        {
+          memory_id: "fact-private-body",
+          memory_kind: "fact",
+          score: 0.61,
+          importance: 3,
+          local_date: "2026-08-08",
+          local_start_time: "18:01",
+          covered_by_scene_id: "scene-private-body",
+          body: "不得导出的 Fact 正文",
+        },
+      ],
+    },
+  },
+}, { force: true });
+assert.equal(threeStateTelemetry.budget.initialBudget, "shallow");
+assert.equal(threeStateTelemetry.budget.finalBudget, "deep");
+assert.equal(threeStateTelemetry.budget.escalationReason, "event_candidate_over_rescue_floor");
+assert.equal(threeStateTelemetry.budget.factEventProbe.matches[0].memoryKind, "event");
+assert.equal(threeStateTelemetry.budget.factEventProbe.matches[1].coveredBySceneId, "scene-private-body");
+assert.equal(Object.hasOwn(threeStateTelemetry.budget.factEventProbe.matches[1], "body"), false);
 
 const updated = upsertRecallSimulationTrainingLabel({
   query: "  餐桌上的巨型水果  ",

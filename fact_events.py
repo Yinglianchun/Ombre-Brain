@@ -1,8 +1,9 @@
 """Canonical source-bound Fact and Event storage.
 
 Facts and Events are extracted directly from trusted raw dialogue. They are
-not derived from Scene prose and do not participate in recall, embeddings, or
-the memory graph yet. Exact source refs remain the evidence boundary.
+not derived from Scene prose and do not participate in the memory graph.
+Rebuildable recall derivatives may embed their bodies, while this canonical
+store and its exact source refs remain the evidence boundary.
 """
 
 from __future__ import annotations

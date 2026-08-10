@@ -420,6 +420,7 @@ gateway:
   freshness_weight: 0.03             # legacy main score only; dynamic caps it as a tiny adjustment
   first_card_min_score: 0.55
   retrieval_budget_reranker_entry_floor: 0.50 # simulation only: anchored body-semantic gray zone; never direct admission
+  fact_event_recall_shadow_enabled: false # read-only body-vector candidates in simulation debug; never injects
   second_card_min_score: 0.50
   second_card_relative_score: 0.85
   high_confidence_semantic_score: 0.72

@@ -474,6 +474,11 @@ function normalizeSimulationTelemetrySnapshot(input, options = {}) {
     : budget.cue_semantic && typeof budget.cue_semantic === "object"
       ? budget.cue_semantic
       : {};
+  const factEventProbe = budget.factEventProbe && typeof budget.factEventProbe === "object"
+    ? budget.factEventProbe
+    : budget.fact_event_probe && typeof budget.fact_event_probe === "object"
+      ? budget.fact_event_probe
+      : {};
   const rerank = budget.rerank && typeof budget.rerank === "object" ? budget.rerank : {};
   const routeScores = normalizedRouteScores(semantic.scores);
   const hasShape = Boolean(
@@ -506,6 +511,15 @@ function normalizeSimulationTelemetrySnapshot(input, options = {}) {
       surfaceRoute: cleanText(budget.surface_route) || null,
       routeBudget: cleanText(budget.route_budget) || null,
       effectiveBudget: cleanText(budget.effective_budget) || null,
+      initialBudget: cleanText(budget.initial_budget) || null,
+      finalBudget: cleanText(budget.final_budget) || null,
+      decisionSource: cleanText(budget.budget_decision_source) || null,
+      escalationReason: cleanText(budget.escalation_reason) || null,
+      typedCandidateId: cleanText(budget.typed_candidate_id) || null,
+      typedCandidateKind: cleanText(budget.typed_candidate_kind) || null,
+      typedCandidateScore: nullableNumber(budget.typed_candidate_score),
+      selectedMemoryId: cleanText(budget.selected_memory_id) || null,
+      selectedMemoryKind: cleanText(budget.selected_memory_kind) || null,
       anchorOverride: normalizedDebugBoolean(budget.anchor_override),
       anchorOverrideReasons: (Array.isArray(budget.anchor_override_reasons)
         ? budget.anchor_override_reasons
@@ -538,6 +552,25 @@ function normalizeSimulationTelemetrySnapshot(input, options = {}) {
         reason: cleanText(cueSemantic.reason) || null,
         candidateCount: nullableNonNegativeInteger(cueSemantic.candidate_count),
         datasetVersion: cleanText(cueSemantic.dataset_version) || null,
+      },
+      factEventProbe: {
+        status: cleanText(factEventProbe.status) || null,
+        reason: cleanText(factEventProbe.reason) || null,
+        candidateCount: nullableNonNegativeInteger(factEventProbe.candidate_count),
+        matches: (Array.isArray(factEventProbe.matches) ? factEventProbe.matches : [])
+          .map((item) => ({
+            memoryId: cleanText(item?.memory_id || item?.memoryId) || null,
+            memoryKind: cleanText(item?.memory_kind || item?.memoryKind) || null,
+            score: nullableNumber(item?.score),
+            importance: nullableNonNegativeInteger(item?.importance),
+            localDate: cleanText(item?.local_date || item?.localDate) || null,
+            localStartTime: cleanText(item?.local_start_time || item?.localStartTime) || null,
+            coveredBySceneId: cleanText(
+              item?.covered_by_scene_id || item?.coveredBySceneId,
+            ) || null,
+          }))
+          .filter((item) => item.memoryId && ["fact", "event"].includes(item.memoryKind))
+          .slice(0, 12),
       },
       rerank: {
         wouldCall: normalizedDebugBoolean(rerank.would_call),
