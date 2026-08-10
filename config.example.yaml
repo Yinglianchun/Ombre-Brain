@@ -424,7 +424,7 @@ gateway:
   episode_verifier_shadow_enabled: false # ambiguous Scene candidates only; negative verdicts affect simulation, never ordinary Hook injection
   episode_verifier_model: "deepseek-v4-flash"
   episode_verifier_timeout_seconds: 10
-  episode_verifier_max_candidates: 2
+  episode_verifier_max_candidates: 1
   episode_verifier_min_confidence: 0.70
   second_card_min_score: 0.50
   second_card_relative_score: 0.85

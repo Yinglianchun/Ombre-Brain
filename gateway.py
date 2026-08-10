@@ -663,7 +663,7 @@ class GatewayService:
         )
         self.episode_verifier_max_candidates = max(
             1,
-            min(3, int(self.gateway_cfg.get("episode_verifier_max_candidates", 2))),
+            min(3, int(self.gateway_cfg.get("episode_verifier_max_candidates", 1))),
         )
         self.episode_verifier_min_confidence = self._clamp(
             float(self.gateway_cfg.get("episode_verifier_min_confidence", 0.70))
@@ -13921,7 +13921,7 @@ class GatewayService:
             or "deepseek-v4-flash"
         )
         max_candidates = max(
-            1, int(getattr(self, "episode_verifier_max_candidates", 2) or 2)
+            1, int(getattr(self, "episode_verifier_max_candidates", 1) or 1)
         )
         timeout_seconds = max(
             0.5,
