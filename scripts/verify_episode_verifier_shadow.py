@@ -59,6 +59,14 @@ def budget() -> dict:
     }
 
 
+noisy_decisions = GatewayService._parse_episode_verifier_response(
+    'analysis fragment {not json}\n```json\n'
+    '{"decisions":[{"candidate_id":"scene-symbolic","verdict":"symbolic_resonance"}]}'
+    '\n```'
+)
+assert noisy_decisions[0]["candidate_id"] == "scene-symbolic"
+
+
 topic_response = {
     "decisions": [
         {

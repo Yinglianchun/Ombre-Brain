@@ -13854,19 +13854,18 @@ class GatewayService:
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
             text = re.sub(r"\s*```$", "", text).strip()
-        if not text.startswith("{"):
-            start = text.find("{")
-            end = text.rfind("}")
-            if start >= 0 and end > start:
-                text = text[start : end + 1]
-        try:
-            raw = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError("invalid_json") from exc
-        decisions = raw.get("decisions") if isinstance(raw, dict) else None
-        if not isinstance(decisions, list):
-            raise ValueError("decisions_missing")
-        return [item for item in decisions if isinstance(item, dict)]
+        decoder = json.JSONDecoder()
+        for offset, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                raw, _ = decoder.raw_decode(text[offset:])
+            except json.JSONDecodeError:
+                continue
+            decisions = raw.get("decisions") if isinstance(raw, dict) else None
+            if isinstance(decisions, list):
+                return [item for item in decisions if isinstance(item, dict)]
+        raise ValueError("invalid_json")
 
     async def _episode_verifier_completion(self, payload: dict[str, Any]) -> tuple[str, str]:
         response = await self._forward_upstream(payload)
