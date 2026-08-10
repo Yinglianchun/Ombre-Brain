@@ -393,6 +393,38 @@ assert strong_body_suppressed == []
 assert strong_body_admitted[0]["authored_cue_match"] is False
 assert strong_body_admitted[0]["authored_cue_candidate_match"] is True
 
+deep_cue_service = service({"scene-watermelon": 0.20})
+deep_cue_service._bucket_authored_cue_terms = cue_service._bucket_authored_cue_terms
+deep_cue_budget = deep_cue_service._build_retrieval_budget_debug(
+    "给予别人善意也是在善待自己",
+    route_debug(),
+)
+deep_cue_budget["effective_budget"] = "deep"
+deep_cue_admitted, deep_cue_suppressed = asyncio.run(
+    deep_cue_service._dynamic_bucket_candidate_items(
+        "给予别人善意也是在善待自己",
+        "simulation",
+        [watermelon],
+        semantic_recall_debug={"retrieval_budget": deep_cue_budget},
+        allow_semantic_session_dedupe=False,
+    )
+)
+assert deep_cue_admitted == []
+assert len(deep_cue_suppressed) == 1
+assert deep_cue_suppressed[0]["authored_cue_match"] is False
+assert deep_cue_suppressed[0]["authored_cue_candidate_match"] is True
+assert deep_cue_suppressed[0]["admission_reason"] in {
+    "candidate_only_requires_reranker",
+    "pending_reranker_shadow_candidate_only",
+}
+deep_cue_service._finalize_retrieval_budget_candidate_debug(
+    deep_cue_budget,
+    deep_cue_admitted,
+    deep_cue_suppressed,
+)
+deep_cue_debug = deep_cue_budget["cheap_retrieval"]["candidates"][0]
+assert deep_cue_debug["cue_lexical_role"] == "candidate_only"
+
 without_cues_budget = cue_service._build_retrieval_budget_debug(
     "给予别人善意也是在善待自己",
     route_debug(),

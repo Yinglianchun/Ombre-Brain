@@ -15141,14 +15141,34 @@ class GatewayService:
         semantic_norms = self._normalized_score_map(semantic_scores)
         # Ordinary full-body keyword matches only expand the candidate pool.
         # Only admission-capable explicit lexical evidence contributes to the
-        # fusion score. Shallow cue discovery is candidate-only in shadow mode.
+        # fusion score. A single authored cue is always candidate-only: it may
+        # retrieve a Scene for inspection, but it cannot become admission
+        # evidence or inflate the Scene score by itself.
         shallow_cue_candidate_only = bool(
             budget_shadow
             and str(retrieval_budget.get("effective_budget") or "") == "shallow"
         )
-        authored_cue_score_debug = (
-            {} if shallow_cue_candidate_only else authored_cue_debug
-        )
+        authored_cue_candidate_only_ids = {
+            str(bucket_id)
+            for bucket_id, terms in authored_cue_debug.items()
+            if terms
+            and (
+                shallow_cue_candidate_only
+                or len(
+                    {
+                        self._compact_lookup_key(term)
+                        for term in terms
+                        if self._compact_lookup_key(term)
+                    }
+                )
+                == 1
+            )
+        }
+        authored_cue_score_debug = {
+            bucket_id: terms
+            for bucket_id, terms in authored_cue_debug.items()
+            if str(bucket_id) not in authored_cue_candidate_only_ids
+        }
         keyword_basis = self._explicit_lexical_score_basis(
             exact_scores,
             authored_cue_score_debug,
@@ -15172,7 +15192,8 @@ class GatewayService:
             authored_cue_terms = list(authored_cue_debug.get(bucket_id) or [])
             authored_cue_match = bool(authored_cue_terms)
             authored_cue_candidate_match = bool(
-                shallow_cue_candidate_only and authored_cue_match
+                authored_cue_match
+                and str(bucket_id) in authored_cue_candidate_only_ids
             )
             authored_cue_admission_match = bool(
                 authored_cue_match and not authored_cue_candidate_match
@@ -15278,12 +15299,12 @@ class GatewayService:
                     "authored_cue_terms": (
                         authored_cue_terms if authored_cue_admission_match else []
                     ),
+                    "authored_cue_candidate_match": authored_cue_candidate_match,
+                    "authored_cue_candidate_terms": (
+                        authored_cue_terms if authored_cue_candidate_match else []
+                    ),
                     **(
                         {
-                            "authored_cue_candidate_match": authored_cue_candidate_match,
-                            "authored_cue_candidate_terms": (
-                                authored_cue_terms if authored_cue_candidate_match else []
-                            ),
                             "cue_semantic_candidate_match": cue_semantic_candidate_match,
                             "cue_semantic_score": cue_semantic_score,
                             "cue_semantic_terms": list(
