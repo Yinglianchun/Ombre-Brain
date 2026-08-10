@@ -23,6 +23,7 @@ def service(response: dict) -> GatewayService:
     instance._is_canonical_scene_bucket = lambda _bucket: True
 
     async def completion(_payload):
+        instance._last_episode_payload = _payload
         return json.dumps(response, ensure_ascii=False), ""
 
     instance._episode_verifier_completion = completion
@@ -81,11 +82,13 @@ topic_response = {
 }
 topic_item = candidate()
 topic_budget = budget()
+topic_service = service(topic_response)
 asyncio.run(
-    service(topic_response)._apply_episode_verifier_shadow(
+    topic_service._apply_episode_verifier_shadow(
         "我在刷小红书", [topic_item], topic_budget
     )
 )
+assert topic_service._last_episode_payload["thinking"] == {"type": "disabled"}
 assert topic_item["episode_verifier_shadow"]["verdict"] == "same_topic_only"
 assert topic_item["episode_verifier_shadow"]["decision_applied"] is True
 assert topic_budget["episode_verifier"]["decision_scope"] == (

@@ -13937,6 +13937,7 @@ class GatewayService:
         debug.update(
             enabled=enabled,
             model=model,
+            thinking_mode="disabled",
             decision_scope="simulation_negative_veto_only",
             called=False,
             candidate_count=0,
@@ -13984,6 +13985,7 @@ class GatewayService:
             "temperature": 0,
             "max_tokens": 1000,
             "response_format": {"type": "json_object"},
+            "thinking": {"type": "disabled"},
             "stream": False,
         }
         started_at = time.perf_counter()
