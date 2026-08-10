@@ -423,7 +423,7 @@ gateway:
   fact_event_recall_shadow_enabled: false # read-only body-vector candidates in simulation debug; never injects
   episode_verifier_shadow_enabled: false # ambiguous Scene candidates only; negative verdicts affect simulation, never ordinary Hook injection
   episode_verifier_model: "deepseek-v4-flash"
-  episode_verifier_timeout_seconds: 6
+  episode_verifier_timeout_seconds: 10
   episode_verifier_max_candidates: 2
   episode_verifier_min_confidence: 0.70
   second_card_min_score: 0.50

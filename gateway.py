@@ -658,7 +658,7 @@ class GatewayService:
             0.5,
             min(
                 15.0,
-                float(self.gateway_cfg.get("episode_verifier_timeout_seconds", 6)),
+                float(self.gateway_cfg.get("episode_verifier_timeout_seconds", 10)),
             ),
         )
         self.episode_verifier_max_candidates = max(
@@ -13926,7 +13926,7 @@ class GatewayService:
         )
         timeout_seconds = max(
             0.5,
-            float(getattr(self, "episode_verifier_timeout_seconds", 6) or 6),
+            float(getattr(self, "episode_verifier_timeout_seconds", 10) or 10),
         )
         min_confidence = self._clamp(
             self._safe_float(
