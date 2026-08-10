@@ -179,6 +179,13 @@ const rerankerShadowReasonLabels = {
   scored_shadow_only: "已评分，仅观察",
 };
 
+const episodeVerifierLabels = {
+  same_episode: "同一件事",
+  symbolic_resonance: "意象呼应",
+  same_topic_only: "只是同主题",
+  unrelated: "无关",
+};
+
 const candidateRelevanceOptions = [
   { value: "core", label: "核心相关" },
   { value: "weak", label: "弱相关" },
@@ -242,6 +249,7 @@ function RecallSimulator() {
   const rerankerShadow = retrievalBudget.rerank ?? {};
   const cueSemanticShadow = retrievalBudget.cue_semantic ?? {};
   const factEventProbe = retrievalBudget.fact_event_probe ?? {};
+  const episodeVerifier = retrievalBudget.episode_verifier ?? {};
   const ablationDebug = retrievalBudget.recall_ablation ?? semantic.recall_ablation ?? {
     mode: recallAblation,
   };
@@ -403,6 +411,7 @@ function RecallSimulator() {
               <div><dt>cue embedding</dt><dd>{cueSemanticShadow.status === "available" ? `${cueSemanticShadow.candidate_count ?? 0} 条候选 · v${cueSemanticShadow.dataset_version ?? "?"}` : cueSemanticShadow.reason || "未建立索引"}</dd></div>
               <div><dt>Fact / Event probe</dt><dd>{factEventProbe.status === "ok" ? `${factEventProbe.candidate_count ?? 0} 条 · ${(factEventProbe.matches || []).slice(0, 3).map((item) => `${item.memory_kind}:${percent(item.score)}`).join(" · ") || "无达标候选"}` : factEventProbe.reason || factEventProbe.status || "未启用"}</dd></div>
               <div><dt>reranker shadow</dt><dd>{rerankerShadow.called ? `${rerankerShadow.score_count ?? 0} / ${rerankerShadow.candidate_count ?? 0} 已评分 · 不参与决定` : rerankerShadow.would_call ? rerankerShadowReasonLabels[rerankerShadow.reason] || rerankerShadow.reason || "有资格，尚未调用" : rerankerShadowReasonLabels[rerankerShadow.reason] || rerankerShadow.reason || "未进入"}</dd></div>
+              <div><dt>同一事件核对</dt><dd>{episodeVerifier.called ? `${episodeVerifier.decisions?.length ?? 0} / ${episodeVerifier.candidate_count ?? 0} 已核对 · ${episodeVerifier.timing_ms ?? 0} ms` : episodeVerifier.reason || "未进入"}</dd></div>
               <div><dt>query_facets</dt><dd>{(retrievalBudget.query_facets || []).map((facet) => `${facet.kind}:${facet.value}`).join(" · ") || "—"}</dd></div>
             </dl>
             {rerankerShadow.score_count > 0 && rerankerShadow.decision_applied === false && (
@@ -455,6 +464,8 @@ function RecallSimulator() {
                       <div><dt>reranker shadow</dt><dd>{candidate.reranker_shadow?.score == null ? rerankerShadowLabels[candidate.reranker_shadow?.status] || candidate.reranker_shadow?.status || "未调用" : percent(candidate.reranker_shadow.score)}</dd></div>
                       <div><dt>未调用原因</dt><dd>{candidate.reranker_shadow?.called === false ? candidate.reranker_shadow?.called_false_reason || candidate.reranker_shadow?.reason || "未记录" : "—"}</dd></div>
                       <div><dt>原文证据</dt><dd>{candidate.reranker_shadow?.evidence_status === "bound" ? `${candidate.reranker_shadow.evidence_count ?? 0} 条绑定片段` : "unknown（不等于 unsupported）"}</dd></div>
+                      <div><dt>同一事件核对</dt><dd>{candidate.episode_verifier?.verdict ? `${episodeVerifierLabels[candidate.episode_verifier.verdict] || candidate.episode_verifier.verdict} · ${percent(candidate.episode_verifier.confidence)}` : "未调用"}</dd></div>
+                      <div><dt>核对依据</dt><dd>{candidate.episode_verifier?.grounded_cue || candidate.episode_verifier?.current_evidence_span || candidate.episode_verifier?.reason || "—"}</dd></div>
                     </dl>
                     {candidate.reranker_shadow?.score != null && candidate.reranker_shadow?.decision_applied === false && (
                       <p className="recall-evidence-decomposition__note">

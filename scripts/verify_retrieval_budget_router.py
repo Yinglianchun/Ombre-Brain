@@ -222,6 +222,39 @@ assert address_admitted == []
 assert address_suppressed[0]["admission_reason"] == "surface_only_query"
 assert address_suppressed[0]["recall_policy_debug"]["surface_only_kind"] == "address_only"
 
+topic_service = service({"scene-watermelon": 0.72})
+topic_service.episode_verifier_shadow_enabled = True
+topic_service.episode_verifier_model = "deepseek-v4-flash"
+topic_service.episode_verifier_timeout_seconds = 2
+topic_service.episode_verifier_max_candidates = 1
+topic_service.episode_verifier_min_confidence = 0.70
+
+async def topic_verdict(_payload):
+    return (
+        '{"decisions":[{"candidate_id":"scene-watermelon",'
+        '"verdict":"same_topic_only","confidence":0.95,'
+        '"current_evidence_span":"","grounded_cue":"",'
+        '"reason":"current activity only"}]}',
+        "",
+    )
+
+topic_service._episode_verifier_completion = topic_verdict
+topic_budget = topic_service._build_retrieval_budget_debug(
+    "我在看水果", route_debug()
+)
+topic_admitted, topic_suppressed = asyncio.run(
+    topic_service._dynamic_bucket_candidate_items(
+        "我在看水果",
+        "simulation-same-topic-only",
+        [watermelon],
+        semantic_recall_debug={"retrieval_budget": topic_budget},
+        allow_semantic_session_dedupe=False,
+    )
+)
+assert topic_admitted == []
+assert topic_suppressed[0]["admission_reason"] == "episode_verifier_rejected"
+assert topic_suppressed[0]["episode_verifier_shadow"]["verdict"] == "same_topic_only"
+
 
 class CueSemanticIndex:
     def __init__(self):

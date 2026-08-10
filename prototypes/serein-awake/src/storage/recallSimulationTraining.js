@@ -247,6 +247,11 @@ export function normalizeCandidateTelemetrySnapshot(values, options = {}) {
       : raw.reranker_shadow && typeof raw.reranker_shadow === "object"
         ? raw.reranker_shadow
         : null;
+    const episodeVerifier = raw.episodeVerifier && typeof raw.episodeVerifier === "object"
+      ? raw.episodeVerifier
+      : raw.episode_verifier && typeof raw.episode_verifier === "object"
+        ? raw.episode_verifier
+        : null;
     const rawEligibility = raw.eligibility && typeof raw.eligibility === "object"
       ? raw.eligibility
       : {};
@@ -254,6 +259,7 @@ export function normalizeCandidateTelemetrySnapshot(values, options = {}) {
     const rawEvidence = raw.evidence && typeof raw.evidence === "object" ? raw.evidence : {};
     const hasTelemetryShape = Boolean(
       shadow
+      || episodeVerifier
       || raw.candidateSources
       || raw.candidate_sources
       || raw.rerankerEligible !== undefined
@@ -353,6 +359,25 @@ export function normalizeCandidateTelemetrySnapshot(values, options = {}) {
           ) || null
           : null,
         admissionStatus: cleanText(shadow.admissionStatus || shadow.admission_status) || null,
+      } : null,
+      episodeVerifier: episodeVerifier ? {
+        called: nullableBoolean(episodeVerifier.called),
+        model: cleanText(episodeVerifier.model) || null,
+        verdict: cleanText(episodeVerifier.verdict) || null,
+        confidence: nullableNumber(episodeVerifier.confidence),
+        currentEvidenceSpan: cleanText(
+          episodeVerifier.currentEvidenceSpan || episodeVerifier.current_evidence_span,
+        ) || null,
+        groundedCue: cleanText(
+          episodeVerifier.groundedCue || episodeVerifier.grounded_cue,
+        ) || null,
+        reason: cleanText(episodeVerifier.reason) || null,
+        decisionApplied: nullableBoolean(
+          episodeVerifier.decisionApplied ?? episodeVerifier.decision_applied,
+        ),
+        admissionEffect: cleanText(
+          episodeVerifier.admissionEffect || episodeVerifier.admission_effect,
+        ) || null,
       } : null,
       evidence: normalizedEvidenceStatus ? {
         status: normalizedEvidenceStatus,
@@ -480,6 +505,11 @@ function normalizeSimulationTelemetrySnapshot(input, options = {}) {
       ? budget.fact_event_probe
       : {};
   const rerank = budget.rerank && typeof budget.rerank === "object" ? budget.rerank : {};
+  const episodeVerifier = budget.episodeVerifier && typeof budget.episodeVerifier === "object"
+    ? budget.episodeVerifier
+    : budget.episode_verifier && typeof budget.episode_verifier === "object"
+      ? budget.episode_verifier
+      : {};
   const routeScores = normalizedRouteScores(semantic.scores);
   const hasShape = Boolean(
     Object.keys(semantic).length
@@ -584,6 +614,37 @@ function normalizeSimulationTelemetrySnapshot(input, options = {}) {
         model: cleanText(rerank.model) || null,
         decisionApplied: normalizedDebugBoolean(rerank.decision_applied),
         telemetryGeneratedAt: cleanText(rerank.telemetry_generated_at) || null,
+      },
+      episodeVerifier: {
+        enabled: normalizedDebugBoolean(episodeVerifier.enabled),
+        called: normalizedDebugBoolean(episodeVerifier.called),
+        model: cleanText(episodeVerifier.model) || null,
+        reason: cleanText(episodeVerifier.reason) || null,
+        decisionScope: cleanText(
+          episodeVerifier.decision_scope || episodeVerifier.decisionScope,
+        ) || null,
+        candidateCount: nullableNonNegativeInteger(
+          episodeVerifier.candidate_count ?? episodeVerifier.candidateCount,
+        ),
+        timingMs: nullableNonNegativeInteger(
+          episodeVerifier.timing_ms ?? episodeVerifier.timingMs,
+        ),
+        decisions: (Array.isArray(episodeVerifier.decisions)
+          ? episodeVerifier.decisions
+          : [])
+          .map((item) => ({
+            candidateId: cleanText(item?.candidate_id || item?.candidateId) || null,
+            verdict: cleanText(item?.verdict) || null,
+            confidence: nullableNumber(item?.confidence),
+            currentEvidenceSpan: cleanText(
+              item?.current_evidence_span || item?.currentEvidenceSpan,
+            ) || null,
+            groundedCue: cleanText(item?.grounded_cue || item?.groundedCue) || null,
+            decisionApplied: nullableBoolean(
+              item?.decision_applied ?? item?.decisionApplied,
+            ),
+          }))
+          .filter((item) => item.candidateId),
       },
     },
     sentinel: {

@@ -68,6 +68,17 @@ const candidate = {
     evidence_count: 0,
     telemetry_generated_at: "2026-08-06T09:00:00.123Z",
   },
+  episode_verifier: {
+    called: true,
+    model: "deepseek-v4-flash",
+    verdict: "symbolic_resonance",
+    confidence: 0.82,
+    current_evidence_span: "餐桌上的巨型水果",
+    grounded_cue: "巨型水果",
+    reason: "reviewed cue grounds the image",
+    decision_applied: false,
+    admission_effect: "shadow_only",
+  },
   evidence_source_text: "不得导出的证据原文",
 };
 
@@ -99,6 +110,9 @@ assert.deepEqual(normalLabel.candidateTelemetry[0].candidateSources, [
 ]);
 assert.equal(normalLabel.candidateTelemetry[0].rerankerShadow.score, 0.91);
 assert.equal(normalLabel.candidateTelemetry[0].rerankerShadow.decisionApplied, false);
+assert.equal(normalLabel.candidateTelemetry[0].episodeVerifier.verdict, "symbolic_resonance");
+assert.equal(normalLabel.candidateTelemetry[0].episodeVerifier.groundedCue, "巨型水果");
+assert.equal(normalLabel.candidateTelemetry[0].episodeVerifier.decisionApplied, false);
 assert.equal(normalLabel.candidateTelemetry[0].floors.entry, 0.50);
 assert.equal(Object.hasOwn(normalLabel.candidateTelemetry[0], "title"), false);
 assert.equal(Object.hasOwn(normalLabel.candidateTelemetry[0], "body"), false);
@@ -148,6 +162,22 @@ const threeStateTelemetry = normalizeSimulationTelemetrySnapshot({
         },
       ],
     },
+    episode_verifier: {
+      enabled: true,
+      called: true,
+      model: "deepseek-v4-flash",
+      reason: "scored",
+      decision_scope: "simulation_negative_veto_only",
+      candidate_count: 1,
+      timing_ms: 412,
+      decisions: [{
+        candidate_id: "scene-fruit",
+        verdict: "same_topic_only",
+        confidence: 0.94,
+        decision_applied: true,
+        admission_effect: "negative_veto",
+      }],
+    },
   },
 }, { force: true });
 assert.equal(threeStateTelemetry.budget.initialBudget, "shallow");
@@ -156,6 +186,9 @@ assert.equal(threeStateTelemetry.budget.escalationReason, "event_candidate_over_
 assert.equal(threeStateTelemetry.budget.factEventProbe.matches[0].memoryKind, "event");
 assert.equal(threeStateTelemetry.budget.factEventProbe.matches[1].coveredBySceneId, "scene-private-body");
 assert.equal(Object.hasOwn(threeStateTelemetry.budget.factEventProbe.matches[1], "body"), false);
+assert.equal(threeStateTelemetry.budget.episodeVerifier.called, true);
+assert.equal(threeStateTelemetry.budget.episodeVerifier.decisions[0].verdict, "same_topic_only");
+assert.equal(threeStateTelemetry.budget.episodeVerifier.decisions[0].decisionApplied, true);
 
 const updated = upsertRecallSimulationTrainingLabel({
   query: "  餐桌上的巨型水果  ",
