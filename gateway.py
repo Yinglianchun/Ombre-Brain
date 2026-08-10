@@ -13982,7 +13982,8 @@ class GatewayService:
                 },
             ],
             "temperature": 0,
-            "max_tokens": 600,
+            "max_tokens": 1000,
+            "response_format": {"type": "json_object"},
             "stream": False,
         }
         started_at = time.perf_counter()
