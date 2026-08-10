@@ -72,6 +72,7 @@ fact = apply_fact_event_probe(
                 "memory_id": "fact-uv",
                 "memory_kind": "fact",
                 "score": 0.74,
+                "importance": 3,
                 "covered_by_scene_id": "",
             }
         ],
@@ -124,5 +125,21 @@ finalize_retrieval_budget(
     {"called": True, "floor_qualified_count": 0, "candidates": []},
 )
 assert surface["final_budget"] == BUDGET_SKIP
+
+address = build_retrieval_budget(
+    "哥哥",
+    route="present_chitchat",
+    route_action="skip",
+    semantic_debug=route_debug(),
+)
+assert address["surface_only_kind"] == "address_only"
+
+contact = build_retrieval_budget(
+    "亲亲抱抱",
+    route="present_chitchat",
+    route_action="skip",
+    semantic_debug=route_debug(),
+)
+assert contact["surface_only_kind"] == "intimate_contact_only"
 
 print("retrieval budget three-state verification passed")

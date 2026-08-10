@@ -123,6 +123,7 @@ fact_budget = apply_fact_event_probe(
                 "memory_id": "fact-uv",
                 "memory_kind": "fact",
                 "score": 0.76,
+                "importance": 3,
                 "covered_by_scene_id": "",
             }
         ],
@@ -140,6 +141,7 @@ event_budget = apply_fact_event_probe(
                 "memory_id": "event-postcard",
                 "memory_kind": "event",
                 "score": 0.71,
+                "importance": 3,
                 "covered_by_scene_id": "",
             }
         ],
@@ -147,6 +149,42 @@ event_budget = apply_fact_event_probe(
 )
 assert event_budget["final_budget"] == BUDGET_DEEP
 assert event_budget["escalation_reason"] == "event_candidate_over_rescue_floor"
+
+low_importance_event = apply_fact_event_probe(
+    build("我在刷小红书"),
+    {
+        "status": "ok",
+        "matches": [
+            {
+                "memory_id": "event-xiaohongshu",
+                "memory_kind": "event",
+                "score": 0.65,
+                "importance": 1,
+                "covered_by_scene_id": "",
+            }
+        ],
+    },
+)
+assert low_importance_event["final_budget"] == BUDGET_SHALLOW
+assert low_importance_event["typed_qualified_count"] == 0
+
+bare_address = apply_fact_event_probe(
+    build("哥哥"),
+    {
+        "status": "ok",
+        "matches": [
+            {
+                "memory_id": "event-address",
+                "memory_kind": "event",
+                "score": 0.90,
+                "importance": 5,
+                "covered_by_scene_id": "",
+            }
+        ],
+    },
+)
+assert bare_address["surface_only_kind"] == "address_only"
+assert bare_address["final_budget"] == BUDGET_SHALLOW
 
 covered_budget = finalize_retrieval_budget(
     build("刚吃完饭"),
@@ -162,6 +200,7 @@ apply_fact_event_probe(
                 "memory_id": "event-covered",
                 "memory_kind": "event",
                 "score": 0.70,
+                "importance": 3,
                 "covered_by_scene_id": "scene-covered",
             }
         ],

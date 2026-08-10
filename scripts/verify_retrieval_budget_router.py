@@ -207,6 +207,21 @@ mixed_admitted, mixed_suppressed = asyncio.run(
 assert [item["bucket"]["id"] for item in mixed_admitted] == ["scene-watermelon"]
 assert mixed_suppressed == []
 
+address_service = service({"scene-watermelon": 0.72})
+address_budget = address_service._build_retrieval_budget_debug("哥哥", route_debug())
+address_admitted, address_suppressed = asyncio.run(
+    address_service._dynamic_bucket_candidate_items(
+        "哥哥",
+        "simulation-address-only",
+        [watermelon],
+        semantic_recall_debug={"retrieval_budget": address_budget},
+        allow_semantic_session_dedupe=False,
+    )
+)
+assert address_admitted == []
+assert address_suppressed[0]["admission_reason"] == "surface_only_query"
+assert address_suppressed[0]["recall_policy_debug"]["surface_only_kind"] == "address_only"
+
 
 class CueSemanticIndex:
     def __init__(self):

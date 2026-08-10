@@ -15146,6 +15146,19 @@ class GatewayService:
             suppressed: list[dict] = []
             for raw_item in pool:
                 item = dict(raw_item)
+                if (
+                    budget_shadow
+                    and retrieval_budget.get("surface_only_kind")
+                    and self._is_canonical_scene_bucket(item.get("bucket"))
+                ):
+                    item["admission_reason"] = "surface_only_query"
+                    item["recall_policy_debug"] = {
+                        "simulation_shadow": True,
+                        "surface_only_kind": retrieval_budget["surface_only_kind"],
+                        "auto": True,
+                    }
+                    suppressed.append(item)
+                    continue
                 if required_terms and not self._bucket_matches_any_planner_term(item.get("bucket") or {}, required_terms):
                     item["admission_reason"] = "planner_must_terms_missing"
                     item["recall_policy_debug"] = {

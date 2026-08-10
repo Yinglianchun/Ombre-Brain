@@ -26,6 +26,21 @@ PURE_CHITCHAT_ROUTE_NAMES = frozenset({"present_chitchat"})
 PURE_CHITCHAT_MIN_CONFIDENCE = 0.84
 PURE_CHITCHAT_MIN_MARGIN = 0.08
 DEFAULT_SENTINEL_RESCUE_FLOOR = 0.55
+TYPED_RECALL_MIN_IMPORTANCE = 3
+
+_SURFACE_ONLY_ADDRESS_KEYS = frozenset(
+    {
+        "老公",
+        "哥哥",
+        "老婆",
+        "宝宝",
+        "宝贝",
+        "亲爱的",
+        "小乖",
+        "乖宝宝",
+    }
+)
+_SURFACE_ONLY_CONTACT_RE = re.compile(r"^(?:(?:亲亲)|(?:抱抱)|(?:贴贴)|(?:摸摸)|(?:蹭蹭))+$")
 
 REFERENCE_MARKERS = (
     "昨天那个",
@@ -202,6 +217,17 @@ def _bounded_float(value: object, default: float = 0.0) -> float:
     return max(0.0, min(1.0, number))
 
 
+def surface_only_query_kind(query: object) -> str:
+    """Identify a bare address or affectionate gesture with no recall payload."""
+
+    key = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(query or "").strip().lower())
+    if key in _SURFACE_ONLY_ADDRESS_KEYS:
+        return "address_only"
+    if key and _SURFACE_ONLY_CONTACT_RE.fullmatch(key):
+        return "intimate_contact_only"
+    return ""
+
+
 def _budget_channels(budget: str) -> list[str]:
     if budget == BUDGET_SKIP:
         return []
@@ -245,6 +271,7 @@ def apply_fact_event_probe(
         return budget
     probe = probe if isinstance(probe, Mapping) else {}
     budget["fact_event_probe"] = dict(probe)
+    budget["typed_min_importance"] = TYPED_RECALL_MIN_IMPORTANCE
     if str(probe.get("status") or "") != "ok":
         return budget
     floor = _bounded_float(
@@ -256,7 +283,11 @@ def apply_fact_event_probe(
         for item in probe.get("matches") or []
         if isinstance(item, Mapping)
         and _bounded_float(item.get("score"), 0.0) >= floor
+        and int(item.get("importance") or 0) >= TYPED_RECALL_MIN_IMPORTANCE
     ]
+    budget["typed_qualified_count"] = len(qualified)
+    if budget.get("surface_only_kind"):
+        return budget
     if not qualified:
         return budget
     covered = next(
@@ -337,6 +368,7 @@ def build_retrieval_budget(
     """
 
     text = " ".join(str(query or "").split()).strip()
+    surface_only_kind = surface_only_query_kind(text)
     semantic_debug = semantic_debug if isinstance(semantic_debug, Mapping) else {}
     planner = planner if isinstance(planner, Mapping) else {}
     anchor_plan = anchor_plan if isinstance(anchor_plan, Mapping) else {}
@@ -542,6 +574,7 @@ def build_retrieval_budget(
     return {
         "mode": "simulation_shadow",
         "surface_route": surface_route,
+        "surface_only_kind": surface_only_kind,
         "route_budget": route_budget,
         "anchor_override": anchor_override,
         "anchor_override_reasons": anchor_reasons,
