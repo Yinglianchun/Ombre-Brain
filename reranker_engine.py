@@ -48,7 +48,7 @@ class RerankerEngine:
             self.api_key and self.base_url and self.simulation_shadow_enabled
         )
         self.timeout = _float_between(rerank_cfg.get("timeout_seconds", 12), 12, 1, 120)
-        self.candidate_limit = _int_between(rerank_cfg.get("candidate_limit", 20), 20, 1, 100)
+        self.candidate_limit = _int_between(rerank_cfg.get("candidate_limit", 5), 5, 1, 100)
         self.score_weight = _float_between(rerank_cfg.get("score_weight", 0.65), 0.65, 0.0, 1.0)
 
     async def rerank(self, query: str, documents: list[str], top_n: int | None = None) -> list[RerankResult]:

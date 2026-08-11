@@ -170,7 +170,7 @@ reranker:
   model: "Qwen/Qwen3-Reranker-4B"
   base_url: ""
   # api_key: ""                   # Use OMBRE_RERANKER_API_KEY or reuse embedding key
-  candidate_limit: 30
+  candidate_limit: 5              # rerank only the strongest five candidates
   score_weight: 0.65
   timeout_seconds: 12
   # Env vars / 环境变量:

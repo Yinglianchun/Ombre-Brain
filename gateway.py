@@ -1017,7 +1017,7 @@ class GatewayService:
             "base_url": getattr(self.reranker_engine, "base_url", ""),
             "api_ready": bool(getattr(self.reranker_engine, "api_key", "")),
             "timeout_seconds": getattr(self.reranker_engine, "timeout", 12),
-            "candidate_limit": getattr(self.reranker_engine, "candidate_limit", 20),
+            "candidate_limit": getattr(self.reranker_engine, "candidate_limit", 5),
             "score_weight": getattr(self.reranker_engine, "score_weight", 0.65),
         }
 
@@ -10468,7 +10468,7 @@ class GatewayService:
             return candidates
         candidate_limit = min(
             len(candidates),
-            max(1, int(getattr(self.reranker_engine, "candidate_limit", 20) or 20)),
+            max(1, int(getattr(self.reranker_engine, "candidate_limit", 5) or 5)),
         )
         head = candidates[:candidate_limit]
         tail = candidates[candidate_limit:]
@@ -13771,7 +13771,7 @@ class GatewayService:
 
         candidate_limit = min(
             len(candidates),
-            max(1, int(getattr(engine, "candidate_limit", 20) or 20)),
+            max(1, int(getattr(engine, "candidate_limit", 5) or 5)),
         )
         ranked_pool = sorted(
             enumerate(candidates),
@@ -16116,7 +16116,7 @@ class GatewayService:
             return scored_candidates
         candidate_limit = min(
             len(scored_candidates),
-            max(1, int(getattr(self.reranker_engine, "candidate_limit", 20) or 20)),
+            max(1, int(getattr(self.reranker_engine, "candidate_limit", 5) or 5)),
         )
         ranked_pool = sorted(
             enumerate(scored_candidates),
