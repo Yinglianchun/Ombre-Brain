@@ -2240,12 +2240,37 @@ class GatewayService:
         route_skip_proposed = self.semantic_recall_router.should_apply_skip(
             semantic_recall_debug
         )
-        semantic_skip = await self._apply_semantic_scene_evidence_veto(
+        direct_skip_budget = build_retrieval_budget(
             query,
-            route_skip_proposed,
-            semantic_query_vector,
-            semantic_recall_debug,
+            route=str(semantic_recall_debug.get("route") or ""),
+            route_action=str(semantic_recall_debug.get("route_action") or "recall"),
+            semantic_debug=semantic_recall_debug,
         )
+        direct_chitchat_skip = bool(
+            not simulation_probe
+            and route_skip_proposed
+            and direct_skip_budget.get("pure_chitchat_prior")
+        )
+        semantic_recall_debug["direct_skip"] = {
+            "applied": direct_chitchat_skip,
+            "reason": (
+                "high_confidence_pure_chitchat"
+                if direct_chitchat_skip
+                else "explicit_simulation_shadow"
+                if simulation_probe
+                else "not_high_confidence_pure_chitchat"
+            ),
+        }
+        if direct_chitchat_skip:
+            semantic_skip = True
+            semantic_recall_debug["reason"] = "direct_pure_chitchat_skip"
+        else:
+            semantic_skip = await self._apply_semantic_scene_evidence_veto(
+                query,
+                route_skip_proposed,
+                semantic_query_vector,
+                semantic_recall_debug,
+            )
         if simulation_probe:
             retrieval_budget = semantic_recall_debug.get("retrieval_budget")
             if isinstance(retrieval_budget, dict):

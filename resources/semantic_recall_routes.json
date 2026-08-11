@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "dataset_version": 7,
+  "dataset_version": 8,
   "routes": [
     {
       "name": "simple_contact",
@@ -12,13 +12,6 @@
       "name": "present_chitchat",
       "action": "skip",
       "utterances": [
-        {"text": "今天好热", "source": "seed"},
-        {"text": "外面下雨了", "source": "seed"},
-        {"text": "我刚吃完饭", "source": "seed"},
-        {"text": "现在有点困", "source": "seed"},
-        {"text": "刚刚打了个哈欠", "source": "seed"},
-        {"text": "今天心情还不错", "source": "seed"},
-        {"text": "我在床上躺着", "source": "seed"},
         {"text": "回来看看你", "source": "seed"},
         {"text": "就是想来看看你", "source": "seed"},
         {"text": "在吗哥哥", "source": "seed"},
@@ -35,10 +28,22 @@
         {"text": "嗯嗯好", "source": "seed"},
         {"text": "晚安", "source": "historical_false_positive"},
         {"text": "哈哈哈哈", "source": "seed"},
-        {"text": "刚洗完澡", "source": "seed"},
-        {"text": "这个判断好像不太准", "source": "seed"},
-        {"text": "这个分类是不是弄错了", "source": "seed"},
-        {"text": "还没开始弄呢", "source": "seed"},
+        {"text": "我在刷小红书", "source": "historical_false_positive"},
+        {"text": "亲亲抱抱", "source": "seed"},
+        {"text": "老公", "source": "seed"}
+      ]
+    },
+    {
+      "name": "present_reality",
+      "action": "recall",
+      "utterances": [
+        {"text": "今天太阳很大", "source": "seed"},
+        {"text": "外面下雨了", "source": "seed"},
+        {"text": "我有点头疼", "source": "seed"},
+        {"text": "刚看到一本书", "source": "seed"},
+        {"text": "我刚吃完饭", "source": "seed"},
+        {"text": "现在有点困", "source": "seed"},
+        {"text": "今天心情还不错", "source": "seed"},
         {"text": "这个页面还没做完，先接上真实数据看看", "source": "seed"},
         {"text": "但router似乎不大准！也不算陪伴与贴近吧!", "source": "historical_false_positive"},
         {"text": "记忆库ui还没做完，但试着接上真实hook观察了", "source": "historical_false_positive"},

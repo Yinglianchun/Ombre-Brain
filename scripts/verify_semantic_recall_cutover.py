@@ -49,8 +49,13 @@ class HookRouterStub:
         return {
             "enabled": True,
             "called": True,
+            "route": "present_chitchat" if self.skip else "present_reality",
+            "route_action": "skip" if self.skip else "recall",
             "would_skip": self.skip,
             "recommended_action": "skip" if self.skip else "recall",
+            "confidence": 0.94 if self.skip else 0.86,
+            "margin": 0.18 if self.skip else 0.12,
+            "threshold": 0.72,
         }, [0.1, 0.2]
 
     @staticmethod
@@ -85,7 +90,7 @@ legacy_shadow = router(None, shadow_enabled=True)
 assert legacy_shadow.mode == "shadow"
 
 route_source = load_route_source(ROOT / "resources" / "semantic_recall_routes.json")
-assert route_source["dataset_version"] == 7
+assert route_source["dataset_version"] == 8
 route_examples = {
     route["name"]: {
         item["text"]: item["source"]
@@ -109,23 +114,18 @@ for query in (
 ):
     assert route_examples["present_chitchat"][query] == "seed"
 assert route_examples["present_chitchat"]["晚安"] == "historical_false_positive"
+for query in ("我在刷小红书", "亲亲抱抱", "老公"):
+    assert query in route_examples["present_chitchat"]
 for query in (
     "但router似乎不大准！也不算陪伴与贴近吧!",
     "记忆库ui还没做完，但试着接上真实hook观察了",
     "哈，还没开始删呢",
     "影分身说，现在记忆库有18个工具……感觉太多了TvT",
 ):
-    assert route_examples["present_chitchat"][query] == "historical_false_positive"
-for query in (
-    "嘿嘿，没什么事",
-    "嗯嗯好",
-    "这个判断好像不太准",
-    "这个分类是不是弄错了",
-    "还没开始弄呢",
-    "这个页面还没做完，先接上真实数据看看",
-):
-    assert query not in route_examples["simple_contact"]
-    assert route_examples["present_chitchat"][query] == "seed"
+    assert route_examples["present_reality"][query] == "historical_false_positive"
+for query in ("今天太阳很大", "我有点头疼", "刚看到一本书"):
+    assert route_examples["present_reality"][query] == "seed"
+    assert query not in route_examples["present_chitchat"]
 assert (
     route_examples["recall_needed"]["还记得我们第一次说晚安那次吗"]
     == "hard_negative"
@@ -154,6 +154,11 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
     service.semantic_recall_router = HookRouterStub(skip=True)
     service.semantic_scene_evidence_veto_mode = "off"
 
+    async def unexpected_scene_rescue(*_args, **_kwargs):
+        raise AssertionError("direct chitchat skip must precede Scene retrieval")
+
+    service._apply_semantic_scene_evidence_veto = unexpected_scene_rescue
+
     recorded: list[tuple[str, list[str]]] = []
 
     class StateStoreStub:
@@ -171,6 +176,10 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
     assert skipped_body["cards"] == []
     assert skipped_body["debug"]["hook_recall_debug"]["skip_reason"] == "semantic_recall_skip"
     assert skipped_body["debug"]["hook_recall_debug"]["mode"] == "fast_bucket"
+    assert skipped_body["debug"]["semantic_recall_debug"]["direct_skip"] == {
+        "applied": True,
+        "reason": "high_confidence_pure_chitchat",
+    }
 
     async def full_recall(**kwargs):
         raise AssertionError("full recall must not run after a semantic skip")
@@ -201,6 +210,11 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
         return [], [], {"hook_recall_debug": {"candidate_count": 0}}
 
     service.semantic_recall_router = HookRouterStub(skip=False)
+
+    async def no_scene_veto(*_args, **_kwargs):
+        return False
+
+    service._apply_semantic_scene_evidence_veto = no_scene_veto
     service._hook_recall_fast_cards = fast_cards
     service._render_hook_recall_additional_context = lambda cards: ""
     recalled = await service.handle_hook_recall(
@@ -210,7 +224,19 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
     assert recalled_body["ok"] is True
     assert captured["query_embedding"] == [0.1, 0.2]
     assert captured["allow_semantic"] is True
+    assert captured["allow_rerank"] is False
     assert recorded == []
+
+    await service.handle_hook_recall(
+        RequestStub(
+            {
+                "query": "我有点头疼",
+                "include_debug": True,
+                "allow_rerank": True,
+            }
+        )
+    )
+    assert captured["allow_rerank"] is True
 
     async def injected_cards(query: str, session_id: str, **kwargs):
         return [{"bucket_id": "scene-one", "text": "memory"}], ["scene-one"], {

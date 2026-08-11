@@ -165,7 +165,7 @@ embedding:
 # Uses the embedding base_url/api_key when these are left empty.
 # 留空时复用 embedding 的 base_url/api_key。
 reranker:
-  enabled: true
+  enabled: true                    # normal Hook still requires allow_rerank=true from the caller
   simulation_shadow_enabled: false # separate opt-in; explicit simulation only, never changes admission
   model: "Qwen/Qwen3-Reranker-4B"
   base_url: ""
