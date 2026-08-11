@@ -329,6 +329,48 @@ class SceneEvidenceStore:
             "evidence_refs": [_row_to_ref(row) for row in active_rows],
         }
 
+    def unbind_all(self, scene_id: str, *, unbound_by: str = "") -> dict[str, Any]:
+        """Deactivate every active binding when its Scene is deleted."""
+
+        safe_scene_id = _required_identifier(scene_id, "scene_id", 128)
+        if not os.path.exists(self.db_path):
+            return {
+                "scene_id": safe_scene_id,
+                "evidence_status": "unbound",
+                "unbound_count": 0,
+                "idempotent": True,
+                "evidence_refs": [],
+            }
+        self._init_db()
+        conn = self._connect()
+        safe_actor = str(unbound_by or "").strip()[:120]
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = _active_scene_evidence_rows(conn, safe_scene_id)
+            for row in rows:
+                _record_evidence_event(
+                    conn,
+                    evidence_id=int(row["id"]),
+                    scene_id=safe_scene_id,
+                    action="unbind",
+                    actor=safe_actor,
+                    created_at=now,
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return {
+            "scene_id": safe_scene_id,
+            "evidence_status": "unbound",
+            "unbound_count": len(rows),
+            "idempotent": not rows,
+            "evidence_refs": [],
+        }
+
     def list_for_scene(self, scene_id: str) -> list[dict[str, Any]]:
         safe_scene_id = _required_identifier(scene_id, "scene_id", 128)
         if not os.path.exists(self.db_path):

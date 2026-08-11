@@ -4087,6 +4087,15 @@ async def _delete_bucket_and_indexes(bucket_id: str) -> dict:
         return {"id": bucket_id, "status": "failed", "reason": "delete_failed"}
 
     cleanup, errors = _delete_bucket_indexes(bucket_id)
+    if _is_canonical_scene_bucket(bucket):
+        try:
+            cleanup["scene_evidence"] = scene_evidence_store.unbind_all(
+                bucket_id,
+                unbound_by="scene_deleted",
+            )
+        except Exception as exc:
+            logger.warning("Failed to unbind deleted Scene evidence: %s: %s", bucket_id, exc)
+            errors.append("scene_evidence")
     return {
         "id": bucket_id,
         "status": "deleted",
@@ -11707,12 +11716,15 @@ def _archive_scene_covered_events(
         logger.warning("Fact/Event Scene coverage update failed: %s", exc)
 
 
-def _reconcile_scene_covered_events() -> dict[str, Any]:
+async def _reconcile_scene_covered_events() -> dict[str, Any]:
     """Apply current Scene evidence coverage after a Fact/Event batch write."""
 
-    return fact_event_store.archive_events_covered_by_scenes(
-        scene_evidence_store.list_active_scene_groups()
-    )
+    active_groups: dict[str, list[dict[str, Any]]] = {}
+    for scene_id, refs in scene_evidence_store.list_active_scene_groups().items():
+        safe_scene_id, reason = await _validate_scene_evidence_target(scene_id)
+        if not reason:
+            active_groups[safe_scene_id] = refs
+    return fact_event_store.archive_events_covered_by_scenes(active_groups)
 
 
 @mcp.tool()
@@ -13831,7 +13843,7 @@ async def api_write_fact_events(request):
         return JSONResponse({"error": "request body must be an object"}, status_code=400)
     try:
         result = fact_event_store.write_many(body.get("items"))
-        result["scene_coverage"] = _reconcile_scene_covered_events()
+        result["scene_coverage"] = await _reconcile_scene_covered_events()
         return JSONResponse(result)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -13915,7 +13927,7 @@ async def api_revise_fact_event(request):
             body=body.get("body"),
             importance=body.get("importance"),
         )
-        result["scene_coverage"] = _reconcile_scene_covered_events()
+        result["scene_coverage"] = await _reconcile_scene_covered_events()
         result["item"] = fact_event_store.read(
             str(result["item"]["item_id"]), include_sources=True
         )

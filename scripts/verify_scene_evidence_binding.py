@@ -116,6 +116,13 @@ def main() -> None:
         assert list(grouped) == ["scene_test"]
         assert len(grouped["scene_test"]) == 3
 
+        removed = store.unbind_all("scene_test", unbound_by="scene_deleted")
+        assert removed["unbound_count"] == 3
+        assert removed["evidence_status"] == "unbound"
+        assert store.list_for_scene("scene_test") == []
+        repeated_remove = store.unbind_all("scene_test", unbound_by="scene_deleted")
+        assert repeated_remove["idempotent"] is True
+
     print("scene evidence binding verification passed")
 
 
