@@ -214,7 +214,7 @@ qualified, suppressed = partition_candidates_by_absolute_floor(
     [
         {"bucket_id": "scene-watermelon", "score": 0.62},
         {"bucket_id": "scene-no-target", "score": 0.41},
-        {"bucket_id": "scene-exact", "score": 0.20, "exact_anchor_match": True},
+        {"bucket_id": "scene-exact", "score": 0.20, "full_title_recall_match": True},
     ],
     absolute_floor=0.55,
 )

@@ -83,11 +83,14 @@ RECALL_MARKERS = (
     "上次",
     "以前",
     "找出来",
+    "翻一下",
     "看那段",
     "提到",
     "说过",
     "回望",
     "记忆",
+    "后来",
+    "当时为什么",
 )
 
 DEEP_RECALL_MARKERS = (
@@ -742,12 +745,17 @@ def partition_candidates_by_absolute_floor(
             cue_semantic_score = 0.0
         discovery_score = max(score, cue_semantic_score)
         explicit_evidence = bool(
-            item.get("exact_anchor_match")
-            or item.get("authored_cue_match")
-            or item.get("authored_cue_candidate_match")
-            or item.get("title_anchor_terms")
+            item.get("full_title_recall_match")
+            or item.get("source_bound_raw_quote_match")
         )
         absolute_passes = discovery_score >= floor or explicit_evidence
+        candidate_entrance = bool(
+            item.get("exact_anchor_candidate_match")
+            or item.get("authored_cue_candidate_match")
+            or item.get("title_anchor_terms")
+            or item.get("full_title_candidate_match")
+            or item.get("source_quote_candidate_match")
+        )
         body_score = 0.0
         try:
             body_score = float(item.get("semantic_score") or 0.0)
@@ -756,7 +764,7 @@ def partition_candidates_by_absolute_floor(
         gray_zone_passes = bool(
             allow_gray_zone
             and not absolute_passes
-            and body_score >= entry_floor
+            and (body_score >= entry_floor or candidate_entrance)
         )
         passes = absolute_passes or gray_zone_passes
         item["budget_floor"] = round(floor, 4)
@@ -769,6 +777,9 @@ def partition_candidates_by_absolute_floor(
             qualified.append(item)
         else:
             item["admission_reason"] = (
+                "candidate_only_requires_reranker"
+                if candidate_entrance
+                else
                 "below_reranker_entry_floor"
                 if allow_gray_zone and entry_floor < floor
                 else "below_absolute_floor"

@@ -94,8 +94,15 @@ class SceneEvidenceStore:
             )
         )
         self.db_path = os.path.join(state_dir, "scene_evidence.sqlite")
+        self._schema_ready = False
         if create:
-            self._init_db()
+            self._ensure_initialized()
+
+    def _ensure_initialized(self) -> None:
+        if self._schema_ready:
+            return
+        self._init_db()
+        self._schema_ready = True
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
@@ -172,7 +179,7 @@ class SceneEvidenceStore:
         normalized = [normalize_evidence_ref(item) for item in evidence_refs]
         safe_bound_by = str(bound_by or "").strip()[:120]
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        self._init_db()
+        self._ensure_initialized()
         conn = self._connect()
         inserted = 0
         reactivated = 0
@@ -283,7 +290,7 @@ class SceneEvidenceStore:
 
         safe_actor = str(unbound_by or "").strip()[:120]
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        self._init_db()
+        self._ensure_initialized()
         conn = self._connect()
         unbound_count = 0
         already_unbound_count = 0
@@ -341,7 +348,7 @@ class SceneEvidenceStore:
                 "idempotent": True,
                 "evidence_refs": [],
             }
-        self._init_db()
+        self._ensure_initialized()
         conn = self._connect()
         safe_actor = str(unbound_by or "").strip()[:120]
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -378,7 +385,7 @@ class SceneEvidenceStore:
         # Existing production sidecars predate the event table. Migrate before
         # the first read so a restart never depends on a bind/unbind happening
         # first.
-        self._init_db()
+        self._ensure_initialized()
         conn = self._connect()
         try:
             rows = _active_scene_evidence_rows(conn, safe_scene_id)
@@ -386,12 +393,53 @@ class SceneEvidenceStore:
             conn.close()
         return [_row_to_ref(row) for row in rows]
 
+    def list_active_for_scenes(self, scene_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        safe_ids = list(
+            dict.fromkeys(
+                _required_identifier(scene_id, "scene_id", 128)
+                for scene_id in scene_ids or []
+                if str(scene_id or "").strip()
+            )
+        )
+        if not safe_ids or not os.path.exists(self.db_path):
+            return {}
+        self._ensure_initialized()
+        placeholders = ",".join("?" for _ in safe_ids)
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT evidence.*
+                FROM scene_evidence AS evidence
+                WHERE evidence.scene_id IN ({placeholders})
+                  AND COALESCE(
+                        (
+                            SELECT event.action
+                            FROM scene_evidence_events AS event
+                            WHERE event.evidence_id=evidence.id
+                            ORDER BY event.id DESC
+                            LIMIT 1
+                        ),
+                        'bind'
+                      )='bind'
+                ORDER BY evidence.scene_id, evidence.created_at, evidence.id
+                """,
+                safe_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            ref = _row_to_ref(row)
+            grouped.setdefault(str(ref["scene_id"]), []).append(ref)
+        return grouped
+
     def list_active_scene_groups(self) -> dict[str, list[dict[str, Any]]]:
         """Return active evidence grouped by Scene for exact coverage checks."""
 
         if not os.path.exists(self.db_path):
             return {}
-        self._init_db()
+        self._ensure_initialized()
         conn = self._connect()
         try:
             scene_rows = conn.execute(

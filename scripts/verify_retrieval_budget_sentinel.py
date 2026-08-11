@@ -41,6 +41,12 @@ class Embedding:
         return list(self.rows)
 
 
+class EmptyFactEventIndex:
+    @staticmethod
+    def search_by_embedding(_vector, *, top_k):
+        return {"status": "ok", "matches": [], "top_k": top_k}
+
+
 def planner_service(rows=None, error=None) -> GatewayService:
     service = GatewayService.__new__(GatewayService)
     service.recall_policy = RecallPolicy()
@@ -49,6 +55,7 @@ def planner_service(rows=None, error=None) -> GatewayService:
     service.retrieval_budget_sentinel_rescue_floor = 0.55
     service.embedding_query_timeout_seconds = 0
     service.embedding_engine = Embedding(rows, error)
+    service.fact_event_semantic_index = EmptyFactEventIndex()
     service._is_semantic_candidate_bucket = lambda _bucket: True
     service._bucket_title_anchor_terms = lambda _query, _bucket: []
     service._bucket_authored_cue_terms = lambda _query, _bucket: []
@@ -131,5 +138,34 @@ assert budget["budget_skip_applied"] is False
 assert budget["route_skip_deferred"] is True
 assert budget["deferred_reason"] == "scene_evidence_veto"
 assert data["debug"]["semantic_recall_debug"]["skip_applied"] is False
+
+
+class ExplicitRecallRequest:
+    headers = {}
+
+    async def json(self):
+        return {"query": "翻一下", "include_debug": True}
+
+
+explicit_service = planner_service([])
+explicit_service.semantic_recall_router = Router()
+explicit_service.upstream_default_model = "test"
+explicit_service.upstream_models = []
+explicit_service._authorize = lambda _header: None
+explicit_skip_inputs = []
+
+
+async def preserve_skip(_query, skip, _vector, _debug):
+    explicit_skip_inputs.append(skip)
+    return skip
+
+
+explicit_service._apply_semantic_scene_evidence_veto = preserve_skip
+explicit_service._hook_recall_fast_cards = fast
+explicit_service._render_hook_recall_additional_context = lambda _cards: ""
+explicit_response = asyncio.run(explicit_service.handle_hook_recall(ExplicitRecallRequest()))
+explicit_data = json.loads(explicit_response.body.decode("utf-8"))
+assert explicit_skip_inputs == [False]
+assert explicit_data["debug"]["semantic_recall_debug"]["skip_applied"] is False
 
 print("retrieval budget sentinel verification passed")

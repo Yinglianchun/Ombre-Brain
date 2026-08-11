@@ -51,6 +51,7 @@ def main() -> None:
             legacy_conn.commit()
         finally:
             legacy_conn.close()
+        store._schema_ready = False
         assert len(store.list_for_scene("scene_test")) == 1
 
         unbound = store.unbind("scene_test", [saved[0]["id"]], unbound_by="serein_ui")
@@ -115,6 +116,10 @@ def main() -> None:
         grouped = store.list_active_scene_groups()
         assert list(grouped) == ["scene_test"]
         assert len(grouped["scene_test"]) == 3
+        store._init_db = lambda: (_ for _ in ()).throw(AssertionError("schema DDL repeated"))
+        selected = store.list_active_for_scenes(["scene_test", "scene_missing"])
+        assert list(selected) == ["scene_test"]
+        assert len(selected["scene_test"]) == 3
 
         removed = store.unbind_all("scene_test", unbound_by="scene_deleted")
         assert removed["unbound_count"] == 3

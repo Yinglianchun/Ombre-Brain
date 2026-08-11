@@ -7,6 +7,7 @@ import json
 import codecs
 import time
 import asyncio
+import unicodedata
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
@@ -2206,7 +2207,7 @@ class GatewayService:
         )
 
         semantic_recall_debug, semantic_query_vector = (
-            await self.semantic_recall_router.route_with_vector(query)
+            await self._route_semantic_query_views(query)
         )
         if simulation_probe:
             ablation_debug = recall_ablation_debug_payload(
@@ -2246,11 +2247,12 @@ class GatewayService:
             route_action=str(semantic_recall_debug.get("route_action") or "recall"),
             semantic_debug=semantic_recall_debug,
         )
-        direct_chitchat_skip = bool(
-            not simulation_probe
-            and route_skip_proposed
+        structure_allows_pre_skip = bool(
+            route_skip_proposed
             and direct_skip_budget.get("pure_chitchat_prior")
+            and str(direct_skip_budget.get("final_budget") or "") != "deep"
         )
+        direct_chitchat_skip = bool(not simulation_probe and structure_allows_pre_skip)
         semantic_recall_debug["direct_skip"] = {
             "applied": direct_chitchat_skip,
             "reason": (
@@ -2267,7 +2269,7 @@ class GatewayService:
         else:
             semantic_skip = await self._apply_semantic_scene_evidence_veto(
                 query,
-                route_skip_proposed,
+                structure_allows_pre_skip,
                 semantic_query_vector,
                 semantic_recall_debug,
             )
@@ -2914,9 +2916,7 @@ class GatewayService:
                 (
                     semantic_recall_debug,
                     semantic_recall_query_vector,
-                ) = await self.semantic_recall_router.route_with_vector(
-                    current_user_query
-                )
+                ) = await self._route_semantic_query_views(current_user_query)
             else:
                 semantic_recall_debug = dict(semantic_recall_result[0] or {})
                 semantic_recall_query_vector = semantic_recall_result[1]
@@ -2930,6 +2930,12 @@ class GatewayService:
             semantic_skip_broad = self.semantic_recall_router.should_apply_skip(
                 semantic_recall_debug
             )
+            structure_budget = build_retrieval_budget(
+                current_user_query,
+                route=str(semantic_recall_debug.get("route") or ""),
+                route_action=str(semantic_recall_debug.get("route_action") or "recall"),
+                semantic_debug=semantic_recall_debug,
+            )
             if semantic_recall_result is None:
                 semantic_skip_broad = await self._apply_semantic_scene_evidence_veto(
                     current_user_query,
@@ -2940,6 +2946,14 @@ class GatewayService:
                 )
             else:
                 semantic_skip_broad = bool(semantic_recall_debug.get("skip_applied"))
+            if semantic_skip_broad and not structure_budget.get("pure_chitchat_prior"):
+                semantic_skip_broad = False
+                semantic_recall_debug["query_structure_veto"] = {
+                    "applied": True,
+                    "reason": "not_high_confidence_pure_chitchat",
+                    "structural_vetoes": list(structure_budget.get("structural_vetoes") or []),
+                    "final_budget": str(structure_budget.get("final_budget") or ""),
+                }
             semantic_recall_debug["skip_applied"] = semantic_skip_broad
             semantic_recall_debug["applied_action"] = (
                 "skip" if semantic_skip_broad else "recall"
@@ -7627,16 +7641,18 @@ class GatewayService:
         return any(term and term in text for term in terms)
 
     def _identity_match_terms(self, *, lowercase: bool = False, compact: bool = False) -> tuple[str, ...]:
+        identity = getattr(self, "identity", {})
+        identity = identity if isinstance(identity, dict) else {}
         values: list[object] = []
-        values.extend(self.identity.get("relationship_terms") or [])
+        values.extend(identity.get("relationship_terms") or [])
         values.extend(
             [
-                self.identity.get("ai_name"),
-                self.identity.get("user_name"),
-                self.identity.get("user_display_name"),
+                identity.get("ai_name"),
+                identity.get("user_name"),
+                identity.get("user_display_name"),
             ]
         )
-        values.extend(self.identity.get("user_aliases") or [])
+        values.extend(identity.get("user_aliases") or [])
         terms: list[str] = []
         seen: set[str] = set()
         for value in values:
@@ -7651,6 +7667,89 @@ class GatewayService:
                 seen.add(term)
                 terms.append(term)
         return tuple(terms)
+
+    def _routing_query_view(self, query: str) -> str:
+        """Remove only a leading address/opening phrase for semantic routing."""
+        original = str(query or "").strip()
+        if not original:
+            return ""
+        terms = sorted(
+            {
+                str(term or "").strip()
+                for term in self._identity_match_terms()
+                if str(term or "").strip()
+            },
+            key=len,
+            reverse=True,
+        )
+        routed = original
+        for _ in range(2):
+            changed = False
+            for term in terms:
+                match = re.match(
+                    rf"^\s*{re.escape(term)}(?:\s*[，,、：:。！!？?～~…]+|\s+)",
+                    routed,
+                    flags=re.IGNORECASE,
+                )
+                if match:
+                    routed = routed[match.end():].lstrip()
+                    changed = True
+                    break
+                if routed.lower().startswith(term.lower()):
+                    remainder = routed[len(term):].lstrip()
+                    if remainder and re.fullmatch(r"(?:(?:亲亲)|(?:抱抱)|(?:贴贴)|(?:摸摸)|(?:蹭蹭))+", remainder):
+                        routed = remainder
+                        changed = True
+                        break
+            if not changed:
+                break
+        return routed or original
+
+    async def _route_semantic_query_views(
+        self,
+        original_query: str,
+    ) -> tuple[dict[str, Any], list[float] | None]:
+        """Route on the address-stripped view while retrieving with the original."""
+        original = str(original_query or "").strip()
+        routing = self._routing_query_view(original)
+        embed_query = getattr(getattr(self, "embedding_engine", None), "embed_query", None)
+        original_vector_task = (
+            asyncio.create_task(embed_query(original))
+            if routing != original and original and callable(embed_query)
+            else None
+        )
+        try:
+            debug, routing_vector = await self.semantic_recall_router.route_with_vector(routing)
+        except BaseException:
+            if original_vector_task is not None:
+                original_vector_task.cancel()
+                try:
+                    await original_vector_task
+                except BaseException:
+                    pass
+            raise
+        debug["original_query"] = self._clip_text(original, 500)
+        debug["routing_query"] = self._clip_text(routing, 500)
+        debug["query_preview"] = self._clip_text(original, 500)
+        debug["route_query_preview"] = self._clip_text(routing, 500)
+        debug["routing_query_changed"] = routing != original
+        if routing == original:
+            debug["candidate_query_vector_source"] = "original_query"
+            return debug, routing_vector
+        if original_vector_task is None:
+            debug.setdefault("errors", []).append("candidate_query_embedding_unavailable")
+            debug["candidate_query_vector_source"] = "deferred_original_query"
+            return debug, None
+        try:
+            original_vector = await original_vector_task
+        except Exception as exc:
+            debug.setdefault("errors", []).append(
+                f"candidate_query_embedding_failed:{type(exc).__name__}"
+            )
+            debug["candidate_query_vector_source"] = "deferred_original_query"
+            return debug, None
+        debug["candidate_query_vector_source"] = "original_query"
+        return debug, original_vector if isinstance(original_vector, list) and original_vector else None
 
     def _query_has_identity_name_intent(self, query: str) -> bool:
         compact = self._compact_lookup_key(query)
@@ -9381,16 +9480,14 @@ class GatewayService:
             return "explicit_bucket_id"
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         title = str(meta.get("name") or bucket_id or "").strip()
-        title_key = self._compact_lookup_key(title)
-        query_key = self._compact_lookup_key(query)
-        if title_key and (query_key == title_key or title_key in query_key):
+        title_key = self._surface_literal_text(title)
+        query_key = self._surface_literal_text(query)
+        if (
+            title_key
+            and title_key in query_key
+            and self._query_has_explicit_recall_structure(query)
+        ):
             return "explicit_bucket_title"
-        for term in self.recall_policy.specific_query_terms(query):
-            term_key = self._compact_lookup_key(term)
-            if not term_key or len(term_key) < 2:
-                continue
-            if term_key == title_key or (len(term_key) >= 3 and term_key in title_key):
-                return "explicit_bucket_title"
         return ""
 
     @staticmethod
@@ -9503,6 +9600,13 @@ class GatewayService:
             "exact_anchor_match",
             "exact_anchor_terms",
             "exact_anchor_fields",
+            "exact_anchor_candidate_match",
+            "full_title_candidate_match",
+            "full_title_recall_match",
+            "full_title_match",
+            "source_quote_candidate_match",
+            "source_bound_raw_quote_match",
+            "source_bound_raw_quote_spans",
             "authored_cue_match",
             "authored_cue_terms",
             "fusion_mode",
@@ -13563,10 +13667,18 @@ class GatewayService:
         bucket_id = str(bucket.get("id") or item.get("bucket_id") or "")
         meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
         sources: list[str] = []
-        if item.get("exact_anchor_match"):
-            sources.append("exact_anchor")
+        if item.get("exact_anchor_candidate_match"):
+            sources.append("exact_anchor_candidate")
         if item.get("title_anchor_terms"):
-            sources.append("title_anchor")
+            sources.append("title_anchor_candidate")
+        if item.get("full_title_recall_match"):
+            sources.append("full_title_recall")
+        elif item.get("full_title_candidate_match"):
+            sources.append("full_title_candidate")
+        if item.get("source_bound_raw_quote_match"):
+            sources.append("source_bound_raw_quote")
+        elif item.get("source_quote_candidate_match"):
+            sources.append("source_quote_candidate")
         if item.get("planner_lexical_match"):
             sources.append("lexical")
         cue_candidate_only = bool(item.get("authored_cue_candidate_match"))
@@ -13641,6 +13753,13 @@ class GatewayService:
             ),
             "title_anchor_match": bool(item.get("title_anchor_terms")),
             "exact_anchor_match": bool(item.get("exact_anchor_match")),
+            "exact_anchor_candidate_match": bool(item.get("exact_anchor_candidate_match")),
+            "full_title_candidate_match": bool(item.get("full_title_candidate_match")),
+            "full_title_recall_match": bool(item.get("full_title_recall_match")),
+            "full_title_match": str(item.get("full_title_match") or ""),
+            "source_quote_candidate_match": bool(item.get("source_quote_candidate_match")),
+            "source_bound_raw_quote_match": bool(item.get("source_bound_raw_quote_match")),
+            "source_bound_raw_quote_spans": list(item.get("source_bound_raw_quote_spans") or []),
             "candidate_sources": sources,
             "combined_score": round(self._safe_float(item.get("score"), 0.0), 4),
             "discovery_score": round(
@@ -14684,6 +14803,144 @@ class GatewayService:
                 add(match.group(0))
         return terms[:6]
 
+    @staticmethod
+    def _surface_literal_text(value: object) -> str:
+        text = unicodedata.normalize("NFKC", str(value or "")).strip().lower()
+        text = re.sub(r"\s+", " ", text)
+        return text.strip(" \t\r\n\"'`“”‘’「」『』《》")
+
+    @staticmethod
+    def _query_has_explicit_recall_structure(query: str) -> bool:
+        text = str(query or "")
+        return any(
+            marker in text
+            for marker in (
+                "还记得",
+                "记不记得",
+                "是否记得",
+                "那次",
+                "上次",
+                "当时为什么",
+                "后来",
+                "原话",
+                "找出来",
+                "翻一下",
+            )
+        )
+
+    def _full_title_candidate_ids(self, query: str, buckets: list[dict]) -> dict[str, str]:
+        query_text = self._surface_literal_text(query)
+        if not query_text:
+            return {}
+        matches: dict[str, str] = {}
+        for bucket in buckets or []:
+            if not isinstance(bucket, dict):
+                continue
+            bucket_id = str(bucket.get("id") or "").strip()
+            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+            title = str(meta.get("name") or bucket.get("name") or "").strip()
+            title_text = self._surface_literal_text(title)
+            if bucket_id and len(title_text) >= 3 and title_text in query_text:
+                matches[bucket_id] = title
+        return matches
+
+    @staticmethod
+    def _raw_quote_span_is_long_enough(span: str) -> bool:
+        text = str(span or "").strip()
+        han_count = len(re.findall(r"[\u4e00-\u9fff]", text))
+        ordinary_count = len(re.sub(r"\s+", "", text))
+        return han_count >= 8 or ordinary_count >= 12
+
+    def _query_raw_quote_spans(self, query: str) -> list[str]:
+        text = str(query or "").strip()
+        if not text:
+            return []
+        quoted: list[str] = []
+        for match in re.finditer(r"[“\"'「『]([^”\"'」』]+)[”\"'」』]", text):
+            quoted.extend(
+                segment.strip()
+                for segment in re.split(r"[。！？!?；;\r\n]+", match.group(1))
+                if self._raw_quote_span_is_long_enough(segment)
+            )
+        if quoted:
+            return list(dict.fromkeys(quoted))[:4]
+        if not self._query_has_explicit_recall_structure(text):
+            return []
+        spans: list[str] = []
+        for sentence in re.split(r"[。！？!?；;\r\n]+", text):
+            sentence = sentence.strip()
+            if len(sentence) >= 32 and re.search(r"[，,]", sentence):
+                spans.extend(
+                    part.strip()
+                    for part in re.split(r"[，,]+", sentence)
+                    if self._raw_quote_span_is_long_enough(part)
+                )
+            elif self._raw_quote_span_is_long_enough(sentence):
+                spans.append(sentence)
+        return list(dict.fromkeys(spans))[:4]
+
+    def _source_bound_raw_quote_candidates(
+        self,
+        query: str,
+        buckets: list[dict],
+    ) -> dict[str, list[str]]:
+        spans = self._query_raw_quote_spans(query)
+        if not spans:
+            return {}
+        matches: dict[str, list[str]] = {}
+        store = getattr(self, "scene_evidence_store", None)
+        list_for_scenes = getattr(store, "list_active_for_scenes", None)
+        list_for_scene = getattr(store, "list_for_scene", None)
+        if not callable(list_for_scenes) and not callable(list_for_scene):
+            return {}
+        eligible_ids = [
+            str(bucket.get("id") or "").strip()
+            for bucket in buckets or []
+            if isinstance(bucket, dict)
+            and self._is_canonical_scene_bucket(bucket)
+            and str(bucket.get("id") or "").strip()
+        ]
+        grouped_refs: dict[str, list[dict[str, Any]]] | None = None
+        if callable(list_for_scenes):
+            try:
+                loaded = list_for_scenes(eligible_ids)
+                grouped_refs = loaded if isinstance(loaded, dict) else {}
+            except Exception as exc:
+                logger.warning("Scene raw quote evidence group read failed: %s", exc)
+                grouped_refs = None
+        for bucket in buckets or []:
+            if not isinstance(bucket, dict) or not self._is_canonical_scene_bucket(bucket):
+                continue
+            bucket_id = str(bucket.get("id") or "").strip()
+            if not bucket_id:
+                continue
+            if grouped_refs is not None:
+                refs = grouped_refs.get(bucket_id, [])
+            else:
+                try:
+                    refs = list_for_scene(bucket_id)
+                except Exception as exc:
+                    logger.warning("Scene raw quote evidence read failed for %s: %s", bucket_id, exc)
+                    continue
+            matched = [
+                span
+                for span in spans
+                if any(
+                    isinstance(ref, dict)
+                    and any(
+                        span in sentence
+                        for sentence in re.split(
+                            r"[。！？!?；;\r\n]+",
+                            str(ref.get("content") or ""),
+                        )
+                    )
+                    for ref in refs or []
+                )
+            ]
+            if matched:
+                matches[bucket_id] = matched
+        return matches
+
     def _exact_anchor_term_allowed(self, term: str) -> bool:
         text = str(term or "").strip()
         if not text:
@@ -14805,7 +15062,7 @@ class GatewayService:
         )
 
     def _bucket_exact_anchor_score(self, bucket: dict, term: str) -> tuple[float, str]:
-        anchor = self._compact_exact_anchor_text(term)
+        anchor = self._surface_literal_text(term)
         if not anchor:
             return 0.0, ""
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
@@ -14828,7 +15085,7 @@ class GatewayService:
         best_score = 0.0
         best_field = ""
         for field, value, score in fields:
-            haystack = self._compact_exact_anchor_text(value)
+            haystack = self._surface_literal_text(value)
             if haystack and anchor in haystack and score > best_score:
                 best_score = score
                 best_field = field
@@ -15105,6 +15362,19 @@ class GatewayService:
             exact_scores, exact_debug = self._get_exact_anchor_candidates(raw_query, normalized_query, eligible)
         mark("exact_anchor_candidates", stage_started_at)
         stage_started_at = time.perf_counter()
+        full_title_debug = self._full_title_candidate_ids(raw_query, eligible)
+        full_title_strong_ids = (
+            set(full_title_debug)
+            if self._query_has_explicit_recall_structure(raw_query)
+            and len(full_title_debug) == 1
+            else set()
+        )
+        source_quote_debug = self._source_bound_raw_quote_candidates(raw_query, eligible)
+        source_quote_strong_ids = (
+            set(source_quote_debug) if len(source_quote_debug) == 1 else set()
+        )
+        mark("strong_literal_evidence", stage_started_at)
+        stage_started_at = time.perf_counter()
         authored_cue_debug = (
             {
                 str(bucket.get("id") or ""): cue_terms
@@ -15144,6 +15414,8 @@ class GatewayService:
             set(keyword_scores)
             | set(semantic_scores)
             | set(exact_scores)
+            | set(full_title_debug)
+            | set(source_quote_debug)
             | set(authored_cue_debug)
             | set(cue_semantic_rows)
             | lexical_ids
@@ -15165,39 +15437,19 @@ class GatewayService:
         stage_started_at = time.perf_counter()
         semantic_norms = self._normalized_score_map(semantic_scores)
         # Ordinary full-body keyword matches only expand the candidate pool.
-        # Only admission-capable explicit lexical evidence contributes to the
-        # fusion score. A single authored cue is always candidate-only: it may
-        # retrieve a Scene for inspection, but it cannot become admission
-        # evidence or inflate the Scene score by itself.
-        shallow_cue_candidate_only = bool(
-            budget_shadow
-            and str(retrieval_budget.get("effective_budget") or "") == "shallow"
-        )
+        # Only unique full-title recall or source-bound raw quotation evidence
+        # contributes lexical admission score. Cues, partial titles, and loose
+        # exact anchors remain candidate entrances only.
         authored_cue_candidate_only_ids = {
             str(bucket_id)
             for bucket_id, terms in authored_cue_debug.items()
             if terms
-            and (
-                shallow_cue_candidate_only
-                or len(
-                    {
-                        self._compact_lookup_key(term)
-                        for term in terms
-                        if self._compact_lookup_key(term)
-                    }
-                )
-                == 1
-            )
         }
-        authored_cue_score_debug = {
-            bucket_id: terms
-            for bucket_id, terms in authored_cue_debug.items()
-            if str(bucket_id) not in authored_cue_candidate_only_ids
+        strong_literal_scores = {
+            bucket_id: 1.0
+            for bucket_id in (full_title_strong_ids | source_quote_strong_ids)
         }
-        keyword_basis = self._explicit_lexical_score_basis(
-            exact_scores,
-            authored_cue_score_debug,
-        )
+        keyword_basis = strong_literal_scores
         keyword_norms = self._normalized_score_map(keyword_basis)
         alpha_debug = self._dynamic_alpha_debug(semantic_scores)
         alpha = self._safe_float(alpha_debug.get("alpha"), 0.35)
@@ -15214,15 +15466,17 @@ class GatewayService:
             semantic_score = self._clamp(semantic_scores.get(bucket_id, 0.0))
             keyword_score = self._clamp(keyword_scores.get(bucket_id, 0.0))
             exact_score = self._clamp(exact_scores.get(bucket_id, 0.0))
+            full_title_candidate_match = bucket_id in full_title_debug
+            full_title_recall_match = bucket_id in full_title_strong_ids
+            source_quote_candidate_match = bucket_id in source_quote_debug
+            source_bound_raw_quote_match = bucket_id in source_quote_strong_ids
             authored_cue_terms = list(authored_cue_debug.get(bucket_id) or [])
             authored_cue_match = bool(authored_cue_terms)
             authored_cue_candidate_match = bool(
                 authored_cue_match
                 and str(bucket_id) in authored_cue_candidate_only_ids
             )
-            authored_cue_admission_match = bool(
-                authored_cue_match and not authored_cue_candidate_match
-            )
+            authored_cue_admission_match = False
             cue_semantic_row = cue_semantic_rows.get(bucket_id) or {}
             cue_semantic_score = self._clamp(
                 self._safe_float(cue_semantic_row.get("score"), 0.0)
@@ -15285,8 +15539,8 @@ class GatewayService:
                 fusion_score = semantic_score
                 final_score = self._canonical_scene_recall_score(
                     semantic_score,
-                    exact_match=exact_match,
-                    authored_cue_match=authored_cue_admission_match,
+                    exact_match=bool(full_title_recall_match or source_bound_raw_quote_match),
+                    authored_cue_match=False,
                 )
             elif self.recall_fusion_mode == "dynamic":
                 fusion_score = self._clamp((alpha * vector_norm + (1.0 - alpha) * keyword_norm) * relevance_score)
@@ -15308,7 +15562,7 @@ class GatewayService:
                     + freshness_score * self.freshness_weight
                 ) * relevance_score
                 final_score = round(fusion_score * cooldown_multiplier, 4)
-            if not canonical_scene and (exact_match or authored_cue_admission_match):
+            if not canonical_scene and (full_title_recall_match or source_bound_raw_quote_match):
                 final_score = max(final_score, self.first_card_min_score)
             scored_candidates.append(
                 {
@@ -15317,9 +15571,16 @@ class GatewayService:
                     "semantic_score": semantic_score,
                     "keyword_score": keyword_score,
                     "exact_anchor_score": exact_score,
-                    "exact_anchor_match": exact_match,
+                    "exact_anchor_match": False,
+                    "exact_anchor_candidate_match": exact_match,
                     "exact_anchor_terms": list((exact_debug.get(bucket_id) or {}).get("terms") or []),
                     "exact_anchor_fields": list((exact_debug.get(bucket_id) or {}).get("fields") or []),
+                    "full_title_candidate_match": full_title_candidate_match,
+                    "full_title_recall_match": full_title_recall_match,
+                    "full_title_match": str(full_title_debug.get(bucket_id) or ""),
+                    "source_quote_candidate_match": source_quote_candidate_match,
+                    "source_bound_raw_quote_match": source_bound_raw_quote_match,
+                    "source_bound_raw_quote_spans": list(source_quote_debug.get(bucket_id) or []),
                     "authored_cue_match": authored_cue_admission_match,
                     "authored_cue_terms": (
                         authored_cue_terms if authored_cue_admission_match else []
@@ -16066,18 +16327,26 @@ class GatewayService:
         title_anchor_terms = self._bucket_title_anchor_terms(query, bucket)
         if title_anchor_terms:
             item["title_anchor_terms"] = title_anchor_terms
-            labels.append("title_anchor")
+            labels.append("title_anchor_candidate")
         definition_literal_terms = self._definition_query_literal_terms(query, bucket)
         if definition_literal_terms:
             item["definition_literal_terms"] = definition_literal_terms
             labels.append("definition_literal_span")
-        if item.get("exact_anchor_match") or self._safe_float(item.get("exact_anchor_score"), 0.0) > 0:
-            labels.append("exact_anchor")
+        if item.get("exact_anchor_candidate_match") or self._safe_float(item.get("exact_anchor_score"), 0.0) > 0:
+            labels.append("exact_anchor_candidate")
+        if item.get("full_title_candidate_match"):
+            labels.append("full_title_candidate")
+        if item.get("full_title_recall_match"):
+            labels.append("full_title_recall")
+        if item.get("source_quote_candidate_match"):
+            labels.append("source_quote_candidate")
+        if item.get("source_bound_raw_quote_match"):
+            labels.append("source_bound_raw_quote")
         protected_phrases = extract_protected_phrases(query)
         if protected_phrases and isinstance(bucket, dict):
             bucket_text_key = self._compact_lookup_key(self._date_recall_bucket_text(bucket))
             if any(self._compact_lookup_key(phrase) in bucket_text_key for phrase in protected_phrases):
-                labels.append("protected_phrase")
+                labels.append("protected_phrase_candidate")
         if isinstance(bucket, dict) and self._is_identity_name_candidate_bucket(query, bucket):
             labels.append("identity_name_match")
         if isinstance(bucket, dict) and self._source_record_explicit_bucket_match_reason(query, bucket):
@@ -16092,8 +16361,8 @@ class GatewayService:
             labels.append("retrieval_alias")
         if item.get("semantic_rescue_direct_span"):
             labels.append("semantic_rescue_direct_span")
-        if item.get("authored_cue_match"):
-            labels.append("authored_cue")
+        if item.get("authored_cue_match") or item.get("authored_cue_candidate_match"):
+            labels.append("authored_cue_candidate")
         if self._safe_float(item.get("semantic_score"), 0.0) > 0:
             labels.append("semantic_hit")
         if not self._is_source_record_bucket(bucket):
@@ -16107,14 +16376,12 @@ class GatewayService:
     def _hard_bucket_evidence_labels(labels: list[str]) -> list[str]:
         hard = {
             "raw_transcript_exact",
-            "protected_phrase",
             "same_day_metadata",
-            "exact_anchor",
-            "authored_cue",
             "identity_name_match",
             "source_record_exact",
             "taste_evidence",
-            "title_anchor",
+            "full_title_recall",
+            "source_bound_raw_quote",
             "definition_literal_span",
             "semantic_rescue_direct_span",
             "strong_semantic",
@@ -16165,11 +16432,20 @@ class GatewayService:
             if rerank_score is None:
                 new_item["rerank_score"] = None
                 new_item["combined_score"] = item["score"]
+                new_item["reranker_candidate_status"] = "missing_score"
             else:
                 new_item["rerank_score"] = round(rerank_score, 4)
                 new_item["combined_score"] = round(item["score"] * (1.0 - weight) + rerank_score * weight, 4)
                 new_item["score"] = new_item["combined_score"]
+                new_item["reranker_candidate_status"] = "scored"
             reranked.append(new_item)
+        tail = [
+            {
+                **item,
+                "reranker_candidate_status": "outside_candidate_limit",
+            }
+            for item in tail
+        ]
         reranked.sort(
             key=lambda item: self._bucket_reranked_candidate_rank(query, item),
         )
@@ -16178,8 +16454,7 @@ class GatewayService:
     def _bucket_primary_candidate_rank(self, query: str, item: dict) -> tuple:
         if self.recall_fusion_mode == "dynamic":
             return (
-                not bool(item.get("exact_anchor_match")),
-                not bool(item.get("authored_cue_match")),
+                not self._item_has_direct_recall_evidence(item),
                 -self._safe_float(item.get("score"), 0.0),
                 self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
                 -self._safe_float(item.get("semantic_score"), 0.0),
@@ -16190,8 +16465,7 @@ class GatewayService:
     def _bucket_reranked_candidate_rank(self, query: str, item: dict) -> tuple:
         if self.recall_fusion_mode == "dynamic":
             return (
-                not bool(item.get("exact_anchor_match")),
-                not bool(item.get("authored_cue_match")),
+                not self._item_has_direct_recall_evidence(item),
                 item.get("rerank_score") is None,
                 -self._safe_float(item.get("combined_score", item.get("score")), 0.0),
                 -self._safe_float(item.get("score"), 0.0),
@@ -16206,8 +16480,7 @@ class GatewayService:
 
     def _bucket_rerank_candidate_priority(self, query: str, item: dict) -> tuple:
         return (
-            not bool(item.get("exact_anchor_match")),
-            not bool(item.get("authored_cue_match")),
+            not self._item_has_direct_recall_evidence(item),
             -self._safe_float(item.get("semantic_score"), 0.0),
             -self._safe_float(item.get("keyword_score"), 0.0),
             self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
@@ -16221,10 +16494,7 @@ class GatewayService:
         *,
         recent_ids: set[str] | None = None,
     ) -> tuple:
-        if (
-            item.get("exact_anchor_match")
-            or item.get("authored_cue_match")
-        ):
+        if self._item_has_direct_recall_evidence(item):
             evidence_tier = 0
         elif item.get("title_anchor_terms"):
             evidence_tier = 1
@@ -16325,7 +16595,7 @@ class GatewayService:
         direct_labels = [
             str(label)
             for label in (direct_evidence or [])
-            if str(label) in {"authored_cue", "exact_anchor", "title_anchor"}
+            if str(label) in {"full_title_recall", "source_bound_raw_quote"}
         ]
         if policy == "excluded":
             return {
@@ -16373,13 +16643,12 @@ class GatewayService:
             return True
         return any(self._tech_anchor_term_is_specific(term) for term in self._locatable_query_terms(text))
 
-    def _item_has_direct_tech_evidence(self, item: dict) -> bool:
+    def _item_has_direct_recall_evidence(self, item: dict) -> bool:
         if not isinstance(item, dict):
             return False
         return bool(
-            item.get("exact_anchor_match")
-            or item.get("authored_cue_match")
-            or item.get("title_anchor_terms")
+            item.get("full_title_recall_match")
+            or item.get("source_bound_raw_quote_match")
         )
 
     def _item_has_high_confidence_direct_semantic_evidence(self, item: dict) -> bool:
@@ -16481,7 +16750,7 @@ class GatewayService:
         *,
         node: dict | None = None,
     ) -> dict[str, Any] | None:
-        if self._item_has_direct_tech_evidence(item):
+        if self._item_has_direct_recall_evidence(item):
             return None
         canonical_scene = self._is_canonical_scene_bucket(node)
         if canonical_scene:
@@ -16514,17 +16783,57 @@ class GatewayService:
         hard_evidence_labels = self._hard_bucket_evidence_labels(evidence_labels)
         item["evidence_labels"] = evidence_labels
         item["hard_evidence_labels"] = hard_evidence_labels
+        candidate_entrance_labels = [
+            label
+            for label in (
+                "authored_cue_candidate",
+                "title_anchor_candidate",
+                "exact_anchor_candidate",
+                "full_title_candidate",
+                "source_quote_candidate",
+            )
+            if label in evidence_labels
+        ]
+        exact_labels = [
+            label
+            for label in ("full_title_recall", "source_bound_raw_quote")
+            if label in hard_evidence_labels
+        ]
+        reranker_candidate_status = str(item.get("reranker_candidate_status") or "")
+        if reranker_candidate_status in {"missing_score", "outside_candidate_limit"}:
+            item["admission_reason"] = (
+                "reranker_score_missing"
+                if reranker_candidate_status == "missing_score"
+                else "outside_reranker_candidate_limit"
+            )
+            item["recall_policy_debug"] = {
+                "candidate_entrances": candidate_entrance_labels,
+                "direct_evidence": exact_labels,
+                "reranker_candidate_status": reranker_candidate_status,
+                "auto": True,
+            }
+            return False
+        rerank_score = item.get("rerank_score")
+        final_value = item.get("score")
+        if final_value is None:
+            final_value = item.get("combined_score")
+        final_score = self._safe_float(final_value, 0.0)
+        if (
+            not exact_labels
+            and rerank_score is not None
+            and final_score < self.first_card_min_score
+        ):
+            item["admission_reason"] = "below_reranked_absolute_floor"
+            item["recall_policy_debug"] = {
+                "candidate_entrances": candidate_entrance_labels,
+                "direct_evidence": exact_labels,
+                "reranker_score": round(self._safe_float(rerank_score, 0.0), 4),
+                "final_score": round(final_score, 4),
+                "absolute_floor": round(self.first_card_min_score, 4),
+                "auto": True,
+            }
+            return False
         if self._is_canonical_scene_bucket(bucket):
-            candidate_entrance_labels = [
-                label
-                for label in ("authored_cue", "title_anchor")
-                if label in hard_evidence_labels
-            ]
-            exact_labels = [
-                label
-                for label in ("exact_anchor",)
-                if label in hard_evidence_labels
-            ]
             domain_rejection = self._canonical_scene_domain_policy_rejection(
                 bucket,
                 direct_evidence=[*candidate_entrance_labels, *exact_labels],
@@ -16582,6 +16891,20 @@ class GatewayService:
                     }
                     return False
             return True
+        independent_support_labels = [
+            label
+            for label in hard_evidence_labels
+            if label != "strong_rerank"
+        ]
+        if candidate_entrance_labels and not independent_support_labels:
+            item["admission_reason"] = "candidate_only_requires_absolute_support"
+            item["recall_policy_debug"] = {
+                "candidate_entrances": candidate_entrance_labels,
+                "independent_support": [],
+                "rerank_score": round(self._safe_float(item.get("rerank_score"), 0.0), 4),
+                "auto": True,
+            }
+            return False
         query_plan = self._recall_query_plan(query)
         rejection = self._anchor_plan_direct_rejection(bucket, self._query_anchor_plan(query))
         if rejection:
@@ -16609,10 +16932,9 @@ class GatewayService:
             semantic_score=item.get("semantic_score"),
             rerank_score=item.get("rerank_score"),
             high_confidence_edge=bool(
-                item.get("exact_anchor_match")
-                or item.get("authored_cue_match")
+                item.get("full_title_recall_match")
+                or item.get("source_bound_raw_quote_match")
                 or item.get("semantic_rescue_direct_span")
-                or "title_anchor" in hard_evidence_labels
             ),
             auto=True,
         )
@@ -17252,8 +17574,7 @@ class GatewayService:
             return chosen
 
         first_has_focused_anchor = bool(
-            first.get("exact_anchor_match")
-            or first.get("title_anchor_terms")
+            self._item_has_direct_recall_evidence(first)
         )
         if first_has_focused_anchor:
             covered_specific_terms = set(first.get("specific_matched_query_terms") or [])
@@ -17261,8 +17582,7 @@ class GatewayService:
                 candidate
                 for candidate in remaining_candidates
                 if (
-                    candidate.get("exact_anchor_match")
-                    or candidate.get("title_anchor_terms")
+                    self._item_has_direct_recall_evidence(candidate)
                     or (
                         set(candidate.get("specific_matched_query_terms") or [])
                         - covered_specific_terms
@@ -17295,7 +17615,10 @@ class GatewayService:
         return chosen
 
     def _dynamic_bucket_item_has_reliable_recall_signal(self, query: str, item: dict) -> bool:
-        if item.get("exact_anchor_match"):
+        if (
+            item.get("full_title_recall_match")
+            or item.get("source_bound_raw_quote_match")
+        ):
             return True
         bucket = item.get("bucket") if isinstance(item, dict) else None
         if self._is_canonical_scene_bucket(bucket):

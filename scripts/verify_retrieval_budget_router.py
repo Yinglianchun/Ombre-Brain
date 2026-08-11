@@ -370,8 +370,8 @@ assert cue_debug["cue_lexical_match"] is True
 assert cue_debug["cue_lexical_role"] == "candidate_only"
 assert "matched_cues" not in cue_debug
 assert cue_debug["final_admission_source"] == "candidate_only_requires_reranker"
-assert cue_debug["reranker_shadow"]["status"] == "simulation_shadow_disabled"
-assert cue_debug["reranker_shadow"]["called_false_reason"] == "simulation_shadow_disabled"
+assert cue_debug["reranker_shadow"]["status"] == "ineligible_below_entry_floor"
+assert cue_debug["reranker_shadow"]["called_false_reason"] == "ineligible_below_entry_floor"
 
 strong_body_cue_service = service({"scene-watermelon": 0.72})
 strong_body_cue_service._bucket_authored_cue_terms = cue_service._bucket_authored_cue_terms

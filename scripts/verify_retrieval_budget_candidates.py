@@ -63,7 +63,7 @@ qualified, suppressed = service._apply_retrieval_budget_candidate_floor(
     [
         {"bucket": {"id": "scene-high"}, "score": 0.71, "semantic_score": 0.71},
         {"bucket": {"id": "scene-low"}, "score": 0.40, "semantic_score": 0.40},
-        {"bucket": {"id": "scene-exact"}, "score": 0.20, "exact_anchor_match": True},
+        {"bucket": {"id": "scene-exact"}, "score": 0.20, "full_title_recall_match": True},
         {
             "bucket": {"id": "scene-cue"},
             "score": 0.20,
@@ -84,13 +84,13 @@ qualified, suppressed = service._apply_retrieval_budget_candidate_floor(
 assert [item["bucket"]["id"] for item in qualified] == [
     "scene-high",
     "scene-exact",
-    "scene-cue",
     "scene-cue-semantic",
 ]
-assert [item["bucket"]["id"] for item in suppressed] == ["scene-low"]
+assert [item["bucket"]["id"] for item in suppressed] == ["scene-low", "scene-cue"]
 assert suppressed[0]["admission_reason"] == "below_absolute_floor"
+assert suppressed[1]["admission_reason"] == "candidate_only_requires_reranker"
 assert budget["cheap_retrieval"]["candidate_count"] == 5
-assert budget["cheap_retrieval"]["floor_qualified_count"] == 4
+assert budget["cheap_retrieval"]["floor_qualified_count"] == 3
 assert budget["cheap_retrieval"]["stop_reason"] == "candidates_over_absolute_floor"
 candidate_debug = {
     item["bucket_id"]: item
