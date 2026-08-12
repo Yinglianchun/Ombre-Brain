@@ -894,8 +894,8 @@ def _normalize_item(raw: Any) -> dict[str, Any]:
     refs_raw = raw.get("source_refs")
     if not isinstance(refs_raw, list) or not refs_raw:
         raise ValueError("source_refs must be a non-empty list")
-    if len(refs_raw) > 24:
-        raise ValueError("at most 24 source refs may support one item")
+    if len(refs_raw) > 100:
+        raise ValueError("at most 100 source refs may support one item")
     refs = [normalize_evidence_ref(item) for item in refs_raw]
     primary_count = sum(1 for ref in refs if ref["evidence_kind"] == "primary")
     if primary_count != 1:
