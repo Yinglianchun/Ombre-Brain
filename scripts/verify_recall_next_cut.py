@@ -13,7 +13,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway import GatewayService
-from memory_recall.retrieval_budget import build_retrieval_budget, router_hard_skip_allowed
+from memory_recall.retrieval_budget import (
+    build_retrieval_budget,
+    optional_shallow_probe_allowed,
+    router_hard_skip_allowed,
+)
 from memory_relevance import memory_relevance_options_from_config
 from recall_policy import RecallPolicy
 from reranker_engine import RerankResult
@@ -99,6 +103,16 @@ def verify_routing_query_view() -> None:
         )
         assert budget["memory_need"] == "optional", query
         assert router_hard_skip_allowed(budget, route_skip_proposed=True) is False, query
+        assert optional_shallow_probe_allowed(budget) is True, query
+
+    technical = build_retrieval_budget(
+        "记忆一直在漏水，好讨厌",
+        semantic_debug={**route_debug(), "route": "技术闲聊"},
+        route="技术闲聊",
+        route_action="skip",
+    )
+    assert technical["memory_need"] == "optional"
+    assert optional_shallow_probe_allowed(technical) is True
 
     assert plain["memory_need"] == addressed["memory_need"] == "required"
 

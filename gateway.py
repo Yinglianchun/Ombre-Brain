@@ -110,6 +110,7 @@ from memory_recall.retrieval_budget import (
     apply_fact_event_probe,
     build_retrieval_budget,
     finalize_retrieval_budget,
+    optional_shallow_probe_allowed,
     partition_candidates_by_absolute_floor,
     router_hard_skip_allowed,
 )
@@ -2254,7 +2255,7 @@ class GatewayService:
         semantic_recall_debug["initial_retrieval_budget"] = str(
             direct_skip_budget.get("initial_budget") or "shallow"
         )
-        if route_skip_proposed and direct_skip_budget.get("memory_need") == "optional":
+        if optional_shallow_probe_allowed(direct_skip_budget):
             semantic_recall_debug["live_probe_mode"] = "optional_shallow"
         structure_allows_pre_skip = router_hard_skip_allowed(
             direct_skip_budget,
@@ -2950,6 +2951,8 @@ class GatewayService:
             semantic_recall_debug["initial_retrieval_budget"] = str(
                 structure_budget.get("initial_budget") or "shallow"
             )
+            if optional_shallow_probe_allowed(structure_budget):
+                semantic_recall_debug["live_probe_mode"] = "optional_shallow"
             if semantic_recall_result is None:
                 semantic_skip_broad = await self._apply_semantic_scene_evidence_veto(
                     current_user_query,
@@ -2972,7 +2975,6 @@ class GatewayService:
                     "final_budget": str(structure_budget.get("final_budget") or ""),
                     "memory_need": str(structure_budget.get("memory_need") or "optional"),
                 }
-                semantic_recall_debug["live_probe_mode"] = "optional_shallow"
             semantic_recall_debug["skip_applied"] = semantic_skip_broad
             semantic_recall_debug["applied_action"] = (
                 "skip" if semantic_skip_broad else "recall"

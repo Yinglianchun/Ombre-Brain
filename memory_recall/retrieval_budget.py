@@ -23,6 +23,9 @@ BUDGET_ORDER = {
 }
 
 PURE_CHITCHAT_ROUTE_NAMES = frozenset({"present_chitchat"})
+CURRENT_TURN_ROUTE_NAMES = frozenset(
+    {"simple_contact", "present_chitchat", "present_reality", "技术闲聊"}
+)
 PURE_CHITCHAT_MIN_CONFIDENCE = 0.84
 PURE_CHITCHAT_MIN_MARGIN = 0.08
 DEFAULT_SENTINEL_RESCUE_FLOOR = 0.55
@@ -247,6 +250,12 @@ def router_hard_skip_allowed(
         budget.get("memory_need") == "bypass"
         and str(budget.get("final_budget") or "") != BUDGET_DEEP
     )
+
+
+def optional_shallow_probe_allowed(budget: Mapping[str, Any] | None) -> bool:
+    if not isinstance(budget, Mapping) or budget.get("memory_need") != "optional":
+        return False
+    return str(budget.get("surface_route") or "") in CURRENT_TURN_ROUTE_NAMES
 
 
 def _budget_channels(budget: str) -> list[str]:
