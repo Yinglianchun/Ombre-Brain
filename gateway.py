@@ -111,6 +111,7 @@ from memory_recall.retrieval_budget import (
     build_retrieval_budget,
     finalize_retrieval_budget,
     partition_candidates_by_absolute_floor,
+    router_hard_skip_allowed,
 )
 from narrative_rolls import NarrativeRollStore
 from persona_engine import PersonaStateEngine
@@ -2247,10 +2248,17 @@ class GatewayService:
             route_action=str(semantic_recall_debug.get("route_action") or "recall"),
             semantic_debug=semantic_recall_debug,
         )
-        structure_allows_pre_skip = bool(
-            route_skip_proposed
-            and direct_skip_budget.get("pure_chitchat_prior")
-            and str(direct_skip_budget.get("final_budget") or "") != "deep"
+        semantic_recall_debug["memory_need"] = str(
+            direct_skip_budget.get("memory_need") or "optional"
+        )
+        semantic_recall_debug["initial_retrieval_budget"] = str(
+            direct_skip_budget.get("initial_budget") or "shallow"
+        )
+        if route_skip_proposed and direct_skip_budget.get("memory_need") == "optional":
+            semantic_recall_debug["live_probe_mode"] = "optional_shallow"
+        structure_allows_pre_skip = router_hard_skip_allowed(
+            direct_skip_budget,
+            route_skip_proposed=route_skip_proposed,
         )
         direct_chitchat_skip = bool(not simulation_probe and structure_allows_pre_skip)
         semantic_recall_debug["direct_skip"] = {
@@ -2936,6 +2944,12 @@ class GatewayService:
                 route_action=str(semantic_recall_debug.get("route_action") or "recall"),
                 semantic_debug=semantic_recall_debug,
             )
+            semantic_recall_debug["memory_need"] = str(
+                structure_budget.get("memory_need") or "optional"
+            )
+            semantic_recall_debug["initial_retrieval_budget"] = str(
+                structure_budget.get("initial_budget") or "shallow"
+            )
             if semantic_recall_result is None:
                 semantic_skip_broad = await self._apply_semantic_scene_evidence_veto(
                     current_user_query,
@@ -2946,14 +2960,19 @@ class GatewayService:
                 )
             else:
                 semantic_skip_broad = bool(semantic_recall_debug.get("skip_applied"))
-            if semantic_skip_broad and not structure_budget.get("pure_chitchat_prior"):
+            if semantic_skip_broad and not router_hard_skip_allowed(
+                structure_budget,
+                route_skip_proposed=True,
+            ):
                 semantic_skip_broad = False
                 semantic_recall_debug["query_structure_veto"] = {
                     "applied": True,
-                    "reason": "not_high_confidence_pure_chitchat",
+                    "reason": "current_state_optional_probe",
                     "structural_vetoes": list(structure_budget.get("structural_vetoes") or []),
                     "final_budget": str(structure_budget.get("final_budget") or ""),
+                    "memory_need": str(structure_budget.get("memory_need") or "optional"),
                 }
+                semantic_recall_debug["live_probe_mode"] = "optional_shallow"
             semantic_recall_debug["skip_applied"] = semantic_skip_broad
             semantic_recall_debug["applied_action"] = (
                 "skip" if semantic_skip_broad else "recall"
@@ -15202,6 +15221,12 @@ class GatewayService:
             retrieval_budget and retrieval_budget.get("mode") == "simulation_shadow"
         )
         budget_channels = set(retrieval_budget.get("channels") or []) if budget_shadow else set()
+        optional_shallow_probe = bool(
+            isinstance(semantic_recall_debug, dict)
+            and semantic_recall_debug.get("live_probe_mode") == "optional_shallow"
+        )
+        if optional_shallow_probe:
+            allow_rerank = False
         recall_ablation_mode = str(
             ((retrieval_budget or {}).get("recall_ablation") or {}).get("mode") or "normal"
         )

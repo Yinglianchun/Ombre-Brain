@@ -228,7 +228,25 @@ def surface_only_query_kind(query: object) -> str:
         return "address_only"
     if key and _SURFACE_ONLY_CONTACT_RE.fullmatch(key):
         return "intimate_contact_only"
+    for address in sorted(_SURFACE_ONLY_ADDRESS_KEYS, key=len, reverse=True):
+        if key.startswith(address) and _SURFACE_ONLY_CONTACT_RE.fullmatch(key[len(address):]):
+            return "address_and_intimate_contact_only"
     return ""
+
+
+def router_hard_skip_allowed(
+    budget: Mapping[str, Any] | None,
+    *,
+    route_skip_proposed: bool,
+) -> bool:
+    """Only a payload-free social surface may bypass candidate retrieval."""
+
+    if not route_skip_proposed or not isinstance(budget, Mapping):
+        return False
+    return bool(
+        budget.get("memory_need") == "bypass"
+        and str(budget.get("final_budget") or "") != BUDGET_DEEP
+    )
 
 
 def _budget_channels(budget: str) -> list[str]:
@@ -567,6 +585,13 @@ def build_retrieval_budget(
         explicit_deep_reasons.append("explicit_recall_language")
     initial_budget = BUDGET_SHALLOW
     final_budget = BUDGET_DEEP if explicit_deep_reasons else BUDGET_SHALLOW
+    memory_need = (
+        "bypass"
+        if surface_only_kind
+        else "required"
+        if explicit_deep_reasons
+        else "optional"
+    )
     absolute_floor = _bounded_float(absolute_floor, 0.55)
     reranker_entry_floor = min(
         absolute_floor,
@@ -584,6 +609,7 @@ def build_retrieval_budget(
         "effective_budget": effective_budget,
         "initial_budget": initial_budget,
         "final_budget": final_budget,
+        "memory_need": memory_need,
         "budget_decision_source": (
             "query_structure" if explicit_deep_reasons else "default_shallow_probe"
         ),

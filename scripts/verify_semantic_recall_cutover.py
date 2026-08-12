@@ -170,7 +170,7 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
     service._record_hook_recall_injection = GatewayService._record_hook_recall_injection.__get__(service)
 
     skipped = await service.handle_hook_recall(
-        RequestStub({"query": "回来看看你", "include_debug": True})
+        RequestStub({"query": "老公亲亲抱抱", "include_debug": True})
     )
     skipped_body = json.loads(skipped.body)
     assert skipped_body["cards"] == []
@@ -188,7 +188,7 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
     skipped_full = await service.handle_hook_recall(
         RequestStub(
             {
-                "query": "回来看看你",
+                "query": "老公亲亲抱抱",
                 "recall_mode": "full",
                 "include_debug": True,
             }
@@ -209,14 +209,23 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
         captured.update(kwargs)
         return [], [], {"hook_recall_debug": {"candidate_count": 0}}
 
-    service.semantic_recall_router = HookRouterStub(skip=False)
-
     async def no_scene_veto(*_args, **_kwargs):
         return False
 
     service._apply_semantic_scene_evidence_veto = no_scene_veto
     service._hook_recall_fast_cards = fast_cards
     service._render_hook_recall_additional_context = lambda cards: ""
+    current_state = await service.handle_hook_recall(
+        RequestStub({"query": "回来看看你", "include_debug": True})
+    )
+    current_state_body = json.loads(current_state.body)
+    current_state_route = current_state_body["debug"]["semantic_recall_debug"]
+    assert current_state_body["ok"] is True
+    assert current_state_route["direct_skip"]["applied"] is False
+    assert current_state_route["memory_need"] == "optional"
+    assert current_state_route["live_probe_mode"] == "optional_shallow"
+
+    service.semantic_recall_router = HookRouterStub(skip=False)
     recalled = await service.handle_hook_recall(
         RequestStub({"query": "我去修记忆库了", "include_debug": True})
     )

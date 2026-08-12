@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway import GatewayService
-from memory_recall.retrieval_budget import build_retrieval_budget
+from memory_recall.retrieval_budget import build_retrieval_budget, router_hard_skip_allowed
 from memory_relevance import memory_relevance_options_from_config
 from recall_policy import RecallPolicy
 from reranker_engine import RerankResult
@@ -79,7 +79,7 @@ def verify_routing_query_view() -> None:
     assert plain["final_budget"] == addressed["final_budget"] == "deep"
     assert plain["pure_chitchat_prior"] is addressed["pure_chitchat_prior"] is False
 
-    for query in ("老公", "亲亲抱抱", "老公亲亲抱抱", "我去刷小红书了"):
+    for query in ("老公", "亲亲抱抱", "老公亲亲抱抱"):
         budget = build_retrieval_budget(
             query,
             semantic_debug=route_debug(),
@@ -87,6 +87,20 @@ def verify_routing_query_view() -> None:
             route_action="skip",
         )
         assert budget["pure_chitchat_prior"] is True, query
+        assert budget["memory_need"] == "bypass", query
+        assert router_hard_skip_allowed(budget, route_skip_proposed=True) is True, query
+
+    for query in ("我去刷小红书了", "今天好开心", "今天好热", "我有点委屈"):
+        budget = build_retrieval_budget(
+            query,
+            semantic_debug=route_debug(),
+            route="present_chitchat",
+            route_action="skip",
+        )
+        assert budget["memory_need"] == "optional", query
+        assert router_hard_skip_allowed(budget, route_skip_proposed=True) is False, query
+
+    assert plain["memory_need"] == addressed["memory_need"] == "required"
 
 
 def verify_router_and_candidate_vectors_are_separate() -> None:
@@ -317,6 +331,11 @@ def verify_reranked_scene_absolute_support() -> None:
             "记忆一直在漏水，好讨厌",
             scene("scene-meteor", "我们关于流星的讨论", "窗口断裂、遗忘和被记住。"),
             0.0441,
+        ),
+        (
+            "我去刷小红书了",
+            scene("scene-xhs-project", "我们关于流量的讨论", "项目讨论中只顺带提到一次小红书。"),
+            0.1790,
         ),
     ]
     for query, candidate_scene, final_score in cases:
