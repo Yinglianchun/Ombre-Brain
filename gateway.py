@@ -15407,7 +15407,13 @@ class GatewayService:
                 str(bucket.get("id") or ""): cue_terms
                 for bucket in eligible
                 if bucket.get("id")
-                and (cue_terms := self._bucket_authored_cue_terms(raw_query, bucket))
+                and (
+                    cue_terms := self._bucket_authored_cue_terms(
+                        raw_query,
+                        bucket,
+                        literal_only=optional_shallow_probe,
+                    )
+                )
             }
             if (
                 recall_ablation_mode != "without_cues"
@@ -16181,7 +16187,13 @@ class GatewayService:
     def _bucket_scene_cues_are_reviewed(meta: dict) -> bool:
         return scene_cues_are_reviewed(meta)
 
-    def _bucket_authored_cue_terms(self, query: str, bucket: dict) -> list[str]:
+    def _bucket_authored_cue_terms(
+        self,
+        query: str,
+        bucket: dict,
+        *,
+        literal_only: bool = False,
+    ) -> list[str]:
         if not query or not isinstance(bucket, dict):
             return []
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
@@ -16207,6 +16219,12 @@ class GatewayService:
             return []
 
         query_key = self._compact_lookup_key(query)
+        if literal_only:
+            return [
+                cue
+                for cue in cues
+                if (cue_key := self._compact_lookup_key(cue)) and cue_key in query_key
+            ]
         query_term_keys = {
             self._compact_lookup_key(term)
             for term in self._specific_query_terms(query)
@@ -18560,6 +18578,13 @@ class GatewayService:
                 for source in (why.get("sources") or [])
                 if isinstance(source, dict) and str(source.get("source") or "").strip()
             ]
+            if not sources:
+                if row.get("semantic_score") is not None:
+                    append_unique(sources, "semantic")
+                if row.get("keyword_score") is not None:
+                    append_unique(sources, "keyword")
+                if row.get("rerank_score") is not None:
+                    append_unique(sources, "rerank")
             for source in sources:
                 append_unique(entry["sources"], source)
             admission = why.get("admission") if isinstance(why.get("admission"), dict) else {}
@@ -18570,13 +18595,35 @@ class GatewayService:
                 or ""
             ).strip()
             append_unique(entry["admission_reasons"], admission_reason)
+            score = why.get("score") if isinstance(why.get("score"), dict) else {}
+            if not score:
+                score = {
+                    "final": self._safe_float(row.get("score"), 0.0),
+                    "semantic": (
+                        self._safe_float(row.get("semantic_score"), 0.0)
+                        if row.get("semantic_score") is not None
+                        else None
+                    ),
+                    "keyword": (
+                        self._safe_float(row.get("keyword_score"), 0.0)
+                        if row.get("keyword_score") is not None
+                        else None
+                    ),
+                    "rerank": (
+                        self._safe_float(row.get("rerank_score"), 0.0)
+                        if row.get("rerank_score") is not None
+                        else None
+                    ),
+                }
             evidence: dict[str, Any] = {
                 "stage": stage,
                 "status": str(why.get("status") or row.get("status") or ""),
-                "primary_source": str(why.get("primary_source") or ""),
+                "primary_source": str(why.get("primary_source") or (sources[0] if sources else "")),
                 "sources": sources,
                 "admission_reason": admission_reason,
-                "score": why.get("score") if isinstance(why.get("score"), dict) else {},
+                "score": score,
+                "evidence_labels": list(row.get("evidence_labels") or []),
+                "hard_evidence_labels": list(row.get("hard_evidence_labels") or []),
             }
             trace = row.get("diffusion_trace") if isinstance(row.get("diffusion_trace"), dict) else {}
             if trace:

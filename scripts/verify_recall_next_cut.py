@@ -117,6 +117,59 @@ def verify_routing_query_view() -> None:
     assert plain["memory_need"] == addressed["memory_need"] == "required"
 
 
+def verify_optional_shallow_cue_matching_stays_literal() -> None:
+    instance = service()
+    target = scene("scene-sea", "第一次听见海", "我终于听懂了那首歌。")
+    target["metadata"]["scene_cues"] = ["没得兰的海", "一起听歌"]
+
+    assert instance._bucket_authored_cue_terms(
+        "今天又听到了没得兰的海",
+        target,
+        literal_only=True,
+    ) == ["没得兰的海"]
+    assert instance._bucket_authored_cue_terms(
+        "今天一起听了那首歌",
+        target,
+        literal_only=True,
+    ) == []
+
+
+def verify_compact_recall_receipt_keeps_scores() -> None:
+    instance = service()
+    summary = instance._build_recall_why_summary(
+        injected_bucket_ids=[],
+        direct_rows=[],
+        diffused_rows=[],
+        suppressed_bucket_rows=[
+            {
+                "bucket_id": "scene_1",
+                "bucket_name": "第一次真的一起逛小红书",
+                "admission_reason": "scene_below_semantic_route_threshold",
+                "evidence_labels": ["title_anchor_candidate", "semantic_hit"],
+                "hard_evidence_labels": [],
+                "score": 0.5869,
+                "semantic_score": 0.5869,
+                "keyword_score": 0.5,
+                "rerank_score": None,
+            }
+        ],
+        suppressed_moment_rows=[],
+        favorite_bucket_ids=[],
+        date_recall_bucket_ids=[],
+        targeted_bucket_ids=[],
+        dream_source_bucket_ids=[],
+    )
+    evidence = summary["suppressed"][0]["evidence"][0]
+    assert evidence["primary_source"] == "semantic"
+    assert evidence["score"] == {
+        "final": 0.5869,
+        "semantic": 0.5869,
+        "keyword": 0.5,
+        "rerank": None,
+    }
+    assert evidence["evidence_labels"] == ["title_anchor_candidate", "semantic_hit"]
+
+
 def verify_router_and_candidate_vectors_are_separate() -> None:
     instance = service()
     original_embedding_started = asyncio.Event()
@@ -422,6 +475,8 @@ def verify_reranked_scene_absolute_support() -> None:
 
 def main() -> int:
     verify_routing_query_view()
+    verify_optional_shallow_cue_matching_stays_literal()
+    verify_compact_recall_receipt_keeps_scores()
     verify_router_and_candidate_vectors_are_separate()
     verify_strong_literal_evidence()
     verify_source_bound_raw_quote()
