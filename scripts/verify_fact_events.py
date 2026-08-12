@@ -111,6 +111,25 @@ def main() -> None:
         restored_fact = store.set_status(fact_id, "active")
         assert restored_fact["item"]["status"] == "active"
 
+        legacy_meal_source = ref(
+            8105,
+            "user",
+            "昨天午饭吃了面条。",
+            "2026-08-08T09:15:00Z",
+            "primary",
+        )
+        legacy_meal = store.write_many(
+            [
+                {
+                    "type": "fact",
+                    "body": "小雨昨天午饭吃了面条。",
+                    "origin_id": "bridge-legacy-meal",
+                    "source_refs": [legacy_meal_source],
+                }
+            ]
+        )
+        legacy_meal_id = legacy_meal["items"][0]["item_id"]
+
         source_c = ref(
             8103,
             "user",
@@ -134,6 +153,9 @@ def main() -> None:
         correction_id = correction["items"][0]["item_id"]
         relation_groups = store.relation_candidates([correction_id], limit_per_fact=10)
         assert relation_groups["groups"][0]["candidates"][0]["item_id"] == fact_id
+        assert legacy_meal_id not in {
+            item["item_id"] for item in relation_groups["groups"][0]["candidates"]
+        }
         proposal = store.propose_relations(
             [
                 {
@@ -222,6 +244,7 @@ def main() -> None:
         assert store.list_relation_proposals(status="all")["items"] == []
         deleted_meal = store.delete(meal_id)
         assert deleted_meal["deleted"] == 1
+        assert store.delete(legacy_meal_id)["deleted"] == 1
         assert store.read(fact_id) is None
         assert store.list(item_type="fact", status="active")["count"] == 0
 

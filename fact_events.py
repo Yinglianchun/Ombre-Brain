@@ -608,9 +608,15 @@ class FactEventStore:
                         item_id,
                         str(current["fact_type"] or ""),
                         str(current["atomic_question"] or ""),
-                        safe_limit,
+                        min(300, safe_limit * 3),
                     ),
                 ).fetchall()
+                rows = [
+                    row
+                    for row in rows
+                    if str(row["fact_type"] or "") != ""
+                    or not _legacy_fact_looks_like_meal(str(row["body"] or ""))
+                ][:safe_limit]
                 groups.append(
                     {
                         "new_fact": self._row_payload(conn, current, include_sources=True),
@@ -985,6 +991,15 @@ def _normalize_relation_proposal(raw: Any) -> dict[str, Any]:
         "review_confidence": review_confidence,
         "explicit_correction": explicit_correction,
     }
+
+
+def _legacy_fact_looks_like_meal(body: str) -> bool:
+    text = unicodedata.normalize("NFKC", str(body or "")).strip().lower()
+    meal_markers = ("早餐", "早饭", "午饭", "午餐", "晚饭", "晚餐", "夜宵", "外卖")
+    eating_markers = ("吃了", "吃过", "没吃饭", "没有吃饭")
+    return any(marker in text for marker in meal_markers) or any(
+        marker in text for marker in eating_markers
+    )
 
 
 def _source_bounds(refs: list[dict[str, Any]]) -> dict[str, str]:
