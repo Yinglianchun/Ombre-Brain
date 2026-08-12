@@ -13906,6 +13906,62 @@ async def api_mark_fact_events_injected(request):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@mcp.custom_route("/api/fact-events/relation-candidates", methods=["POST"])
+async def api_fact_relation_candidates(request):
+    """Return bounded old-Fact pools for newly written, non-meal Facts."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    try:
+        return JSONResponse(
+            fact_event_store.relation_candidates(
+                body.get("new_item_ids"),
+                limit_per_fact=_int_between(body.get("limit_per_fact"), 30, 1, 100),
+            )
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Fact relation candidate lookup failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/fact-events/relation-proposals", methods=["GET", "POST"])
+async def api_fact_relation_proposals(request):
+    """Store or list review-only Fact relation proposals."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        if request.method == "GET":
+            params = request.query_params
+            return JSONResponse(
+                fact_event_store.list_relation_proposals(
+                    status=str(params.get("status") or "pending"),
+                    limit=_int_between(params.get("limit"), 100, 1, 500),
+                )
+            )
+        body = await request.json()
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        return JSONResponse(fact_event_store.propose_relations(body.get("proposals")))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Fact relation proposal request failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @mcp.custom_route("/api/fact-events/revise", methods=["POST"])
 async def api_revise_fact_event(request):
     """Create a source-preserving revision, or update importance metadata."""

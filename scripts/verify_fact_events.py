@@ -52,6 +52,8 @@ def main() -> None:
         fact = {
             "type": "fact",
             "body": "小雨紫外线过敏。",
+            "fact_type": "health",
+            "atomic_question": "小雨是否有紫外线过敏？",
             "importance": 4,
             "origin_id": "bridge-candidate-fact-1",
             "source_refs": [source_a],
@@ -82,6 +84,8 @@ def main() -> None:
         assert fact_row["local_start_time"] == "16:15"
         assert fact_row["source_started_at"] == source_a["created_at"]
         assert fact_row["importance"] == 4 and fact_row["injection_count"] == 0
+        assert fact_row["fact_type"] == "health"
+        assert fact_row["atomic_question"] == "小雨是否有紫外线过敏？"
 
         event_row = store.read(event_id)
         assert event_row and event_row["local_start_time"] == "16:15"
@@ -107,6 +111,80 @@ def main() -> None:
         restored_fact = store.set_status(fact_id, "active")
         assert restored_fact["item"]["status"] == "active"
 
+        source_c = ref(
+            8103,
+            "user",
+            "医生确认我不是紫外线过敏，只是晒伤。",
+            "2026-08-09T08:15:00Z",
+            "primary",
+        )
+        correction = store.write_many(
+            [
+                {
+                    "type": "fact",
+                    "body": "医生确认小雨不是紫外线过敏，只是晒伤。",
+                    "fact_type": "health",
+                    "atomic_question": "小雨是否有紫外线过敏？",
+                    "importance": 4,
+                    "origin_id": "bridge-candidate-fact-2",
+                    "source_refs": [source_c],
+                }
+            ]
+        )
+        correction_id = correction["items"][0]["item_id"]
+        relation_groups = store.relation_candidates([correction_id], limit_per_fact=10)
+        assert relation_groups["groups"][0]["candidates"][0]["item_id"] == fact_id
+        proposal = store.propose_relations(
+            [
+                {
+                    "new_fact_id": correction_id,
+                    "candidate_fact_id": fact_id,
+                    "relation": "contradicts",
+                    "reason": "医生结论与先前自述不能同时作为当前诊断成立。",
+                    "confidence": 0.96,
+                }
+            ]
+        )
+        assert proposal["inserted"] == 1
+        assert store.propose_relations(
+            [
+                {
+                    "new_fact_id": correction_id,
+                    "candidate_fact_id": fact_id,
+                    "relation": "contradicts",
+                    "reason": "重复提交不会新建。",
+                    "confidence": 0.96,
+                }
+            ]
+        )["idempotent"] == 1
+        pending = store.list_relation_proposals()
+        assert pending["items"][0]["new_fact_id"] == correction_id
+        assert store.read(fact_id)["status"] == "active"
+
+        meal_source = ref(
+            8104,
+            "user",
+            "今天吃了牛肉面。",
+            "2026-08-09T09:15:00Z",
+            "primary",
+        )
+        meal = store.write_many(
+            [
+                {
+                    "type": "fact",
+                    "body": "小雨今天吃了牛肉面。",
+                    "fact_type": "meal",
+                    "atomic_question": "小雨今天吃了什么？",
+                    "origin_id": "bridge-candidate-meal-1",
+                    "source_refs": [meal_source],
+                }
+            ]
+        )
+        meal_id = meal["items"][0]["item_id"]
+        meal_candidates = store.relation_candidates([meal_id])
+        assert meal_candidates["groups"] == []
+        assert meal_candidates["skipped"] == [{"item_id": meal_id, "reason": "meal_fact"}]
+
         event_revision = store.revise(
             event_id,
             title="记住出门时替小雨遮阳",
@@ -130,6 +208,11 @@ def main() -> None:
         assert store.read(event_id)["covered_by_scene_id"] == "scene_covering_event"
         assert store.read(fact_id)["status"] == "active"
 
+        deleted_correction = store.delete(correction_id)
+        assert deleted_correction["deleted"] == 1
+        assert store.list_relation_proposals()["items"] == []
+        deleted_meal = store.delete(meal_id)
+        assert deleted_meal["deleted"] == 1
         deleted_fact = store.delete(fact_id)
         assert deleted_fact["deleted"] == 1
         assert deleted_fact["item_ids"] == [fact_id]

@@ -25,6 +25,8 @@ from scene_evidence import normalize_evidence_ref
 SCHEMA_VERSION = "fact-event-v1"
 ITEM_TYPES = frozenset({"fact", "event"})
 ITEM_STATUSES = frozenset({"active", "archived", "superseded", "tombstoned"})
+FACT_RELATIONS = frozenset({"duplicate", "reinforces", "updates", "contradicts", "supersedes"})
+FACT_RELATION_STATUSES = frozenset({"pending", "accepted", "rejected", "superseded"})
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:@/-]+$")
 
@@ -109,8 +111,36 @@ class FactEventStore:
 
                 CREATE INDEX IF NOT EXISTS idx_fact_event_sources_message
                 ON fact_event_sources(source_system, session_id, message_id);
+
+                CREATE TABLE IF NOT EXISTS fact_relation_proposals (
+                    proposal_id TEXT PRIMARY KEY,
+                    new_fact_id TEXT NOT NULL,
+                    candidate_fact_id TEXT NOT NULL,
+                    relation TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(new_fact_id, candidate_fact_id, relation),
+                    FOREIGN KEY(new_fact_id) REFERENCES fact_events(item_id) ON DELETE RESTRICT,
+                    FOREIGN KEY(candidate_fact_id) REFERENCES fact_events(item_id) ON DELETE RESTRICT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_fact_relation_proposals_status
+                ON fact_relation_proposals(status, created_at, proposal_id);
                 """
             )
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(fact_events)").fetchall()
+            }
+            if "fact_type" not in columns:
+                conn.execute("ALTER TABLE fact_events ADD COLUMN fact_type TEXT NOT NULL DEFAULT ''")
+            if "atomic_question" not in columns:
+                conn.execute(
+                    "ALTER TABLE fact_events ADD COLUMN atomic_question TEXT NOT NULL DEFAULT ''"
+                )
 
     def write_many(self, raw_items: Any) -> dict[str, Any]:
         """Write a batch with per-item rejection and idempotent origin checks."""
@@ -210,8 +240,9 @@ class FactEventStore:
                 item_id, schema_version, fingerprint, origin_id, item_type, title,
                 body, importance, status, local_date, local_end_date,
                 local_start_time, local_end_time, source_started_at,
-                source_ended_at, supersedes_item_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_ended_at, supersedes_item_id, created_at, updated_at,
+                fact_type, atomic_question
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item["item_id"],
@@ -231,6 +262,8 @@ class FactEventStore:
                 supersedes_id,
                 now,
                 now,
+                item["fact_type"],
+                item["atomic_question"],
             ),
         )
         for ref in item["source_refs"]:
@@ -363,6 +396,8 @@ class FactEventStore:
                 "title": next_title,
                 "body": next_body,
                 "importance": next_importance,
+                "fact_type": current.get("fact_type", ""),
+                "atomic_question": current.get("atomic_question", ""),
                 "supersedes_item_id": str(current["item_id"]),
                 "source_refs": current["source_refs"],
             }
@@ -389,6 +424,8 @@ class FactEventStore:
                     "title": next_title,
                     "body": next_body,
                     "importance": candidate["importance"],
+                    "fact_type": current.get("fact_type", ""),
+                    "atomic_question": current.get("atomic_question", ""),
                     "supersedes_item_id": str(current["item_id"]),
                     "source_refs": current["source_refs"],
                 }
@@ -464,6 +501,14 @@ class FactEventStore:
                 item_ids = sorted(family)
                 placeholders = ",".join("?" for _ in item_ids)
                 conn.execute(
+                    f"""
+                    DELETE FROM fact_relation_proposals
+                    WHERE new_fact_id IN ({placeholders})
+                       OR candidate_fact_id IN ({placeholders})
+                    """,
+                    [*item_ids, *item_ids],
+                )
+                conn.execute(
                     f"DELETE FROM fact_event_sources WHERE item_id IN ({placeholders})",
                     item_ids,
                 )
@@ -508,6 +553,163 @@ class FactEventStore:
                 )
             conn.commit()
         return {"updated": len(found), "item_ids": found}
+
+    def relation_candidates(self, new_item_ids: Any, *, limit_per_fact: int = 30) -> dict[str, Any]:
+        """Return bounded old-Fact pools; meal facts intentionally bypass relation work."""
+
+        ids = _normalize_ids(new_item_ids, "new_item_ids", limit=500)
+        if not ids or not os.path.exists(self.db_path):
+            return {"groups": [], "skipped": []}
+        safe_limit = max(1, min(100, int(limit_per_fact or 30)))
+        self._init_db()
+        groups: list[dict[str, Any]] = []
+        skipped: list[dict[str, str]] = []
+        with closing(self._connect()) as conn:
+            for item_id in ids:
+                current = conn.execute(
+                    "SELECT * FROM fact_events WHERE item_id=? AND item_type='fact'",
+                    (item_id,),
+                ).fetchone()
+                if current is None:
+                    skipped.append({"item_id": item_id, "reason": "not_a_fact"})
+                    continue
+                if str(current["fact_type"] or "") == "meal":
+                    skipped.append({"item_id": item_id, "reason": "meal_fact"})
+                    continue
+                rows = conn.execute(
+                    """
+                    SELECT * FROM fact_events
+                    WHERE item_type='fact' AND status='active' AND item_id<>?
+                      AND fact_type<>'meal'
+                    ORDER BY
+                        CASE WHEN fact_type<>'' AND fact_type=? THEN 0 ELSE 1 END,
+                        CASE WHEN atomic_question<>'' AND atomic_question=? THEN 0 ELSE 1 END,
+                        importance DESC, local_date DESC, local_start_time DESC, item_id DESC
+                    LIMIT ?
+                    """,
+                    (
+                        item_id,
+                        str(current["fact_type"] or ""),
+                        str(current["atomic_question"] or ""),
+                        safe_limit,
+                    ),
+                ).fetchall()
+                groups.append(
+                    {
+                        "new_fact": self._row_payload(conn, current, include_sources=False),
+                        "candidates": [
+                            self._row_payload(conn, row, include_sources=False) for row in rows
+                        ],
+                    }
+                )
+        return {"groups": groups, "skipped": skipped}
+
+    def propose_relations(self, raw_proposals: Any) -> dict[str, Any]:
+        """Persist model suggestions for review without changing either Fact."""
+
+        if not isinstance(raw_proposals, list):
+            raise ValueError("proposals must be a list")
+        if len(raw_proposals) > 500:
+            raise ValueError("at most 500 proposals may be written in one batch")
+        self._init_db()
+        now = _now()
+        results: list[dict[str, Any]] = []
+        inserted = 0
+        idempotent = 0
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for index, raw in enumerate(raw_proposals):
+                    try:
+                        proposal = _normalize_relation_proposal(raw)
+                        rows = conn.execute(
+                            "SELECT item_id, item_type FROM fact_events WHERE item_id IN (?, ?)",
+                            (proposal["new_fact_id"], proposal["candidate_fact_id"]),
+                        ).fetchall()
+                        if len(rows) != 2 or any(str(row["item_type"]) != "fact" for row in rows):
+                            raise ValueError("both relation endpoints must be existing Facts")
+                        existing = conn.execute(
+                            """
+                            SELECT proposal_id FROM fact_relation_proposals
+                            WHERE new_fact_id=? AND candidate_fact_id=? AND relation=?
+                            """,
+                            (
+                                proposal["new_fact_id"],
+                                proposal["candidate_fact_id"],
+                                proposal["relation"],
+                            ),
+                        ).fetchone()
+                        if existing is not None:
+                            idempotent += 1
+                            results.append(
+                                {
+                                    "index": index,
+                                    "status": "idempotent",
+                                    "proposal_id": str(existing["proposal_id"]),
+                                }
+                            )
+                            continue
+                        conn.execute(
+                            """
+                            INSERT INTO fact_relation_proposals (
+                                proposal_id, new_fact_id, candidate_fact_id, relation,
+                                reason, confidence, status, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                            """,
+                            (
+                                proposal["proposal_id"],
+                                proposal["new_fact_id"],
+                                proposal["candidate_fact_id"],
+                                proposal["relation"],
+                                proposal["reason"],
+                                proposal["confidence"],
+                                now,
+                                now,
+                            ),
+                        )
+                        inserted += 1
+                        results.append(
+                            {
+                                "index": index,
+                                "status": "inserted",
+                                "proposal_id": proposal["proposal_id"],
+                            }
+                        )
+                    except ValueError as exc:
+                        results.append({"index": index, "status": "rejected", "error": str(exc)})
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {
+            "ok": True,
+            "inserted": inserted,
+            "idempotent": idempotent,
+            "rejected": sum(item["status"] == "rejected" for item in results),
+            "items": results,
+        }
+
+    def list_relation_proposals(self, *, status: str = "pending", limit: int = 100) -> dict[str, Any]:
+        self._init_db()
+        safe_status = str(status or "pending").strip().lower()
+        if safe_status != "all" and safe_status not in FACT_RELATION_STATUSES:
+            raise ValueError("unsupported proposal status")
+        safe_limit = max(1, min(500, int(limit or 100)))
+        where = "" if safe_status == "all" else " WHERE p.status=?"
+        params: list[Any] = [] if safe_status == "all" else [safe_status]
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT p.*, n.body AS new_fact_body, c.body AS candidate_fact_body
+                FROM fact_relation_proposals p
+                JOIN fact_events n ON n.item_id=p.new_fact_id
+                JOIN fact_events c ON c.item_id=p.candidate_fact_id
+                {where}
+                ORDER BY p.created_at DESC, p.proposal_id DESC LIMIT ?
+                """,
+                [*params, safe_limit],
+            ).fetchall()
+        return {"items": [{key: row[key] for key in row.keys()} for row in rows]}
 
     def archive_events_covered_by_scene(
         self,
@@ -654,6 +856,10 @@ def _normalize_item(raw: Any) -> dict[str, Any]:
     supersedes_id = _optional_identifier(
         raw.get("supersedes_item_id"), "supersedes_item_id", 128
     )
+    fact_type = str(raw.get("fact_type") or "").strip().lower() if item_type == "fact" else ""
+    atomic_question = (
+        str(raw.get("atomic_question") or "").strip()[:240] if item_type == "fact" else ""
+    )
     normalized_body = _normalized_proposition(body)
     fingerprint_material = {
         "schema_version": SCHEMA_VERSION,
@@ -680,8 +886,41 @@ def _normalize_item(raw: Any) -> dict[str, Any]:
         "body": body,
         "importance": importance,
         "supersedes_item_id": supersedes_id,
+        "fact_type": fact_type,
+        "atomic_question": atomic_question,
         "source_refs": refs,
         **bounds,
+    }
+
+
+def _normalize_relation_proposal(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("each proposal must be an object")
+    new_fact_id = _required_identifier(raw.get("new_fact_id"), "new_fact_id", 128)
+    candidate_fact_id = _required_identifier(
+        raw.get("candidate_fact_id"), "candidate_fact_id", 128
+    )
+    if new_fact_id == candidate_fact_id:
+        raise ValueError("a Fact cannot relate to itself")
+    relation = str(raw.get("relation") or "").strip().lower()
+    if relation not in FACT_RELATIONS:
+        raise ValueError("unsupported Fact relation")
+    reason = _required_text(raw.get("reason"), "reason", 800)
+    try:
+        confidence = float(raw.get("confidence"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("confidence must be between 0 and 1") from exc
+    if not 0 <= confidence <= 1:
+        raise ValueError("confidence must be between 0 and 1")
+    material = f"{new_fact_id}\n{candidate_fact_id}\n{relation}"
+    proposal_id = "factrel_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+    return {
+        "proposal_id": proposal_id,
+        "new_fact_id": new_fact_id,
+        "candidate_fact_id": candidate_fact_id,
+        "relation": relation,
+        "reason": reason,
+        "confidence": confidence,
     }
 
 
