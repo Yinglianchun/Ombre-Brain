@@ -139,9 +139,13 @@ def main() -> None:
                 {
                     "new_fact_id": correction_id,
                     "candidate_fact_id": fact_id,
-                    "relation": "contradicts",
+                    "relation": "supersedes",
                     "reason": "医生结论与先前自述不能同时作为当前诊断成立。",
                     "confidence": 0.96,
+                    "review_status": "accepted",
+                    "review_reason": "新原文明确纠正旧判断，且证据来自小雨直接转述医生结论。",
+                    "review_confidence": 0.97,
+                    "explicit_correction": True,
                 }
             ]
         )
@@ -151,15 +155,20 @@ def main() -> None:
                 {
                     "new_fact_id": correction_id,
                     "candidate_fact_id": fact_id,
-                    "relation": "contradicts",
+                    "relation": "supersedes",
                     "reason": "重复提交不会新建。",
                     "confidence": 0.96,
+                    "review_status": "accepted",
+                    "review_reason": "重复提交。",
+                    "review_confidence": 0.97,
+                    "explicit_correction": True,
                 }
             ]
         )["idempotent"] == 1
-        pending = store.list_relation_proposals()
+        pending = store.list_relation_proposals(status="accepted")
         assert pending["items"][0]["new_fact_id"] == correction_id
-        assert store.read(fact_id)["status"] == "active"
+        assert store.read(fact_id)["status"] == "superseded"
+        assert store.read(correction_id)["supersedes_item_id"] == fact_id
 
         meal_source = ref(
             8104,
@@ -206,16 +215,13 @@ def main() -> None:
         assert covered == {"archived": 1, "item_ids": [event_id]}
         assert store.read(event_id)["status"] == "archived"
         assert store.read(event_id)["covered_by_scene_id"] == "scene_covering_event"
-        assert store.read(fact_id)["status"] == "active"
+        assert store.read(fact_id)["status"] == "superseded"
 
         deleted_correction = store.delete(correction_id)
-        assert deleted_correction["deleted"] == 1
-        assert store.list_relation_proposals()["items"] == []
+        assert deleted_correction["deleted"] == 2
+        assert store.list_relation_proposals(status="all")["items"] == []
         deleted_meal = store.delete(meal_id)
         assert deleted_meal["deleted"] == 1
-        deleted_fact = store.delete(fact_id)
-        assert deleted_fact["deleted"] == 1
-        assert deleted_fact["item_ids"] == [fact_id]
         assert store.read(fact_id) is None
         assert store.list(item_type="fact", status="active")["count"] == 0
 

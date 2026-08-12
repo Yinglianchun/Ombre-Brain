@@ -120,6 +120,9 @@ class FactEventStore:
                     reason TEXT NOT NULL,
                     confidence REAL NOT NULL CHECK(confidence BETWEEN 0 AND 1),
                     status TEXT NOT NULL DEFAULT 'pending',
+                    review_reason TEXT NOT NULL DEFAULT '',
+                    review_confidence REAL,
+                    explicit_correction INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(new_fact_id, candidate_fact_id, relation),
@@ -140,6 +143,20 @@ class FactEventStore:
             if "atomic_question" not in columns:
                 conn.execute(
                     "ALTER TABLE fact_events ADD COLUMN atomic_question TEXT NOT NULL DEFAULT ''"
+                )
+            proposal_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(fact_relation_proposals)").fetchall()
+            }
+            if "review_reason" not in proposal_columns:
+                conn.execute(
+                    "ALTER TABLE fact_relation_proposals ADD COLUMN review_reason TEXT NOT NULL DEFAULT ''"
+                )
+            if "review_confidence" not in proposal_columns:
+                conn.execute("ALTER TABLE fact_relation_proposals ADD COLUMN review_confidence REAL")
+            if "explicit_correction" not in proposal_columns:
+                conn.execute(
+                    "ALTER TABLE fact_relation_proposals ADD COLUMN explicit_correction INTEGER NOT NULL DEFAULT 0"
                 )
 
     def write_many(self, raw_items: Any) -> dict[str, Any]:
@@ -596,9 +613,9 @@ class FactEventStore:
                 ).fetchall()
                 groups.append(
                     {
-                        "new_fact": self._row_payload(conn, current, include_sources=False),
+                        "new_fact": self._row_payload(conn, current, include_sources=True),
                         "candidates": [
-                            self._row_payload(conn, row, include_sources=False) for row in rows
+                            self._row_payload(conn, row, include_sources=True) for row in rows
                         ],
                     }
                 )
@@ -653,8 +670,9 @@ class FactEventStore:
                             """
                             INSERT INTO fact_relation_proposals (
                                 proposal_id, new_fact_id, candidate_fact_id, relation,
-                                reason, confidence, status, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                                reason, confidence, status, review_reason,
+                                review_confidence, explicit_correction, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 proposal["proposal_id"],
@@ -663,10 +681,40 @@ class FactEventStore:
                                 proposal["relation"],
                                 proposal["reason"],
                                 proposal["confidence"],
+                                proposal["review_status"],
+                                proposal["review_reason"],
+                                proposal["review_confidence"],
+                                int(proposal["explicit_correction"]),
                                 now,
                                 now,
                             ),
                         )
+                        if (
+                            proposal["review_status"] == "accepted"
+                            and proposal["relation"] == "supersedes"
+                            and proposal["explicit_correction"]
+                            and proposal["review_confidence"] >= 0.9
+                        ):
+                            conn.execute(
+                                """
+                                UPDATE fact_events
+                                SET status='superseded', updated_at=?
+                                WHERE item_id=? AND status='active'
+                                """,
+                                (now, proposal["candidate_fact_id"]),
+                            )
+                            conn.execute(
+                                """
+                                UPDATE fact_events
+                                SET supersedes_item_id=?, updated_at=?
+                                WHERE item_id=? AND status='active'
+                                """,
+                                (
+                                    proposal["candidate_fact_id"],
+                                    now,
+                                    proposal["new_fact_id"],
+                                ),
+                            )
                         inserted += 1
                         results.append(
                             {
@@ -912,6 +960,17 @@ def _normalize_relation_proposal(raw: Any) -> dict[str, Any]:
         raise ValueError("confidence must be between 0 and 1") from exc
     if not 0 <= confidence <= 1:
         raise ValueError("confidence must be between 0 and 1")
+    review_status = str(raw.get("review_status") or "").strip().lower()
+    if review_status not in {"accepted", "rejected"}:
+        raise ValueError("review_status must be accepted or rejected")
+    review_reason = _required_text(raw.get("review_reason"), "review_reason", 800)
+    try:
+        review_confidence = float(raw.get("review_confidence"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("review_confidence must be between 0 and 1") from exc
+    if not 0 <= review_confidence <= 1:
+        raise ValueError("review_confidence must be between 0 and 1")
+    explicit_correction = bool(raw.get("explicit_correction"))
     material = f"{new_fact_id}\n{candidate_fact_id}\n{relation}"
     proposal_id = "factrel_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
     return {
@@ -921,6 +980,10 @@ def _normalize_relation_proposal(raw: Any) -> dict[str, Any]:
         "relation": relation,
         "reason": reason,
         "confidence": confidence,
+        "review_status": review_status,
+        "review_reason": review_reason,
+        "review_confidence": review_confidence,
+        "explicit_correction": explicit_correction,
     }
 
 
