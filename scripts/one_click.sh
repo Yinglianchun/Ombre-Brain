@@ -507,15 +507,16 @@ gateway:
   cooldown_floor: 0.3
   inject_total_budget: 1200
   recent_context_budget: 300
-  just_now_context_enabled: true
+  just_now_context_enabled: false
   just_now_context_hours: 6
   just_now_context_max_turns: 5
   just_now_context_budget: 420
   conversation_turns_max_entries: 500
-  date_persona_trace_enabled: true
+  date_persona_trace_enabled: false
   date_persona_trace_budget: 220
   date_persona_trace_max_events: 5
   date_persona_trace_include_daily: true
+  date_recall_enabled: false
   recalled_memory_budget: 400
   direct_render_mode: "auto"
   retrieval_mode: "bucket"

@@ -11305,6 +11305,15 @@ async def _edit_scene_memory(
         before_bucket,
         updated_bucket,
     )
+    moment_index_refreshed = False
+    try:
+        memory_moment_store.upsert_bucket(updated_bucket)
+        moment_index_refreshed = True
+    except Exception as exc:
+        logger.warning(
+            "Edited Scene moment/alias reindex failed / Scene 修订后片段与召回别名索引失败: %s",
+            exc,
+        )
     entity_edges_refreshed = False
     try:
         _refresh_entity_edges_for_bucket(updated_bucket)
@@ -11322,6 +11331,7 @@ async def _edit_scene_memory(
             (updated_bucket.get("metadata") or {}).get("updated_at")
         ),
         "embedding_refresh": "queued" if embedding_queued else "skipped",
+        "moment_index_refreshed": moment_index_refreshed,
         "entity_edges_refreshed": entity_edges_refreshed,
         "scene_linking_queued": _queue_scene_linking(scene_id),
         "scene": _bucket_read_payload(updated_bucket),

@@ -461,7 +461,7 @@ class GatewayService:
         )
         self.just_now_context_enabled = self._bool_config_value(
             self.gateway_cfg.get("just_now_context_enabled"),
-            True,
+            False,
         )
         self.just_now_context_hours = max(0.0, float(self.gateway_cfg.get("just_now_context_hours", 6)))
         self.just_now_context_max_turns = max(
@@ -544,7 +544,7 @@ class GatewayService:
         )
         self.date_persona_trace_enabled = self._bool_config_value(
             self.gateway_cfg.get("date_persona_trace_enabled"),
-            True,
+            False,
         )
         self.date_persona_trace_budget = max(0, int(self.gateway_cfg.get("date_persona_trace_budget", 220)))
         self.date_persona_trace_max_events = max(
@@ -557,7 +557,7 @@ class GatewayService:
         )
         self.date_recall_enabled = self._bool_config_value(
             self.gateway_cfg.get("date_recall_enabled"),
-            True,
+            False,
         )
         self.date_recall_budget = max(0, int(self.gateway_cfg.get("date_recall_budget", 520)))
         self.date_recall_max_turns = max(1, min(12, int(self.gateway_cfg.get("date_recall_max_turns", 8))))
@@ -1286,7 +1286,7 @@ class GatewayService:
         if "just_now_context_enabled" in payload:
             self.just_now_context_enabled = self._bool_config_value(
                 payload["just_now_context_enabled"],
-                True,
+                False,
             )
             self.gateway_cfg["just_now_context_enabled"] = self.just_now_context_enabled
             updated.append("gateway.just_now_context_enabled")
@@ -1309,7 +1309,7 @@ class GatewayService:
         if "date_persona_trace_enabled" in payload:
             self.date_persona_trace_enabled = self._bool_config_value(
                 payload["date_persona_trace_enabled"],
-                True,
+                False,
             )
             self.gateway_cfg["date_persona_trace_enabled"] = self.date_persona_trace_enabled
             updated.append("gateway.date_persona_trace_enabled")
@@ -1329,7 +1329,7 @@ class GatewayService:
             self.gateway_cfg["date_persona_trace_include_daily"] = self.date_persona_trace_include_daily
             updated.append("gateway.date_persona_trace_include_daily")
         if "date_recall_enabled" in payload:
-            self.date_recall_enabled = self._bool_config_value(payload["date_recall_enabled"], True)
+            self.date_recall_enabled = self._bool_config_value(payload["date_recall_enabled"], False)
             self.gateway_cfg["date_recall_enabled"] = self.date_recall_enabled
             updated.append("gateway.date_recall_enabled")
         if "date_recall_budget" in payload:
@@ -16735,6 +16735,7 @@ class GatewayService:
         semantic_recall_debug: dict[str, Any] | None,
     ) -> dict[str, Any]:
         debug = semantic_recall_debug if isinstance(semantic_recall_debug, dict) else {}
+        route_reason = str(debug.get("reason") or "")
         if not (
             debug.get("enabled")
             and debug.get("active")
@@ -16742,7 +16743,7 @@ class GatewayService:
             and not debug.get("shadow_only")
             and str(debug.get("route_action") or "") == "skip"
             and not debug.get("skip_applied")
-            and str(debug.get("reason") or "") == "below_threshold"
+            and route_reason in {"below_threshold", "matched_skip_route"}
         ):
             return {}
         thresholds = self.config.get("recall_thresholds", {})
@@ -16760,7 +16761,12 @@ class GatewayService:
         )
         return {
             "active": True,
-            "reason": "low_confidence_skip_route",
+            "reason": (
+                "forced_skip_route_probe"
+                if route_reason == "matched_skip_route"
+                else "low_confidence_skip_route"
+            ),
+            "route_reason": route_reason,
             "route": str(debug.get("route") or ""),
             "confidence": round(self._safe_float(debug.get("confidence"), 0.0), 6),
             "margin": round(self._safe_float(debug.get("margin"), 0.0), 6),

@@ -360,7 +360,7 @@ gateway:
   inject_total_budget: 1800
   core_memory_budget: 0
   recent_context_budget: 300
-  just_now_context_enabled: true     # 刚刚/刚才/上一句: use short-term conversation_turns, not long-term memory
+  just_now_context_enabled: false    # opt-in only: 刚刚/刚才/上一句 transcript context
   just_now_context_hours: 6
   just_now_context_max_turns: 5
   just_now_context_budget: 420
@@ -386,10 +386,11 @@ gateway:
     publish_dir: ""                 # empty = buckets_dir/cue_semantic_shadow; independent versioned cue vectors
     # This index is read only by explicit simulation shadow. It never changes
     # ordinary Hook candidates or admits a Scene by itself.
-  date_persona_trace_enabled: true   # date words like 昨天/昨晚 add small same-day persona/original-turn trace
+  date_persona_trace_enabled: false  # opt-in only: date words add same-day persona/original-turn trace
   date_persona_trace_budget: 220
   date_persona_trace_max_events: 5
   date_persona_trace_include_daily: true
+  date_recall_enabled: false         # opt-in only: exact-day raw transcript recall
   recalled_memory_budget: 900
   direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
   retrieval_mode: bucket      # compatibility key; runtime is permanently whole-Scene recall

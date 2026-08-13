@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server
 from bucket_manager import BucketManager
+from memory_moments import MemoryMomentStore
 
 
 class _EditableBucketManager:
@@ -63,9 +64,11 @@ class _EditableBucketManager:
 class _CaptureMoments:
     def __init__(self) -> None:
         self.ids: list[str] = []
+        self.buckets: list[dict] = []
 
     def upsert_bucket(self, bucket: dict):
         self.ids.append(bucket["id"])
+        self.buckets.append(copy.deepcopy(bucket))
         return []
 
 
@@ -115,6 +118,9 @@ async def main() -> None:
     first_history = manager.bucket["metadata"]["scene_revision_history"]
     assert first_history[0]["title"] == "旧标题"
     assert first_history[0]["content"] == "我和小雨保留下来的原 Scene 正文。"
+    assert title_only["moment_index_refreshed"] is True
+    assert moments.ids == ["scene_edit_contract"]
+    assert moments.buckets[-1]["metadata"]["name"] == "小雨亲自改的标题"
 
     revised = await server._edit_scene_memory(
         "scene_edit_contract",
@@ -132,7 +138,12 @@ async def main() -> None:
     assert manager.bucket["metadata"]["scene_cues_reviewed_at"]
     assert len(manager.bucket["metadata"]["scene_revision_history"]) == 2
     assert manager.bucket["metadata"]["scene_revision_history"][1]["title"] == "小雨亲自改的标题"
-    assert moments.ids == []
+    assert revised["moment_index_refreshed"] is True
+    assert moments.ids == ["scene_edit_contract", "scene_edit_contract"]
+    assert moments.buckets[-1]["metadata"]["scene_cues"] == [
+        "提到第一人称修订",
+        "问 Scene 原位编辑",
+    ]
     assert server._window_shadow_scene_source_valid(manager.bucket) is True
 
     stale_retry = await server._edit_scene_memory(
@@ -154,6 +165,12 @@ async def main() -> None:
     assert cue_review["status"] == "updated"
     assert cue_review["changed_fields"] == ["cues_review"]
     assert manager.bucket["metadata"]["scene_cues_reviewed_at"]
+    assert cue_review["moment_index_refreshed"] is True
+    assert moments.ids == [
+        "scene_edit_contract",
+        "scene_edit_contract",
+        "scene_edit_contract",
+    ]
 
     blank_title = await server._edit_scene_memory(
         "scene_edit_contract",
@@ -164,6 +181,12 @@ async def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="ombre-scene-edit-") as temp_dir:
         real_manager = BucketManager({"buckets_dir": temp_dir})
+        real_moments = MemoryMomentStore(
+            {
+                "buckets_dir": temp_dir,
+                "state_dir": str(Path(temp_dir) / "state"),
+            }
+        )
         original = "真实文件往返也必须保留这条 revision 1 正文。"
         await real_manager.create(
             bucket_id="scene_file_roundtrip",
@@ -182,7 +205,14 @@ async def main() -> None:
             },
         )
         server.bucket_mgr = real_manager
+        server.memory_moment_store = real_moments
         loaded = await real_manager.get("scene_file_roundtrip")
+        real_moments.upsert_bucket(loaded)
+        aliases_before = {
+            row["alias_text"]
+            for row in real_moments.list_for_bucket_aliases("scene_file_roundtrip")
+        }
+        assert "提到文件往返" in aliases_before
         loaded_updated_at = loaded["metadata"]["updated_at"]
         original_last_active = loaded["metadata"]["last_active"]
         version_token = (
@@ -194,13 +224,26 @@ async def main() -> None:
             "scene_file_roundtrip",
             expected_updated_at=version_token,
             content="真实文件往返后的第一人称修订正文。",
+            cues=["修订后的文件往返入口"],
         )
         assert roundtrip["status"] == "updated"
+        assert roundtrip["moment_index_refreshed"] is True
         reloaded = await real_manager.get("scene_file_roundtrip")
         assert reloaded["metadata"]["window_shadow_id"] == "window_file_roundtrip"
         assert reloaded["metadata"]["scene_revision_history"][0]["content"] == original
         assert reloaded["metadata"]["last_active"] == original_last_active
         assert server._window_shadow_scene_source_valid(reloaded) is True
+        aliases_after = {
+            row["alias_text"]
+            for row in real_moments.list_for_bucket_aliases("scene_file_roundtrip")
+        }
+        assert "提到文件往返" not in aliases_after
+        assert "修订后的文件往返入口" in aliases_after
+        indexed_moments = real_moments.list_for_bucket("scene_file_roundtrip")
+        assert indexed_moments
+        assert indexed_moments[0]["metadata"]["bucket_scene_cues"] == [
+            "修订后的文件往返入口"
+        ]
 
     print("authored Scene in-place edit contract verified")
 

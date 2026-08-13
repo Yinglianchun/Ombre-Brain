@@ -44,6 +44,22 @@ def low_confidence_skip_route_debug() -> dict:
     }
 
 
+def matched_skip_route_debug() -> dict:
+    return {
+        "enabled": True,
+        "active": True,
+        "called": True,
+        "shadow_only": False,
+        "route": "present_chitchat",
+        "route_action": "skip",
+        "confidence": 0.65,
+        "margin": 0.22,
+        "threshold": 0.60,
+        "skip_applied": False,
+        "reason": "matched_skip_route",
+    }
+
+
 class BucketManager:
     @staticmethod
     def filter_specific_lexical_terms(terms, _buckets, **_kwargs):
@@ -120,7 +136,7 @@ def service(semantic_scores: dict[str, float]) -> GatewayService:
     instance._get_semantic_candidates = semantic
     instance._query_looks_emotional_reason_lookup = lambda _query: False
     instance._get_exact_anchor_candidates = lambda *_args, **_kwargs: ({}, {})
-    instance._bucket_authored_cue_terms = lambda _query, _bucket: []
+    instance._bucket_authored_cue_terms = lambda _query, _bucket, **_kwargs: []
     instance._recall_query_plan = lambda query: SimpleNamespace(
         activated_axis_multi=False,
         locatable_terms=(
@@ -336,7 +352,7 @@ assert no_target_admitted == []
 assert no_target_budget["cheap_retrieval"]["stop_reason"] == "no_cheap_candidates"
 
 cue_service = service({"scene-watermelon": 0.20})
-cue_service._bucket_authored_cue_terms = lambda query, bucket: (
+cue_service._bucket_authored_cue_terms = lambda query, bucket, **_kwargs: (
     ["给予别人善意也是在善待自己"]
     if query == "给予别人善意也是在善待自己" and bucket.get("id") == "scene-watermelon"
     else []
@@ -566,5 +582,53 @@ assert not ordinary_guard_suppressed[0]["semantic_route_guard"].get(
     "deferred_to_reranker_shadow"
 )
 assert ordinary_shadow.calls == 0, "ordinary recall must never call simulation shadow"
+
+# A confidently matched skip route may still run the cheap shallow probe, but
+# that probe must use the stricter 0.60 Scene body threshold.  These two scores
+# reproduce the production false positives that previously slipped through the
+# ordinary 0.50 Scene threshold after cue-only candidate discovery.
+for session_id, score in (
+    ("matched-skip-wedding", 0.5159),
+    ("matched-skip-waiting", 0.5363),
+):
+    matched_skip_service = service({"scene-watermelon": score})
+    matched_skip_service.scene_evidence_store = EmptyEvidenceStore()
+    matched_skip_service._is_self_anchor_recall_excluded_bucket = lambda _bucket: False
+    matched_skip_service._bucket_evidence_labels = lambda _query, _item: []
+    matched_skip_service._hard_bucket_evidence_labels = lambda labels: list(labels)
+    matched_skip_service._canonical_scene_domain_policy_rejection = (
+        lambda _bucket, **_kwargs: None
+    )
+    matched_skip_service._bucket_is_tech_domain = lambda _bucket: False
+    matched_skip_service._admit_bucket_for_recall = (
+        GatewayService._admit_bucket_for_recall.__get__(
+            matched_skip_service,
+            GatewayService,
+        )
+    )
+    matched_admitted, matched_suppressed = asyncio.run(
+        matched_skip_service._dynamic_bucket_candidate_items(
+            giant_fruit_query,
+            session_id,
+            [watermelon],
+            semantic_recall_debug=matched_skip_route_debug(),
+            allow_semantic_session_dedupe=False,
+            allow_rerank=False,
+        )
+    )
+    assert matched_admitted == []
+    assert len(matched_suppressed) == 1
+    assert matched_suppressed[0]["admission_reason"] == "scene_below_semantic_route_threshold"
+    assert matched_suppressed[0]["canonical_scene_semantic_threshold"] == 0.60
+    assert matched_suppressed[0]["semantic_route_guard"] == {
+        "active": True,
+        "reason": "forced_skip_route_probe",
+        "route_reason": "matched_skip_route",
+        "route": "present_chitchat",
+        "confidence": 0.65,
+        "margin": 0.22,
+        "base_semantic_threshold": 0.5,
+        "semantic_threshold": 0.6,
+    }
 
 print("retrieval budget router verification passed")
