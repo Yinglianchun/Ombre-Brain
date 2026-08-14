@@ -11724,6 +11724,78 @@ async def read_memory(
     return await _read_scene_memory(safe_id)
 
 
+@mcp.tool()
+async def list_handoff_scenes(limit: int = 500) -> dict:
+    """List active canonical Scenes for an explicit Bridge window handoff.
+
+    This is a bounded read-only compatibility tool.  It deliberately omits
+    titles, cues, domains, annotations, and graph data: the picker only needs
+    the authored Scene body, its date, and exact Haven Bridge evidence IDs.
+    """
+
+    safe_limit = _int_between(limit, 500, 1, 1000)
+    buckets = await bucket_mgr.list_all(include_archive=False)
+    scenes: list[dict[str, Any]] = []
+    for bucket in buckets or []:
+        if not isinstance(bucket, dict) or not _is_canonical_scene_bucket(bucket):
+            continue
+        metadata = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        if (
+            metadata.get("active") is False
+            or metadata.get("deprecated")
+            or str(bucket.get("type") or "").strip().lower() == "archived"
+            or str(metadata.get("type") or "").strip().lower() == "archived"
+        ):
+            continue
+        scene_id = str(bucket.get("id") or "").strip()
+        content = str(bucket.get("content") or "").strip()
+        if not scene_id or not content:
+            continue
+
+        bridge_refs = [
+            ref
+            for ref in scene_evidence_store.list_for_scene(scene_id)
+            if str(ref.get("source_system") or "").strip().lower() == "haven_bridge"
+        ]
+        source_message_ids = list(dict.fromkeys(
+            str(ref.get("message_id") or "").strip()
+            for ref in bridge_refs
+            if str(ref.get("message_id") or "").strip()
+        ))
+        source_session_ids = list(dict.fromkeys(
+            str(ref.get("session_id") or "").strip()
+            for ref in bridge_refs
+            if str(ref.get("session_id") or "").strip()
+        ))
+        created_at = str(
+            metadata.get("date")
+            or metadata.get("event_date")
+            or metadata.get("created")
+            or bucket.get("created_at")
+            or ""
+        ).strip()
+        scenes.append({
+            "id": scene_id,
+            "layer": "scene",
+            "content": content,
+            "date": created_at[:10],
+            "created_at": created_at,
+            "source_message_ids": source_message_ids,
+            "source_session_ids": source_session_ids,
+        })
+
+    scenes.sort(
+        key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")),
+        reverse=True,
+    )
+    return {
+        "status": "ok",
+        "lifecycle": "active_canonical",
+        "items": scenes[:safe_limit],
+        "count": len(scenes),
+    }
+
+
 async def _validate_scene_evidence_target(scene_id: str) -> tuple[str, str]:
     safe_scene_id = _coerce_memory_id(scene_id)
     if not MEMORY_ID_RE.fullmatch(safe_scene_id):
