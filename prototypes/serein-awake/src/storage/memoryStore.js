@@ -1,8 +1,8 @@
-import { defaultMemoryScenes } from "../data/memory.js";
-
 const memoryScenesStorageKey = "serein.memory.scene-records.v1";
-const memorySnapshotStorageKey = "serein.memory.snapshot.v1";
+const retiredMemorySnapshotStorageKey = "serein.memory.snapshot.v1";
+const memoryLiveCacheAtStorageKey = "serein.memory.live-cache-at.v1";
 const memorySceneTombstonesStorageKey = "serein.memory.scene-tombstones.v1";
+const memoryLiveCacheMaxAgeMs = 5 * 60 * 1000;
 let memorySnapshotLoadInFlight = null;
 
 function splitParagraphs(content) {
@@ -190,42 +190,31 @@ function normalizeMemoryScene(savedScene, fallbackScene) {
 
 export function readMemoryScenes() {
   try {
+    window.localStorage.removeItem?.(retiredMemorySnapshotStorageKey);
     const tombstonedSceneIds = readMemorySceneTombstones();
     const saved = JSON.parse(window.localStorage.getItem(memoryScenesStorageKey));
-    if (!Array.isArray(saved)) {
-      return defaultMemoryScenes.filter((scene) => !tombstonedSceneIds.has(scene.id));
-    }
-    if (saved.some((scene) => scene?.sourceKind === "serein-import-rehearsal")) {
-      return saved
-        .map((scene) => normalizeMemoryScene(scene, scene))
-        .filter((scene) => (
-          scene?.id
-          && scene?.title
-          && Array.isArray(scene?.body)
-          && !tombstonedSceneIds.has(scene.id)
-        ));
-    }
-    const savedById = new Map(saved.map((scene) => [scene?.id, scene]));
-    return defaultMemoryScenes
-      .filter((scene) => !tombstonedSceneIds.has(scene.id))
-      .map((scene) => normalizeMemoryScene(savedById.get(scene.id), scene));
+    if (!Array.isArray(saved)) return [];
+    return saved
+      .filter((scene) => scene?.sourceKind === "ombre-live-readonly")
+      .map((scene) => normalizeMemoryScene(scene, scene))
+      .filter((scene) => (
+        scene?.id
+        && scene?.title
+        && Array.isArray(scene?.body)
+        && !tombstonedSceneIds.has(scene.id)
+      ));
   } catch {
-    return defaultMemoryScenes;
+    return [];
   }
 }
 
 async function loadMemorySnapshotOnce() {
-  let snapshot = null;
   try {
-    const response = await fetch(`${import.meta.env.BASE_URL}private/memory-snapshot.json`, { cache: "no-store" });
-    if (response.ok && response.headers.get("content-type")?.includes("application/json")) {
-      const payload = await response.json();
-      if (payload && typeof payload.snapshotId === "string" && Array.isArray(payload.scenes)) {
-        snapshot = payload;
-      }
-    }
+    const cachedAt = Number(window.localStorage.getItem(memoryLiveCacheAtStorageKey) || 0);
+    const cachedScenes = readMemoryScenes();
+    if (cachedScenes.length && Date.now() - cachedAt < memoryLiveCacheMaxAgeMs) return cachedScenes;
   } catch {
-    snapshot = null;
+    // Continue to the live projection when cache metadata is unavailable.
   }
 
   let liveProjection = null;
@@ -245,13 +234,11 @@ async function loadMemorySnapshotOnce() {
     liveProjection = null;
   }
 
-  if (!liveProjection && !snapshot) return null;
+  if (!liveProjection) return null;
 
   try {
-    const snapshotScenes = snapshot?.scenes || [];
-    const projectedScenes = liveProjection
-      ? mergeLiveMemoryProjection(snapshotScenes, liveProjection, { includeSnapshotOnly: false })
-      : snapshotScenes;
+    const snapshotScenes = [];
+    const projectedScenes = mergeLiveMemoryProjection(snapshotScenes, liveProjection, { includeSnapshotOnly: false });
     const saved = JSON.parse(window.localStorage.getItem(memoryScenesStorageKey));
     const savedById = new Map(
       Array.isArray(saved) ? saved.map((scene) => [scene?.id, scene]) : [],
@@ -296,10 +283,8 @@ async function loadMemorySnapshotOnce() {
       .filter((scene) => scene?.id && scene?.title && Array.isArray(scene?.body));
     if (!scenes.length) return null;
 
-    window.localStorage.setItem(
-      memorySnapshotStorageKey,
-      `${snapshot?.snapshotId || "no-snapshot"}:${liveProjection?.snapshotId || "fallback"}`,
-    );
+    storeMemoryScenes(scenes);
+    window.localStorage.setItem(memoryLiveCacheAtStorageKey, String(Date.now()));
     return scenes;
   } catch {
     return null;

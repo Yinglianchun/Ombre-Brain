@@ -1078,8 +1078,9 @@ function sereinMemoryBridge() {
           const params = new URLSearchParams({
             type,
             status,
-            include_sources: "1",
-            limit: "500",
+            include_sources: body.includeSources === true ? "1" : "0",
+            limit: String(Math.max(1, Math.min(500, Number.parseInt(body.limit, 10) || 500))),
+            offset: String(Math.max(0, Number.parseInt(body.offset, 10) || 0)),
           });
           const query = String(body.query || "").trim();
           if (query) params.set("query", query);

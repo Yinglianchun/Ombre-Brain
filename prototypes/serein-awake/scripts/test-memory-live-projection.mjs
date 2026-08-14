@@ -9,6 +9,9 @@ globalThis.window = {
     setItem(key, value) {
       storage.set(key, String(value));
     },
+    removeItem(key) {
+      storage.delete(key);
+    },
   },
 };
 
@@ -53,5 +56,10 @@ assert.equal(scenes[0].id, "scene-live-1");
 assert.equal(scenes[0].title, "德国机真实 Scene");
 assert.equal(scenes[0].sourceKind, "ombre-live-readonly");
 assert.equal(scenes.some((scene) => scene.id === "first-door"), false);
+
+const cachedScenes = await loadMemorySnapshot();
+assert.equal(requests.length, 1);
+assert.equal(cachedScenes.length, 1);
+assert.equal(cachedScenes[0].id, "scene-live-1");
 
 console.log("live-only memory projection checks: PASS");

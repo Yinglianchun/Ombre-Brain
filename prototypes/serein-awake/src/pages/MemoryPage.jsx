@@ -85,6 +85,62 @@ function ombreSourceIdForScene(scene) {
 }
 
 const memoryTypeLabels = { scene: "Scene", event: "事件", fact: "事实" };
+const factEventCacheKey = "serein.memory.fact-events.v1";
+const factEventCacheMaxAgeMs = 5 * 60 * 1000;
+
+function factEventSummary(item) {
+  if (!item || typeof item !== "object") return null;
+  const { source_refs: _sourceRefs, ...summary } = item;
+  return summary.item_id ? summary : null;
+}
+
+function readFactEventCache() {
+  try {
+    const payload = JSON.parse(window.localStorage.getItem(factEventCacheKey));
+    if (!payload || !Array.isArray(payload.fact) || !Array.isArray(payload.event)) return null;
+    return {
+      cachedAt: Number(payload.cachedAt) || 0,
+      items: {
+        fact: payload.fact.map(factEventSummary).filter(Boolean),
+        event: payload.event.map(factEventSummary).filter(Boolean),
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function storeFactEventCache(items) {
+  try {
+    window.localStorage.setItem(factEventCacheKey, JSON.stringify({
+      cachedAt: Date.now(),
+      fact: items.fact.map(factEventSummary).filter(Boolean),
+      event: items.event.map(factEventSummary).filter(Boolean),
+    }));
+  } catch {
+    // Live reads remain available when browser storage is full or disabled.
+  }
+}
+
+async function requestFactEvents({ type, status, query = "", includeSources = false, signal }) {
+  const items = [];
+  let offset = 0;
+  do {
+    const response = await fetch("/__serein/live/fact-events", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type, status, query, includeSources, limit: 500, offset }),
+      signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.message || payload.error || "读取失败");
+    const page = Array.isArray(payload.items) ? payload.items : [];
+    items.push(...page);
+    offset += page.length;
+    if (!page.length || offset >= Number(payload.count || 0)) break;
+  } while (true);
+  return items;
+}
 
 function sceneExcerpt(body) {
   const plain = String(body[0] || "").replace(/[*_`>#-]+/gu, "").replace(/\s+/gu, " ").trim();
@@ -333,10 +389,12 @@ function SceneDomainEditor({ scene, onSaved }) {
 }
 
 export function MemoryPage() {
+  const initialFactEventCache = useMemo(readFactEventCache, []);
   const [sceneRecords, setSceneRecords] = useState(readMemoryScenes);
   const [memoryType, setMemoryType] = useState("scene");
-  const [factEvents, setFactEvents] = useState({ fact: [], event: [] });
-  const [factEventLoadState, setFactEventLoadState] = useState("loading");
+  const [factEvents, setFactEvents] = useState(initialFactEventCache?.items || { fact: [], event: [] });
+  const [factEventDetails, setFactEventDetails] = useState({});
+  const [factEventLoadState, setFactEventLoadState] = useState(initialFactEventCache ? "ready" : "loading");
   const [factEventError, setFactEventError] = useState("");
   const [factEventSearch, setFactEventSearch] = useState({
     type: "",
@@ -390,18 +448,16 @@ export function MemoryPage() {
     const timer = window.setTimeout(async () => {
       setFactEventSearch({ type: memoryType, query: normalizedQuery, items: [], state: "loading", error: "" });
       try {
-        const response = await fetch("/__serein/live/fact-events", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: memoryType, status: "all", query: normalizedQuery }),
+        const items = await requestFactEvents({
+          type: memoryType,
+          status: view === "archived" ? "archived" : "active",
+          query: normalizedQuery,
           signal: controller.signal,
         });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload.message || payload.error || "搜索失败");
         setFactEventSearch({
           type: memoryType,
           query: normalizedQuery,
-          items: Array.isArray(payload.items) ? payload.items : [],
+          items,
           state: "ready",
           error: "",
         });
@@ -421,38 +477,40 @@ export function MemoryPage() {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [memoryType, query]);
+  }, [memoryType, query, view]);
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
-      setFactEventLoadState("loading");
+      const cacheIsFresh = initialFactEventCache
+        && Date.now() - initialFactEventCache.cachedAt < factEventCacheMaxAgeMs;
+      if (cacheIsFresh) return;
+      if (!initialFactEventCache) setFactEventLoadState("loading");
       setFactEventError("");
       try {
-        const entries = await Promise.all(["fact", "event"].map(async (type) => {
-          const response = await fetch("/__serein/live/fact-events", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ type, status: "all" }),
-          });
-          const payload = await response.json().catch(() => ({}));
-          if (!response.ok) throw new Error(payload.message || payload.error || "读取失败");
-          return [type, Array.isArray(payload.items) ? payload.items : []];
-        }));
+        const entries = await Promise.all(["fact", "event"].map(async (type) => [
+          type,
+          (await Promise.all(["active", "archived"].map((status) => (
+            requestFactEvents({ type, status })
+          )))).flat(),
+        ]));
         if (!cancelled) {
-          setFactEvents(Object.fromEntries(entries));
+          const nextItems = Object.fromEntries(entries);
+          setFactEvents(nextItems);
+          storeFactEventCache(nextItems);
           setFactEventLoadState("ready");
         }
       } catch (error) {
         if (!cancelled) {
-          setFactEventLoadState("error");
-          setFactEventError(error.message || "暂时没有读到事实和事件。");
+          if (!initialFactEventCache) setFactEventLoadState("error");
+          else setFactEventLoadState("ready");
+          setFactEventError(initialFactEventCache ? "" : (error.message || "暂时没有读到事实和事件。"));
         }
       }
     };
     load();
     return () => { cancelled = true; };
-  }, []);
+  }, [initialFactEventCache]);
 
   useEffect(() => {
     const openFromRecall = (event) => {
@@ -527,7 +585,10 @@ export function MemoryPage() {
   const selectedScene = sceneRecords.find((scene) => scene.id === selectedSceneId) ?? null;
   const selectedFactEvent = memoryType === "scene"
     ? null
-    : (factEvents[memoryType] || []).find((item) => item.item_id === selectedFactEventId) ?? null;
+    : factEventDetails[selectedFactEventId]
+      || activeFactEvents.find((item) => item.item_id === selectedFactEventId)
+      || (factEvents[memoryType] || []).find((item) => item.item_id === selectedFactEventId)
+      || null;
   const selectedSceneCount = selectedSceneIds.size;
   const allFilteredScenesSelected = Boolean(filteredScenes.length)
     && filteredScenes.every((scene) => selectedSceneIds.has(scene.id));
@@ -785,32 +846,64 @@ export function MemoryPage() {
     exitSelectionMode();
   };
 
+  const openFactEvent = async (item) => {
+    setSelectedFactEventId(item.item_id);
+    setFactEventDetails((current) => ({ ...current, [item.item_id]: item }));
+    const queryHint = String(item.title || item.body || "").trim().slice(0, 200);
+    if (!queryHint) return;
+    try {
+      const matches = await requestFactEvents({
+        type: item.item_type,
+        status: "all",
+        query: queryHint,
+        includeSources: true,
+      });
+      const detail = matches.find((candidate) => candidate.item_id === item.item_id);
+      if (detail) setFactEventDetails((current) => ({ ...current, [item.item_id]: detail }));
+    } catch {
+      // Keep the cached summary open if source expansion is temporarily unavailable.
+    }
+  };
+
   const acceptFactEventRevision = (previousId, revisedItem) => {
-    setFactEvents((current) => ({
-      ...current,
-      [revisedItem.item_type]: current[revisedItem.item_type]
+    setFactEvents((current) => {
+      const next = {
+        ...current,
+        [revisedItem.item_type]: current[revisedItem.item_type]
         .filter((item) => item.item_id !== previousId && item.item_id !== revisedItem.item_id)
         .concat(revisedItem),
-    }));
+      };
+      storeFactEventCache(next);
+      return next;
+    });
+    setFactEventDetails((current) => ({ ...current, [revisedItem.item_id]: revisedItem }));
     setSelectedFactEventId(revisedItem.item_id);
   };
 
   const acceptFactEventStatus = (previousId, updatedItem) => {
-    setFactEvents((current) => ({
-      ...current,
-      [updatedItem.item_type]: current[updatedItem.item_type]
+    setFactEvents((current) => {
+      const next = {
+        ...current,
+        [updatedItem.item_type]: current[updatedItem.item_type]
         .filter((item) => item.item_id !== previousId)
         .concat(updatedItem),
-    }));
+      };
+      storeFactEventCache(next);
+      return next;
+    });
     setSelectedFactEventId(null);
   };
 
   const acceptFactEventDeletion = (deletedIds, itemType) => {
     const deleted = new Set(deletedIds);
-    setFactEvents((current) => ({
-      ...current,
-      [itemType]: current[itemType].filter((item) => !deleted.has(item.item_id)),
-    }));
+    setFactEvents((current) => {
+      const next = {
+        ...current,
+        [itemType]: current[itemType].filter((item) => !deleted.has(item.item_id)),
+      };
+      storeFactEventCache(next);
+      return next;
+    });
     setSelectedFactEventId(null);
   };
 
@@ -1087,7 +1180,7 @@ export function MemoryPage() {
                 return (
                   <li className={`scene-entry${isSelected ? " is-selected" : ""}`} key={item.item_id} style={{ "--scene-index": index }}>
                     <span className="scene-entry__marker" aria-hidden="true" />
-                    <button className="scene-entry__button" type="button" aria-pressed={isSelected} aria-controls="scene-detail" onClick={() => setSelectedFactEventId(item.item_id)}>
+                    <button className="scene-entry__button" type="button" aria-pressed={isSelected} aria-controls="scene-detail" onClick={() => openFactEvent(item)}>
                       <time dateTime={item.local_date}>{item.local_date} · {timeLabel}</time>
                       {item.item_type === "event" ? (
                         <span className="scene-entry__title"><strong>{item.title}</strong></span>

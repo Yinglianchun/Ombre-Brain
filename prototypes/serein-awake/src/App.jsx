@@ -81,7 +81,7 @@ export function App() {
       />
 
       <section className="memory-page" aria-label="记忆" hidden={activeArea !== "记忆"}>
-        <MemoryPage />
+        {activeArea === "记忆" ? <MemoryPage /> : null}
         <Sidebar
           activeArea={activeArea}
           onNavigate={navigateTo}
