@@ -87,6 +87,7 @@ function ombreSourceIdForScene(scene) {
 const memoryTypeLabels = { scene: "Scene", event: "事件", fact: "事实" };
 const factEventCacheKey = "serein.memory.fact-events.v1";
 const factEventCacheMaxAgeMs = 5 * 60 * 1000;
+let factEventListLoadInFlight = null;
 
 function factEventSummary(item) {
   if (!item || typeof item !== "object") return null;
@@ -140,6 +141,20 @@ async function requestFactEvents({ type, status, query = "", includeSources = fa
     if (!page.length || offset >= Number(payload.count || 0)) break;
   } while (true);
   return items;
+}
+
+function loadFactEventLists() {
+  if (!factEventListLoadInFlight) {
+    factEventListLoadInFlight = Promise.all(["fact", "event"].map(async (type) => [
+      type,
+      (await Promise.all(["active", "archived"].map((status) => (
+        requestFactEvents({ type, status })
+      )))).flat(),
+    ]))
+      .then((entries) => Object.fromEntries(entries))
+      .finally(() => { factEventListLoadInFlight = null; });
+  }
+  return factEventListLoadInFlight;
 }
 
 function sceneExcerpt(body) {
@@ -488,14 +503,8 @@ export function MemoryPage() {
       if (!initialFactEventCache) setFactEventLoadState("loading");
       setFactEventError("");
       try {
-        const entries = await Promise.all(["fact", "event"].map(async (type) => [
-          type,
-          (await Promise.all(["active", "archived"].map((status) => (
-            requestFactEvents({ type, status })
-          )))).flat(),
-        ]));
+        const nextItems = await loadFactEventLists();
         if (!cancelled) {
-          const nextItems = Object.fromEntries(entries);
           setFactEvents(nextItems);
           storeFactEventCache(nextItems);
           setFactEventLoadState("ready");
