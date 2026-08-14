@@ -28,6 +28,10 @@ DAILY_TOOL_NAMES: tuple[str, ...] = (
     "comment_diary",
 )
 
+INTERNAL_CALLABLE_TOOL_NAMES: tuple[str, ...] = (
+    "list_handoff_scenes",
+)
+
 class OmbreFastMCP(FastMCP):
     """FastMCP with one exact daily surface.
 
@@ -46,7 +50,7 @@ class OmbreFastMCP(FastMCP):
         return [by_name[name] for name in DAILY_TOOL_NAMES if name in by_name]
 
     async def call_tool(self, name: str, arguments: dict[str, Any]):
-        if name not in DAILY_TOOL_NAMES:
+        if name not in DAILY_TOOL_NAMES and name not in INTERNAL_CALLABLE_TOOL_NAMES:
             allowed = ", ".join(DAILY_TOOL_NAMES)
             raise ToolError(
                 f"Tool {name!r} is retired on the daily surface. "
@@ -58,9 +62,10 @@ class OmbreFastMCP(FastMCP):
         return {
             "mode": "daily",
             "advertised_scope": "exact_daily_surface",
-            "callable_scope": "exact_daily_surface",
+            "callable_scope": "daily_plus_internal",
             "advertised_tool_names": list(DAILY_TOOL_NAMES),
-            "callable_tool_names": list(DAILY_TOOL_NAMES),
+            "callable_tool_names": [*DAILY_TOOL_NAMES, *INTERNAL_CALLABLE_TOOL_NAMES],
             "daily_tool_names": list(DAILY_TOOL_NAMES),
+            "internal_callable_tool_names": list(INTERNAL_CALLABLE_TOOL_NAMES),
             "compatibility_aliases_callable": False,
         }
