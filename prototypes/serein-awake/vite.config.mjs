@@ -1081,6 +1081,8 @@ function sereinMemoryBridge() {
             include_sources: "1",
             limit: "500",
           });
+          const query = String(body.query || "").trim();
+          if (query) params.set("query", query);
           const upstream = await callOmbreDashboard(`/api/fact-events?${params.toString()}`);
           response.statusCode = upstream.status;
           response.end(JSON.stringify(upstream.payload));

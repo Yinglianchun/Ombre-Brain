@@ -14025,6 +14025,7 @@ async def api_list_fact_events(request):
             item_type=str(params.get("type") or ""),
             status=str(params.get("status") or "active"),
             date=str(params.get("date") or ""),
+            query=str(params.get("query") or ""),
             limit=_int_between(params.get("limit"), 100, 1, 500),
             offset=_int_between(params.get("offset"), 0, 0, 1_000_000),
             include_sources=include_sources,

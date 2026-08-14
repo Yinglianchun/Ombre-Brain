@@ -338,6 +338,13 @@ export function MemoryPage() {
   const [factEvents, setFactEvents] = useState({ fact: [], event: [] });
   const [factEventLoadState, setFactEventLoadState] = useState("loading");
   const [factEventError, setFactEventError] = useState("");
+  const [factEventSearch, setFactEventSearch] = useState({
+    type: "",
+    query: "",
+    items: [],
+    state: "idle",
+    error: "",
+  });
   const [query, setQuery] = useState("");
   const [view, setView] = useState("all");
   const [selectedSceneId, setSelectedSceneId] = useState(null);
@@ -371,6 +378,50 @@ export function MemoryPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    const normalizedQuery = query.trim();
+    if (memoryType === "scene" || !normalizedQuery) {
+      setFactEventSearch({ type: "", query: "", items: [], state: "idle", error: "" });
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setFactEventSearch({ type: memoryType, query: normalizedQuery, items: [], state: "loading", error: "" });
+      try {
+        const response = await fetch("/__serein/live/fact-events", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: memoryType, status: "all", query: normalizedQuery }),
+          signal: controller.signal,
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.message || payload.error || "搜索失败");
+        setFactEventSearch({
+          type: memoryType,
+          query: normalizedQuery,
+          items: Array.isArray(payload.items) ? payload.items : [],
+          state: "ready",
+          error: "",
+        });
+      } catch (error) {
+        if (error.name === "AbortError") return;
+        setFactEventSearch({
+          type: memoryType,
+          query: normalizedQuery,
+          items: [],
+          state: "error",
+          error: error.message || "暂时没有完成正文搜索。",
+        });
+      }
+    }, 180);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [memoryType, query]);
 
   useEffect(() => {
     let cancelled = false;
@@ -448,12 +499,30 @@ export function MemoryPage() {
   const activeFactEvents = useMemo(() => {
     if (memoryType === "scene") return [];
     const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
-    return (factEvents[memoryType] || []).filter((item) => {
+    const searchIsCurrent = normalizedQuery
+      && factEventSearch.type === memoryType
+      && factEventSearch.query.toLocaleLowerCase("zh-CN") === normalizedQuery;
+    const candidates = searchIsCurrent ? factEventSearch.items : (normalizedQuery ? [] : factEvents[memoryType] || []);
+    return candidates.filter((item) => {
       const matchesView = view === "archived" ? item.status === "archived" : item.status === "active";
       const haystack = `${item.title || ""} ${item.body || ""}`.toLocaleLowerCase("zh-CN");
       return matchesView && (!normalizedQuery || haystack.includes(normalizedQuery));
     });
-  }, [factEvents, memoryType, query, view]);
+  }, [factEventSearch, factEvents, memoryType, query, view]);
+  const factEventSearchIsCurrent = memoryType !== "scene"
+    && Boolean(query.trim())
+    && factEventSearch.type === memoryType
+    && factEventSearch.query.toLocaleLowerCase("zh-CN") === query.trim().toLocaleLowerCase("zh-CN");
+  const factEventSearching = memoryType !== "scene"
+    && Boolean(query.trim())
+    && (!factEventSearchIsCurrent || factEventSearch.state === "loading");
+  const factEventSearchError = factEventSearchIsCurrent && factEventSearch.state === "error"
+    ? factEventSearch.error
+    : "";
+  const factEventLoading = query.trim() ? factEventSearching : factEventLoadState === "loading";
+  const factEventDisplayError = query.trim()
+    ? factEventSearchError
+    : (factEventLoadState === "error" ? factEventError : "");
 
   const selectedScene = sceneRecords.find((scene) => scene.id === selectedSceneId) ?? null;
   const selectedFactEvent = memoryType === "scene"
@@ -757,7 +826,7 @@ export function MemoryPage() {
           <input
             type="search"
             value={query}
-            placeholder={`搜索${memoryTypeLabels[memoryType]}`}
+            placeholder={memoryType === "scene" ? "搜索 Scene" : `搜索${memoryTypeLabels[memoryType]}标题或正文`}
             onChange={(event) => setQuery(event.target.value)}
           />
           {query ? (
@@ -1004,10 +1073,10 @@ export function MemoryPage() {
                 查看全部 Scene
               </button>
             </div>
-          )) : factEventLoadState === "loading" ? (
+          )) : factEventLoading ? (
             <div className="memory-empty" role="status"><CalendarBlank size={24} weight="light" /><h2>正在翻这一页</h2></div>
-          ) : factEventLoadState === "error" ? (
-            <div className="memory-empty" role="alert"><h2>暂时没有读到</h2><p>{factEventError}</p></div>
+          ) : factEventDisplayError ? (
+            <div className="memory-empty" role="alert"><h2>暂时没有读到</h2><p>{factEventDisplayError}</p></div>
           ) : activeFactEvents.length ? (
             <ol className="scene-timeline fact-event-timeline">
               {activeFactEvents.map((item, index) => {

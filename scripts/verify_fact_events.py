@@ -95,6 +95,10 @@ def main() -> None:
         listed = store.list(item_type="fact", date="2026-08-08")
         assert listed["count"] == 1 and listed["items"][0]["item_id"] == fact_id
         assert "source_refs" not in listed["items"][0]
+        assert store.list(item_type="event", query="紫外线过敏")["items"][0]["item_id"] == event_id
+        assert store.list(item_type="event", query="记住小雨")["items"][0]["item_id"] == event_id
+        assert store.list(item_type="event", query="haven")["items"][0]["item_id"] == event_id
+        assert store.list(item_type="event", query="不存在的作品名")["count"] == 0
 
         injected = store.mark_injected([fact_id, event_id, "fact_missing"])
         assert injected["updated"] == 2

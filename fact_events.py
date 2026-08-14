@@ -337,6 +337,7 @@ class FactEventStore:
         item_type: str = "",
         status: str = "active",
         date: str = "",
+        query: str = "",
         limit: int = 100,
         offset: int = 0,
         include_sources: bool = False,
@@ -352,6 +353,9 @@ class FactEventStore:
         safe_date = str(date or "").strip()
         if safe_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", safe_date):
             raise ValueError("date must use YYYY-MM-DD")
+        safe_query = unicodedata.normalize("NFKC", str(query or "")).strip()
+        if len(safe_query) > 200:
+            raise ValueError("query must be at most 200 characters")
         safe_limit = max(1, min(500, int(limit or 100)))
         safe_offset = max(0, int(offset or 0))
 
@@ -366,6 +370,9 @@ class FactEventStore:
         if safe_date:
             clauses.append("local_date<=? AND local_end_date>=?")
             params.extend([safe_date, safe_date])
+        if safe_query:
+            clauses.append("(INSTR(LOWER(title), LOWER(?)) > 0 OR INSTR(LOWER(body), LOWER(?)) > 0)")
+            params.extend([safe_query, safe_query])
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with closing(self._connect()) as conn:
             count = int(conn.execute(f"SELECT COUNT(*) FROM fact_events{where}", params).fetchone()[0])
