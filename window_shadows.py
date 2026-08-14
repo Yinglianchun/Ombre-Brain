@@ -230,9 +230,10 @@ def is_bare_window_continue_query(content: str) -> bool:
 def validate_window_shadow(
     content: str,
 ) -> tuple[dict[str, str], list[str]]:
-    sections = parse_window_shadow(content)
+    text = str(content or "").strip()
+    sections = parse_window_shadow(text)
     errors = []
-    if not any(
+    has_delta = any(
         sections.get(key)
         for key in (
             "self",
@@ -242,12 +243,34 @@ def validate_window_shadow(
             "recent_events",
             "care_items",
         )
-    ):
+    )
+    if not has_delta and not sections.get("handoff") and text and "我" in text:
+        # A natural first-person paragraph is already an authored Shadow. Keep
+        # its exact text and treat the named headings as guidance, not syntax.
+        sections["self"] = text
+        has_delta = True
+    if not has_delta and not sections.get("handoff"):
         errors.append("missing_window_delta")
-    if sections.get("self") and "我" not in sections["self"]:
-        errors.append("self_section_needs_first_person")
-    if sections.get("voice") and "我" not in sections["voice"]:
-        errors.append("voice_section_needs_first_person")
+    authored_body = "\n\n".join(
+        str(sections.get(key) or "").strip()
+        for key in (
+            "self",
+            "voice",
+            "relationship",
+            "interaction",
+            "recent_events",
+            "care_items",
+            "handoff",
+        )
+        if str(sections.get(key) or "").strip()
+    )
+    if text and "我" not in authored_body:
+        if sections.get("self"):
+            errors.append("self_section_needs_first_person")
+        elif sections.get("voice"):
+            errors.append("voice_section_needs_first_person")
+        else:
+            errors.append("window_shadow_needs_first_person")
     return sections, errors
 
 
@@ -436,24 +459,31 @@ def project_window_shadow_handoff(
                 parts.append(f"## {title}\n{value}")
         return "\n\n".join(parts).strip()
 
+    flowing_self = render(
+        (
+            ("self", "这一窗之后，什么留在了我身上"),
+            ("voice", "我的思考与声音哪里变得更具体"),
+        )
+    )
+    recent_relationship = render(
+        (
+            ("relationship", f"我对{str(user_display_name or '用户').strip() or '用户'}和我们新懂了什么"),
+            ("interaction", "什么仍在发生、仍悬着或值得带走"),
+        )
+    )
+    explicit_handoff = str(values.get("handoff") or "").strip()
+    fallback_handoff = "\n\n".join(
+        str(values.get(key) or "").strip()
+        for key in ("self", "voice", "relationship", "interaction")
+        if str(values.get(key) or "").strip()
+    ).strip()
     return {
         "recent_events": str(values.get("recent_events") or "").strip(),
         "care_items": str(values.get("care_items") or "").strip(),
-        # Old Shadows keep their authored note readable for explicit handoff.
-        # New close_window calls no longer require or advertise this section.
-        "handoff_note": str(values.get("handoff") or "").strip(),
-        "flowing_self": render(
-            (
-                ("self", "这一窗之后，什么留在了我身上"),
-                ("voice", "我的思考与声音哪里变得更具体"),
-            )
-        ),
-        "recent_relationship": render(
-            (
-                ("relationship", f"我对{str(user_display_name or '用户').strip() or '用户'}和我们新懂了什么"),
-                ("interaction", "什么仍在发生、仍悬着或值得带走"),
-            )
-        ),
+        "handoff_note": explicit_handoff or fallback_handoff,
+        "handoff_note_source": "explicit" if explicit_handoff else "window_delta",
+        "flowing_self": flowing_self,
+        "recent_relationship": recent_relationship,
     }
 
 

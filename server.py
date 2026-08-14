@@ -146,6 +146,7 @@ from window_shadows import (
     extract_window_shadow_moments,
     extract_window_shadow_scenes,
     is_bare_window_continue_query,
+    project_window_shadow_handoff,
     validate_window_shadow,
     replace_window_shadow_sections,
     window_shadow_section_char_count,
@@ -9706,39 +9707,54 @@ def _window_shadow_scene_records(
     shadow: str,
     *,
     markdown_import: bool = False,
-) -> tuple[list[dict], str]:
-    """Validate canonical Scene inputs before any Shadow or bucket is written."""
+) -> tuple[list[dict], list[dict], int]:
+    """Keep valid authored Scenes and leave malformed blocks inside the Shadow."""
     if markdown_import:
-        return [], ""
-    records = extract_window_shadow_scenes(shadow)
-    for index, record in enumerate(records, start=1):
+        return [], [], 0
+    extracted = extract_window_shadow_scenes(shadow)
+    records = []
+    warnings = []
+    for index, record in enumerate(extracted, start=1):
         marker_errors = record.pop("marker_errors", [])
         if marker_errors:
-            return [], (
-                f"Scene {index} 标记格式不合格："
-                + "；".join(str(value) for value in marker_errors)
-            )
+            warnings.append({
+                "scene_index": index,
+                "reason": "invalid_scene_marker",
+                "message": "；".join(str(value) for value in marker_errors),
+            })
+            continue
         error = _hold_scene_contract_error(str(record.get("content") or ""))
         if error:
-            return [], f"Scene {index} 格式不合格：{error}"
+            warnings.append({
+                "scene_index": index,
+                "reason": "invalid_scene_content",
+                "message": error,
+            })
+            continue
         scene_title = _authored_scene_title(
             str(record.get("content") or ""),
             str(record.get("title") or ""),
         )
         if not scene_title:
-            return [], (
-                f"Scene {index} 缺少 authored title："
-                "请把标题写在 `scene |` 后的第一个字段，系统不会从正文补造。"
-            )
+            warnings.append({
+                "scene_index": index,
+                "reason": "missing_scene_title",
+                "message": "Scene 没有 authored title，未提升为普通召回 Scene。",
+            })
+            continue
         scene_cues = _authored_scene_cues(record.get("cues"))
         if not scene_cues:
-            return [], (
-                f"Scene {index} 缺少有效 cues：请由当前作者写明以后提到什么时"
-                "希望这段记忆被召回；标题、引句和正文不会被拿来补造 cues。"
-            )
+            warnings.append({
+                "scene_index": index,
+                "reason": "missing_scene_cues",
+                "message": "Scene 没有 authored cues，未提升为普通召回 Scene。",
+            })
+            continue
         record["title"] = scene_title
         record["cues"] = scene_cues
-    return records, ""
+        record["source_index"] = index
+        records.append(record)
+    return records, warnings, len(extracted)
 
 
 async def _close_window_commit(
@@ -9781,6 +9797,15 @@ async def _close_window_commit(
             rejected_draft_cleared = window_shadow_rejected_draft_store.delete(request_key)
             existing_sections = existing_request.get("sections") or {}
             existing_scene_ids = list(existing_request.get("scene_bucket_ids") or [])
+            existing_projection = project_window_shadow_handoff(existing_sections)
+            _, existing_scene_warnings, existing_extracted_scene_count = _window_shadow_scene_records(
+                str(existing_request.get("content") or "")
+            )
+            existing_saved_scenes = []
+            for scene_id in existing_scene_ids:
+                bucket = await bucket_mgr.get(str(scene_id or ""))
+                if bucket:
+                    existing_saved_scenes.append(str(bucket.get("content") or ""))
             return {
                 "status": "existing",
                 "window_id": str(existing_request.get("window_id") or ""),
@@ -9795,8 +9820,9 @@ async def _close_window_commit(
                 "handoff_ready": bool(
                     str(existing_sections.get("recent_events") or "").strip()
                     or str(existing_sections.get("care_items") or "").strip()
-                    or str(existing_sections.get("handoff") or "").strip()
+                    or str(existing_projection.get("handoff_note") or "").strip()
                 ),
+                "handoff_note_source": str(existing_projection.get("handoff_note_source") or ""),
                 "scene_bucket_ids": existing_scene_ids,
                 "scene_count": len(existing_scene_ids),
                 "created_scene_count": 0,
@@ -9804,6 +9830,12 @@ async def _close_window_commit(
                 "ordinary_recall": False,
                 "idempotent_replay": True,
                 "rejected_draft_cleared": rejected_draft_cleared,
+                "saved_shadow": str(existing_request.get("content") or ""),
+                "saved_scenes": existing_saved_scenes,
+                "skipped_scene_count": max(
+                    0, existing_extracted_scene_count - len(existing_scene_ids)
+                ),
+                "scene_warnings": existing_scene_warnings,
             }
     previous_draft = (
         window_shadow_rejected_draft_store.get(request_key)
@@ -10007,6 +10039,8 @@ async def _close_window_commit(
             fix_scope.append("shadow.self")
         if "voice_section_needs_first_person" in validation_errors:
             fix_scope.append("shadow.voice")
+        if "window_shadow_needs_first_person" in validation_errors:
+            fix_scope.append("shadow")
         return _close_window_rejection(
             status="invalid",
             reason="invalid_window_shadow",
@@ -10019,20 +10053,10 @@ async def _close_window_commit(
                 "fix_scope": fix_scope or ["shadow"],
             },
         )
-    scene_records, scene_error = _window_shadow_scene_records(
+    scene_records, scene_warnings, extracted_scene_count = _window_shadow_scene_records(
         text,
         markdown_import=markdown_import,
     )
-    if scene_error:
-        return _close_window_rejection(
-            status="invalid",
-            reason="invalid_scene",
-            error=scene_error,
-            shadow=text,
-            idempotency_key=request_key,
-            request=request_snapshot,
-            validation={"fix_scope": ["shadow.moments"]},
-        )
     try:
         requested_continue_scene_index = int(continue_scene_index or 0)
     except (TypeError, ValueError):
@@ -10045,26 +10069,30 @@ async def _close_window_commit(
             request=request_snapshot,
             validation={"fix_scope": ["request.continue_scene_index"]},
         )
-    if requested_continue_scene_index < 0 or requested_continue_scene_index > len(scene_records):
+    if requested_continue_scene_index < 0 or requested_continue_scene_index > extracted_scene_count:
         return _close_window_rejection(
             status="invalid",
             reason="invalid_continue_scene_index",
             error=(
                 "continue_scene_index 超出本次 Scene 范围："
-                f"收到 {requested_continue_scene_index}，本次共有 {len(scene_records)} 条 Scene。"
+                f"收到 {requested_continue_scene_index}，本次共有 {extracted_scene_count} 个 Scene 块。"
             ),
             shadow=text,
             idempotency_key=request_key,
             request=request_snapshot,
             validation={"fix_scope": ["request.continue_scene_index"]},
         )
-    resolved_continue_scene_index = (
-        requested_continue_scene_index
-        if requested_continue_scene_index
-        else 1
-        if len(scene_records) == 1
-        else 0
-    )
+    valid_scene_indices = {int(record.get("source_index") or 0) for record in scene_records}
+    resolved_continue_scene_index = requested_continue_scene_index
+    if requested_continue_scene_index and requested_continue_scene_index not in valid_scene_indices:
+        scene_warnings.append({
+            "scene_index": requested_continue_scene_index,
+            "reason": "continue_scene_not_promoted",
+            "message": "指定的未完 Scene 没有通过 authored title/cue 边界，因此没有下钻。",
+        })
+        resolved_continue_scene_index = 0
+    elif not requested_continue_scene_index and len(scene_records) == 1:
+        resolved_continue_scene_index = int(scene_records[0].get("source_index") or 0)
 
     source_date = local_date_key(date) if str(date or "").strip() else _handoff_today_key()
     source_date = source_date or _handoff_today_key()
@@ -10084,16 +10112,15 @@ async def _close_window_commit(
     window_created = False
     try:
         # Scenes are validated first and written before the Shadow becomes visible.
-        for index, scene in enumerate(scene_records, start=1):
+        scene_ids_by_source_index = {}
+        for scene in scene_records:
+            index = int(scene.get("source_index") or 0)
             bucket_id, action = await _write_window_shadow_scene(planned_window, scene, index)
             scene_bucket_ids.append(bucket_id)
+            scene_ids_by_source_index[index] = bucket_id
             if action == "created":
                 created_scene_ids.append(bucket_id)
-        continue_scene_id = (
-            scene_bucket_ids[resolved_continue_scene_index - 1]
-            if resolved_continue_scene_index
-            else ""
-        )
+        continue_scene_id = scene_ids_by_source_index.get(resolved_continue_scene_index, "")
 
         if existing_window:
             window = existing_window
@@ -10147,6 +10174,8 @@ async def _close_window_commit(
         if request_key
         else False
     )
+    handoff_projection = project_window_shadow_handoff(sections)
+    saved_handoff_note = str(handoff_projection.get("handoff_note") or "").strip()
     return {
         "status": "created" if window_created else "existing",
         "window_id": str(window.get("window_id") or planned["window_id"]),
@@ -10161,8 +10190,9 @@ async def _close_window_commit(
         "handoff_ready": bool(
             str(sections.get("recent_events") or "").strip()
             or str(sections.get("care_items") or "").strip()
-            or str(sections.get("handoff") or "").strip()
+            or saved_handoff_note
         ),
+        "handoff_note_source": str(handoff_projection.get("handoff_note_source") or ""),
         "scene_bucket_ids": scene_bucket_ids,
         "scene_count": len(scene_bucket_ids),
         "created_scene_count": len(created_scene_ids),
@@ -10172,13 +10202,17 @@ async def _close_window_commit(
         "markdown_import": markdown_import,
         "rejected_draft_cleared": rejected_draft_cleared,
         "narrative_revision_candidate_count": len(revision_candidates),
+        "saved_shadow": text,
+        "saved_scenes": [str(record.get("content") or "") for record in scene_records],
+        "skipped_scene_count": max(0, extracted_scene_count - len(scene_records)),
+        "scene_warnings": scene_warnings,
     }
 
 
 @mcp.tool()
 async def close_window(
     shadow: str,
-    date: str,
+    date: str = "",
     rejected_draft_section_patch: CloseWindowShadowPatchInput | None = None,
     idempotency_key: str = "",
     rejected_draft_source_hash: str = "",
@@ -10186,7 +10220,7 @@ async def close_window(
     continue_scene_index: int = 0,
     context: Context | None = None,
 ) -> dict:
-    """写下一篇窗影和想留下的记忆。date 必须填写 `YYYY-MM-DD`。推荐参考补录结构；`## 给下个窗口的我` 写给接手的自己，不受旧的 250～400 字限制。合法示例：
+    """写下一篇第一人称窗影。date 可省略，默认按 Asia/Shanghai 当天保存；自然段也能写入，分节可选。成功时 saved_shadow / saved_scenes 逐字回显接受的原文。Scene 仅在带 authored title 和 cue 时提升为普通召回；不完整块留在原文并返回 scene_warnings，不让整篇窗影失败。示例：
 # Window Shadow
 
 ## 这一窗之后，什么留在了我身上
@@ -10201,22 +10235,25 @@ async def close_window(
 ## 想留下的记忆
 ### scene | 说清关窗格式 | cue：提到 close_window 怎么写
 我和你确认了完整格式。
-Scene 标题不能省略，标题后的每一项都必须以 `cue：` 开头。正文用第一人称写成能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，不写成摘要或说明。每个 cue 是“以后提到什么时希望它回来”的入口，不是摘要。无 Scene 可省略最后一节；重试复用 idempotency_key。"""
+Scene 的标题项均以 `cue：` 开头；无 Scene 可省略末节。重试复用 idempotency_key。"""
     _ = context
     authored_date = str(date or "").strip()
-    try:
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", authored_date):
-            raise ValueError
-        datetime.strptime(authored_date, "%Y-%m-%d")
-    except ValueError:
-        return {
-            "status": "invalid",
-            "reason": "invalid_date",
-            "error": "date 必须填写有效的 YYYY-MM-DD。",
-            "canonical": False,
-            "ordinary_recall": False,
-            "rejected_draft_saved": False,
-        }
+    if authored_date:
+        try:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", authored_date):
+                raise ValueError
+            datetime.strptime(authored_date, "%Y-%m-%d")
+        except ValueError:
+            return {
+                "status": "invalid",
+                "reason": "invalid_date",
+                "error": "date 留空即可使用今天；填写时必须是有效的 YYYY-MM-DD。",
+                "canonical": False,
+                "ordinary_recall": False,
+                "rejected_draft_saved": False,
+            }
+    else:
+        authored_date = _handoff_today_key()
     return await _close_window_commit(
         shadow,
         rejected_draft_section_patch=rejected_draft_section_patch,

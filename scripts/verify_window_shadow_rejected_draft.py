@@ -196,7 +196,7 @@ async def main() -> None:
         assert canonical_store.stats()["count"] == 2
         assert draft_store.stats()["count"] == 0
 
-        section_patch_key = "bridge:rejected-draft:section-patch"
+        soft_scene_key = "bridge:soft-scene-warning"
         no_cues_shadow = _shadow(
             "我会沿着原稿继续，只修失败的 Scene 段落。" * 15,
             inline_scene=True,
@@ -206,45 +206,16 @@ async def main() -> None:
         )
         no_cues = await server._close_window_commit(
             no_cues_shadow,
-            idempotency_key=section_patch_key,
+            idempotency_key=soft_scene_key,
         )
-        assert no_cues["status"] == "invalid"
-        assert no_cues["reason"] == "invalid_scene"
-        assert no_cues["rejected_draft"]["validation"]["fix_scope"] == [
-            "shadow.moments",
-        ]
-
-        disallowed_patch = await server._close_window_commit(
-            "",
-            idempotency_key=section_patch_key,
-            rejected_draft_source_hash=no_cues["rejected_draft"]["source_hash"],
-            rejected_draft_section_patch={"recent_events": "不应允许修改这一段。"},
-        )
-        assert disallowed_patch["status"] == "invalid"
-        assert disallowed_patch["reason"] == "rejected_draft_section_patch_not_allowed"
-
-        section_patched = await server._close_window_commit(
-            "",
-            idempotency_key=section_patch_key,
-            rejected_draft_source_hash=no_cues["rejected_draft"]["source_hash"],
-            rejected_draft_section_patch={
-                "moments": (
-                    "### scene | 标题：失败稿只修 Scene 段落 | cue：提到 close_window 失败稿 | cue：问局部修复如何保留原稿\n"
-                    "第一次校验失败后，服务端只替换获准修改的 Scene 段落。"
-                )
-            },
-        )
-        assert section_patched["status"] == "created"
-        assert section_patched["scene_count"] == 1
-        patched_canonical = canonical_store.get(section_patched["window_id"])
-        assert "服务端只替换获准修改的 Scene 段落。" in patched_canonical["content"]
-        assert (
-            "## 这一窗之后，什么留在了我身上\n"
-            "我会沿着原稿继续，只修失败的 Scene 段落。"
-            in patched_canonical["content"]
-        )
-        assert draft_store.get(section_patch_key) is None
-
+        assert no_cues["status"] == "created"
+        assert no_cues["scene_count"] == 0
+        assert no_cues["skipped_scene_count"] == 1
+        assert no_cues["scene_warnings"][0]["reason"] == "invalid_scene_marker"
+        assert no_cues["saved_shadow"] == no_cues_shadow
+        assert no_cues["saved_scenes"] == []
+        assert draft_store.get(soft_scene_key) is None
+        assert canonical_store.get(no_cues["window_id"])["content"] == no_cues_shadow
     print("rejected Window Shadow draft contract verified")
 
 

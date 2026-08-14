@@ -131,9 +131,10 @@ async def main() -> None:
         )
         assert created is True
         generated_handoff = await server._build_handoff_breath(max_tokens=1800, debug=True)
-        assert "=== Emergency Recent Events ===" in generated_handoff
-        assert "原文保险箱里的最近事件 fallback" in generated_handoff
-        assert server._last_handoff_status["route"] == "raw_events"
+        assert "=== Legacy Previous-Window Note ===" in generated_handoff
+        assert "我只留下沉淀，没有单独写最近事件。" in generated_handoff
+        assert "原文保险箱里的最近事件 fallback" not in generated_handoff
+        assert server._last_handoff_status["route"] == "window_shadow_legacy_handoff"
 
     print("Window Shadow recent-events handoff contract verified")
 

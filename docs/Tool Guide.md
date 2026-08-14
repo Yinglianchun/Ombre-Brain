@@ -62,14 +62,15 @@
 
 关窗：
 - 窗口结束或准备换窗时，只调用一次 close_window。
-- shadow 是当前窗口亲自写下的第一人称 Window Shadow；Bridge 管醒来，Shadow 管沉淀。沿用补录窗影的自然结构，在接近结尾保留 `## 给下个窗口的我`，直接写给接手的自己；不恢复旧的 250～400 字限制。
-- date 必须填写当前窗影日期，格式为 YYYY-MM-DD。
+- shadow 是当前窗口亲自写下的第一人称 Window Shadow；标题与分段只是建议，一段自然正文也能写。`## 给下个窗口的我` 可选，不恢复旧的 250～400 字限制。
+- date 可省略并按 Asia/Shanghai 当天保存；补录旧窗影时再传 YYYY-MM-DD。
 - 推荐在 `# Window Shadow` 下依次写 `## 这一窗之后，什么留在了我身上`、`## 还在想的事`、`## 给下个窗口的我`；想继续分段时可选 `我在想什么`、`关于你，关于我们`、`最近发生的事`、`还需要关心的事`。简单窗影仍可直接写在 `## 窗影` 下，其他小标题也会原样保留。
-- 需要普通召回的经历放进 `## 想留下的记忆`，写成 `### scene | 作者标题 | cue：一个召回入口 | cue：另一个召回入口`；Scene 正文继续用你的第一人称写成能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不写成摘要或说明；没有就不写 Scene。
+- 需要普通召回的经历放进 `## 想留下的记忆`，写成 `### scene | 作者标题 | cue：一个召回入口 | cue：另一个召回入口`。缺标题或 cue 的块仍保留在完整窗影里，但不提升为普通 Scene，也不阻断关窗；查看 `scene_warnings` 即可。
+- 成功响应用 saved_shadow / saved_scenes 逐字回显实际接受的内容。
 - 同一次关窗和所有重试复用同一个 idempotency_key；失败时按返回的 rejected_draft 与 fix_scope 局部修正。
 - 成功落库后先用 read_memory(memory_type="shadow", memory_id="latest") 取得 window_id、原文与 source_hash，再用 revise_window_shadow 提交完整新稿、expected_source_hash 和新的 idempotency_key。旧版保留；`想留下的记忆` 必须逐字不变，其中的 Scene 改动走 edit_scene。
 - invalid/error 响应中的 rejected_draft.shadow 是逐字失败稿，不是成功 Shadow，也不会进入 handoff 或召回。只修参数时原样重传；修正文时同时传 rejected_draft_source_hash。响应丢失可用 read_rejected_draft=true 与原 key 取回。
-- 任一 Scene 写失败时，本次 Shadow 与新 Scene 整组撤回。
+- 已通过 authored title/cue 边界的 Scene 若在落库事务中失败，本次 Shadow 与新 Scene 仍整组撤回。
 - Shadow 全文不进入普通候选、gate 或扩散；handoff 只读取最新窗影连续性。
 - 用户日记、整段聊天和批量摘要不属于 Window Shadow。
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,17 +12,28 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import server
-from window_shadows import extract_window_shadow_scenes, validate_window_shadow
+from window_shadows import (
+    WindowShadowRejectedDraftStore,
+    WindowShadowStore,
+    extract_window_shadow_scenes,
+    validate_window_shadow,
+)
+
+
+class _NoopDecay:
+    async def ensure_started(self) -> None:
+        return None
 
 
 async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
     description = str(tools["close_window"].description or "")
-    assert description.startswith("写下一篇窗影和想留下的记忆。")
-    assert "date 必须填写 `YYYY-MM-DD`" in description
-    assert "`## 给下个窗口的我`" in description
-    assert "不受旧的 250～400 字限制" in description
-    assert "标题不能省略，标题后的每一项都必须以 `cue：` 开头" in description
+    assert "date" not in tools["close_window"].inputSchema.get("required", [])
+    assert description.startswith("写下一篇第一人称窗影。")
+    assert "date 可省略" in description
+    assert "自然段也能写入" in description
+    assert "saved_shadow / saved_scenes" in description
+    assert "不让整篇窗影失败" in description
 
     documented_example = """
 # Window Shadow
@@ -87,6 +99,35 @@ async def main() -> None:
     assert "真实写作" in sections["self"]
     assert "结构抢走声音" in sections["voice"]
     assert "自然说法" in sections["relationship"]
+
+    natural_shadow = "这一窗我只想留下一段自然的话，不再为了标题重写第二次。"
+    sections, errors = validate_window_shadow(natural_shadow)
+    assert errors == []
+    assert sections["self"] == natural_shadow
+
+    with tempfile.TemporaryDirectory(prefix="ombre-natural-shadow-") as tmp:
+        root = Path(tmp)
+        test_config = {
+            "buckets_dir": str(root / "buckets"),
+            "state_dir": str(root / "state"),
+            "identity": {"user_display_name": "小雨"},
+        }
+        store = WindowShadowStore(test_config)
+        server.window_shadow_store = store
+        server.window_shadow_rejected_draft_store = WindowShadowRejectedDraftStore(test_config)
+        server.decay_engine = _NoopDecay()
+
+        async def _no_revision_candidates(**kwargs):
+            return []
+
+        server._capture_narrative_revision_candidates = _no_revision_candidates
+        result = await server.close_window(natural_shadow)
+        assert result["status"] == "created"
+        assert result["saved_shadow"] == natural_shadow
+        assert result["saved_scenes"] == []
+        assert result["handoff_ready"] is True
+        assert result["handoff_note_source"] == "window_delta"
+        assert store.handoff_projection(result["window_id"])["handoff_note"] == natural_shadow
 
     print("natural Window Shadow headings verified")
 
