@@ -85,7 +85,7 @@ function ombreSourceIdForScene(scene) {
 }
 
 const memoryTypeLabels = { scene: "Scene", event: "事件", fact: "事实" };
-const factEventCacheKey = "serein.memory.fact-events.v1";
+const factEventCacheKey = "serein.memory.fact-events.v2";
 const factEventCacheMaxAgeMs = 5 * 60 * 1000;
 let factEventListLoadInFlight = null;
 
@@ -93,6 +93,12 @@ function factEventSummary(item) {
   if (!item || typeof item !== "object") return null;
   const { source_refs: _sourceRefs, ...summary } = item;
   return summary.item_id ? summary : null;
+}
+
+function factEventSourceCount(item) {
+  if (Array.isArray(item?.source_refs)) return item.source_refs.length;
+  const count = Number(item?.source_count);
+  return Number.isFinite(count) && count >= 0 ? count : 0;
 }
 
 function readFactEventCache() {
@@ -292,7 +298,7 @@ function FactEventDetail({ item, onClose, onRevised, onStatusChanged, onDeleted 
         ) : <h2>{item.title || item.body}</h2>}
         <div className="scene-detail__meta">
           <span>{memoryTypeLabels[item.item_type]}</span>
-          <span><LinkSimple size={15} weight="light" aria-hidden="true" />{item.source_refs?.length || 0} 条原文</span>
+          <span><LinkSimple size={15} weight="light" aria-hidden="true" />{factEventSourceCount(item)} 条原文</span>
           <label className="fact-event-importance">
             重要度
             <select value={draft.importance} disabled={!editing} onChange={(event) => setDraft({ ...draft, importance: Number(event.target.value) })}>
@@ -1196,7 +1202,7 @@ export function MemoryPage() {
                       ) : null}
                       <p className={`scene-entry__excerpt${item.item_type === "fact" ? " is-fact" : ""}`}>{item.body}</p>
                       <span className="scene-entry__meta">
-                        <span><LinkSimple size={15} weight="light" aria-hidden="true" />{item.source_refs?.length || 0} 条原文</span>
+                        <span><LinkSimple size={15} weight="light" aria-hidden="true" />{factEventSourceCount(item)} 条原文</span>
                         <span>重要度 {item.importance}</span>
                         {item.injection_count ? <span>已注入 {item.injection_count} 次</span> : null}
                       </span>

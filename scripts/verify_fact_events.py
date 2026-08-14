@@ -60,7 +60,7 @@ def main() -> None:
         }
         event = {
             "type": "event",
-            "title": "记住小雨需要遮阳",
+            "title": "记住小雨，出门需要遮阳",
             "body": "小雨说明自己紫外线过敏，Haven答应出门时提醒她遮阳。",
             "importance": 3,
             "origin_id": "bridge-candidate-event-1",
@@ -95,8 +95,11 @@ def main() -> None:
         listed = store.list(item_type="fact", date="2026-08-08")
         assert listed["count"] == 1 and listed["items"][0]["item_id"] == fact_id
         assert "source_refs" not in listed["items"][0]
+        assert listed["items"][0]["source_count"] == 1
+        assert store.list(item_type="event")["items"][0]["source_count"] == 2
         assert store.list(item_type="event", query="紫外线过敏")["items"][0]["item_id"] == event_id
         assert store.list(item_type="event", query="记住小雨")["items"][0]["item_id"] == event_id
+        assert store.list(item_type="event", query="记住小雨,出门")["items"][0]["item_id"] == event_id
         assert store.list(item_type="event", query="haven")["items"][0]["item_id"] == event_id
         assert store.list(item_type="event", query="不存在的作品名")["count"] == 0
 

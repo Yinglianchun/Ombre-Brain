@@ -31,6 +31,10 @@ LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:@/-]+$")
 
 
+def _normalized_search_text(value: Any) -> str:
+    return unicodedata.normalize("NFKC", str(value or "")).casefold()
+
+
 class FactEventStore:
     """SQLite owner for reviewed Fact/Event objects and their raw evidence."""
 
@@ -50,6 +54,7 @@ class FactEventStore:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
+        conn.create_function("normalized_search_text", 1, _normalized_search_text, deterministic=True)
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
@@ -371,14 +376,23 @@ class FactEventStore:
             clauses.append("local_date<=? AND local_end_date>=?")
             params.extend([safe_date, safe_date])
         if safe_query:
-            clauses.append("(INSTR(LOWER(title), LOWER(?)) > 0 OR INSTR(LOWER(body), LOWER(?)) > 0)")
+            clauses.append(
+                "(INSTR(normalized_search_text(title), normalized_search_text(?)) > 0 "
+                "OR INSTR(normalized_search_text(body), normalized_search_text(?)) > 0)"
+            )
             params.extend([safe_query, safe_query])
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with closing(self._connect()) as conn:
             count = int(conn.execute(f"SELECT COUNT(*) FROM fact_events{where}", params).fetchone()[0])
             rows = conn.execute(
                 f"""
-                SELECT * FROM fact_events{where}
+                SELECT fact_events.*,
+                       (
+                           SELECT COUNT(*)
+                           FROM fact_event_sources
+                           WHERE fact_event_sources.item_id = fact_events.item_id
+                       ) AS source_count
+                FROM fact_events{where}
                 ORDER BY local_date DESC, local_start_time DESC, item_id DESC
                 LIMIT ? OFFSET ?
                 """,
@@ -876,6 +890,16 @@ class FactEventStore:
                 {key: ref[key] for key in ref.keys() if key not in {"id", "item_id"}}
                 for ref in refs
             ]
+            payload["source_count"] = len(payload["source_refs"])
+        else:
+            payload["source_count"] = int(
+                payload.get("source_count")
+                if "source_count" in payload
+                else conn.execute(
+                    "SELECT COUNT(*) FROM fact_event_sources WHERE item_id=?",
+                    (str(row["item_id"]),),
+                ).fetchone()[0]
+            )
         return payload
 
 
