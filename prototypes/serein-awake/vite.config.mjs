@@ -1529,9 +1529,10 @@ function sereinMemoryBridge() {
           const expectedUpdatedAt = String(body.expectedUpdatedAt || "").trim();
           const title = String(body.title || "").trim();
           const content = String(body.content || "").trim();
-          if (!/^[A-Za-z0-9_.:#-]{1,160}$/.test(sceneId) || !expectedUpdatedAt || !title || !content) {
+          const date = String(body.date || "").trim();
+          if (!/^[A-Za-z0-9_.:#-]{1,160}$/.test(sceneId) || !expectedUpdatedAt || !title || !content || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
             response.statusCode = 400;
-            response.end(JSON.stringify({ error: "invalid_scene_revision", message: "标题、正文或 Scene 版本不完整。" }));
+            response.end(JSON.stringify({ error: "invalid_scene_revision", message: "日期、标题、正文或 Scene 版本不完整。" }));
             return;
           }
           const result = await callOmbreTool("edit_scene", {
@@ -1539,6 +1540,7 @@ function sereinMemoryBridge() {
             expected_updated_at: expectedUpdatedAt,
             title,
             content,
+            date,
           });
           response.statusCode = result?.status === "conflict" ? 409 : result?.status === "invalid" ? 400 : 200;
           response.end(JSON.stringify(result));

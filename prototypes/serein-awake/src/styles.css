@@ -1629,6 +1629,19 @@ label:has(input:focus-visible) {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.06em;
 }
+.scene-editor__date {
+  width: 10.5em;
+  padding: 5px 7px;
+  border: 1px solid #d8ddda;
+  border-radius: 4px;
+  outline: 0;
+  background: #fbfcfb;
+  color: #66716d;
+  font-family: var(--font-editorial);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.scene-editor__date:focus { border-color: #919c98; background: #ffffff; }
 .scene-detail__edit-actions {
   display: flex;
   align-items: center;

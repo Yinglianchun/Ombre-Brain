@@ -620,6 +620,7 @@ export function MemoryPage() {
   const beginEditingScene = (scene) => {
     setEditingSceneId(scene.id);
     setEditDraft({
+      date: scene.date,
       title: scene.title,
       bodyText: scene.body.join("\n\n"),
     });
@@ -635,12 +636,13 @@ export function MemoryPage() {
   const saveEditedScene = async () => {
     if (!selectedScene || !editDraft) return;
     const title = editDraft.title.trim();
+    const date = editDraft.date.trim();
     const body = editDraft.bodyText
       .split(/\n\s*\n/)
       .map((paragraph) => paragraph.trim())
       .filter(Boolean);
     const sourceId = ombreSourceIdForScene(selectedScene);
-    if (!title || !body.length || !sourceId || !selectedScene.sourceUpdatedAt) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !title || !body.length || !sourceId || !selectedScene.sourceUpdatedAt) return;
     setSceneActionState("saving");
     setSceneActionMessage("");
     try {
@@ -650,6 +652,7 @@ export function MemoryPage() {
         body: JSON.stringify({
           sceneId: sourceId,
           expectedUpdatedAt: selectedScene.sourceUpdatedAt,
+          date,
           title,
           content: body.join("\n\n"),
         }),
@@ -659,6 +662,7 @@ export function MemoryPage() {
         throw new Error(payload.message || payload.reason || "Scene 保存失败");
       }
       updateScene(selectedScene.id, () => ({
+        date,
         title,
         excerpt: sceneExcerpt(body),
         body,
@@ -1070,7 +1074,17 @@ export function MemoryPage() {
 
               <header className="scene-detail__header">
                 <div className="scene-detail__header-top">
-                  <time dateTime={selectedScene.date}>{selectedScene.date}</time>
+                  {selectedSceneIsEditing ? (
+                    <input
+                      className="scene-editor__date"
+                      type="date"
+                      aria-label="记忆日期"
+                      value={editDraft.date}
+                      onChange={(event) => setEditDraft((current) => ({ ...current, date: event.target.value }))}
+                    />
+                  ) : (
+                    <time dateTime={selectedScene.date}>{selectedScene.date}</time>
+                  )}
                   <div className="scene-detail__edit-actions">
                     {selectedSceneIsEditing ? (
                       <>

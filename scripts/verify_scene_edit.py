@@ -55,6 +55,8 @@ class _EditableBucketManager:
             self.bucket["metadata"]["name"] = kwargs["name"]
         if "content" in kwargs:
             self.bucket["content"] = kwargs["content"]
+        if "date" in kwargs:
+            self.bucket["metadata"]["date"] = kwargs["date"]
         self.bucket["metadata"].update(kwargs.get("extra_metadata") or {})
         self.bucket["metadata"]["updated_at"] = f"2026-07-24T10:00:0{self.update_count}+08:00"
         self.bucket["metadata"]["last_active"] = kwargs.get("last_active") or self.bucket["metadata"]["updated_at"]
@@ -77,13 +79,15 @@ async def main() -> None:
     assert "edit_scene" in tools
     schema = tools["edit_scene"].inputSchema
     assert set(schema["required"]) == {"scene_id", "expected_updated_at"}
-    assert {"title", "content", "cues"} <= set(schema["properties"])
+    assert {"title", "content", "cues", "date"} <= set(schema["properties"])
 
     manager = _EditableBucketManager()
     moments = _CaptureMoments()
     server.bucket_mgr = manager
     server.memory_moment_store = moments
-    server._queue_embedding_refresh_if_changed = lambda *_args: True
+    server._queue_embedding_refresh_if_changed = (
+        lambda _bucket_id, before, after: before["content"] != after["content"]
+    )
     server._queue_scene_linking = lambda *_args: True
     server._refresh_entity_edges_for_bucket = lambda *_args: 1
 
@@ -122,24 +126,34 @@ async def main() -> None:
     assert moments.ids == ["scene_edit_contract"]
     assert moments.buckets[-1]["metadata"]["name"] == "小雨亲自改的标题"
 
-    revised = await server._edit_scene_memory(
+    dated = await server._edit_scene_memory(
         "scene_edit_contract",
         expected_updated_at=title_only["updated_at"],
+        date="2026-07-23",
+    )
+    assert dated["status"] == "updated"
+    assert dated["changed_fields"] == ["date"]
+    assert dated["embedding_refresh"] == "skipped"
+    assert manager.bucket["metadata"]["date"] == "2026-07-23"
+
+    revised = await server._edit_scene_memory(
+        "scene_edit_contract",
+        expected_updated_at=dated["updated_at"],
         content="我用第一人称重新校正了这条 Scene，但仍保留原版本证据。",
         cues=["提到第一人称修订", "问 Scene 原位编辑"],
     )
     assert revised["status"] == "updated"
     assert revised["changed_fields"] == ["content", "cues"]
-    assert revised["revision"] == 3
+    assert revised["revision"] == 4
     assert manager.bucket["metadata"]["scene_cues"] == [
         "提到第一人称修订",
         "问 Scene 原位编辑",
     ]
     assert manager.bucket["metadata"]["scene_cues_reviewed_at"]
-    assert len(manager.bucket["metadata"]["scene_revision_history"]) == 2
+    assert len(manager.bucket["metadata"]["scene_revision_history"]) == 3
     assert manager.bucket["metadata"]["scene_revision_history"][1]["title"] == "小雨亲自改的标题"
     assert revised["moment_index_refreshed"] is True
-    assert moments.ids == ["scene_edit_contract", "scene_edit_contract"]
+    assert moments.ids == ["scene_edit_contract", "scene_edit_contract", "scene_edit_contract"]
     assert moments.buckets[-1]["metadata"]["scene_cues"] == [
         "提到第一人称修订",
         "问 Scene 原位编辑",
@@ -170,6 +184,7 @@ async def main() -> None:
         "scene_edit_contract",
         "scene_edit_contract",
         "scene_edit_contract",
+        "scene_edit_contract",
     ]
 
     blank_title = await server._edit_scene_memory(
@@ -178,6 +193,13 @@ async def main() -> None:
         title="",
     )
     assert blank_title["reason"] == "scene_title_required"
+
+    invalid_date = await server._edit_scene_memory(
+        "scene_edit_contract",
+        expected_updated_at=cue_review["updated_at"],
+        date="2026-02-30",
+    )
+    assert invalid_date["reason"] == "invalid_scene_date"
 
     with tempfile.TemporaryDirectory(prefix="ombre-scene-edit-") as temp_dir:
         real_manager = BucketManager({"buckets_dir": temp_dir})
@@ -207,6 +229,19 @@ async def main() -> None:
         server.bucket_mgr = real_manager
         server.memory_moment_store = real_moments
         loaded = await real_manager.get("scene_file_roundtrip")
+        assert str(loaded["metadata"]["date"]) == str(loaded["metadata"]["created"])[:10]
+        await real_manager.create(
+            bucket_id="scene_explicit_date",
+            name="明确日期",
+            content="我明确写下了这段记忆发生的日期。",
+            date="2026-07-20",
+            extra_metadata={
+                "object_kind": "scene",
+                "memory_value_source": "authored_scene",
+            },
+        )
+        explicitly_dated = await real_manager.get("scene_explicit_date")
+        assert str(explicitly_dated["metadata"]["date"]) == "2026-07-20"
         real_moments.upsert_bucket(loaded)
         aliases_before = {
             row["alias_text"]

@@ -177,6 +177,7 @@ class BucketManager:
             "importance": max(1, min(10, importance)),
             "type": bucket_type,
             "created": created_at,
+            "date": str(date).strip() if date else str(created_at)[:10],
             "last_active": last_active_at,
             "updated_at": updated_at_value,
             "activation_count": 0,
@@ -185,8 +186,6 @@ class BucketManager:
             metadata["confidence"] = max(0.0, min(1.0, float(confidence)))
         if period:
             metadata["period"] = str(period)
-        if date:
-            metadata["date"] = str(date)
         if pinned:
             metadata["pinned"] = True
         if protected:

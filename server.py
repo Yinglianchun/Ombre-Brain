@@ -11175,6 +11175,7 @@ async def _edit_scene_memory(
     title: str | None = None,
     content: str | None = None,
     cues: str | list[str] | None = None,
+    date: str | None = None,
 ) -> dict:
     """Edit one authored Scene in place while retaining its prior revisions."""
     scene_id = _coerce_memory_id(scene_id)
@@ -11223,7 +11224,7 @@ async def _edit_scene_memory(
             "expected_updated_at": expected_version,
             "current_updated_at": current_updated_at,
         }
-    if title is None and content is None and cues is None:
+    if title is None and content is None and cues is None and date is None:
         return {
             "status": "invalid",
             "reason": "no_scene_fields_supplied",
@@ -11232,6 +11233,19 @@ async def _edit_scene_memory(
 
     updates: dict = {}
     changed_fields: list[str] = []
+    if date is not None:
+        authored_date = str(date).strip()
+        try:
+            datetime.strptime(authored_date, "%Y-%m-%d")
+        except ValueError:
+            return {
+                "status": "invalid",
+                "reason": "invalid_scene_date",
+                "scene_id": scene_id,
+            }
+        if authored_date != str(meta.get("date") or "").strip():
+            updates["date"] = authored_date
+            changed_fields.append("date")
     if title is not None:
         authored_title = str(title).strip()
         if not authored_title:
@@ -11302,6 +11316,7 @@ async def _edit_scene_memory(
             "saved_at": now_iso(),
             "updated_at": current_updated_at,
             "title": str(meta.get("name") or ""),
+            "date": str(meta.get("date") or meta.get("created") or "")[:10],
             "content": str(bucket.get("content") or ""),
             "cues": _authored_scene_cues(meta.get("scene_cues")),
         }
@@ -11946,14 +11961,16 @@ async def edit_scene(
     title: str | None = None,
     content: str | None = None,
     cues: str | list[str] | None = None,
+    date: str | None = None,
 ) -> dict:
-    """修改一条 Scene。scene_id 填 Scene ID；expected_updated_at 填 read_memory 返回的 metadata.updated_at；title、content、cues 只传需要修改的项；修改 content 时仍用你的第一人称写成能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要改成摘要或说明。"""
+    """修改一条 Scene。scene_id 填 Scene ID；expected_updated_at 填 read_memory 返回的 metadata.updated_at；title、content、cues、date 只传需要修改的项，date 使用 YYYY-MM-DD；修改 content 时仍用你的第一人称写成能独立理解的具体场景，保留实际发生的细节，也可以写下当时的情绪、欲望与犹豫，并保留引语原本人称，不要改成摘要或说明。"""
     return await _edit_scene_memory(
         scene_id,
         expected_updated_at=expected_updated_at,
         title=title,
         content=content,
         cues=cues,
+        date=date,
     )
 
 
