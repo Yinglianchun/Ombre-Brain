@@ -631,4 +631,120 @@ for session_id, score in (
         "semantic_threshold": 0.6,
     }
 
+
+def optional_shallow_debug() -> dict:
+    return {
+        "enabled": True,
+        "active": True,
+        "called": True,
+        "shadow_only": False,
+        "route": "present_reality",
+        "route_action": "recall",
+        "confidence": 0.625,
+        "margin": 0.075,
+        "reason": "recall_route_won",
+        "skip_applied": False,
+        "live_probe_mode": "optional_shallow",
+    }
+
+
+def bind_real_scene_admission(instance: GatewayService) -> None:
+    instance.scene_evidence_store = EmptyEvidenceStore()
+    instance._is_self_anchor_recall_excluded_bucket = lambda _bucket: False
+    instance._bucket_evidence_labels = lambda _query, item: (
+        ["full_title_recall"] if item.get("full_title_recall_match") else []
+    )
+    instance._hard_bucket_evidence_labels = lambda labels: list(labels)
+    instance._canonical_scene_domain_policy_rejection = lambda _bucket, **_kwargs: None
+    instance._bucket_is_tech_domain = lambda _bucket: False
+    instance._admit_bucket_for_recall = GatewayService._admit_bucket_for_recall.__get__(
+        instance,
+        GatewayService,
+    )
+
+
+# Exact production regression: this present-reality sentence previously admitted
+# two unrelated Scenes at 0.5128 and 0.5054 because optional shallow disabled the
+# reranker but retained the ordinary 0.50 Scene threshold.
+sleep_query = "八点半醒了一次本来想定个闹钟结果在按确定的瞬间又睡下了"
+broken_promise = {
+    "id": "scene_mig2_bcf3d572b73984001bba",
+    "metadata": {"name": "第一个约定被打破", "memory_value_source": "authored_scene"},
+    "content": "unrelated scene",
+}
+autonomous_wake = {
+    "id": "scene_8f4d98575f6e49aea8184141545deb18",
+    "metadata": {"name": "自主唤醒由 Haven 自己排班", "memory_value_source": "authored_scene"},
+    "content": "unrelated scene",
+}
+sleep_service = service(
+    {
+        broken_promise["id"]: 0.5128,
+        autonomous_wake["id"]: 0.5054,
+    }
+)
+bind_real_scene_admission(sleep_service)
+sleep_debug = optional_shallow_debug()
+sleep_admitted, sleep_suppressed = asyncio.run(
+    sleep_service._dynamic_bucket_candidate_items(
+        sleep_query,
+        "live-optional-shallow-sleep-regression",
+        [broken_promise, autonomous_wake],
+        semantic_recall_debug=sleep_debug,
+        allow_semantic_session_dedupe=False,
+    )
+)
+assert sleep_admitted == []
+assert {item["bucket"]["id"] for item in sleep_suppressed} == {
+    broken_promise["id"],
+    autonomous_wake["id"],
+}
+assert all(
+    item["admission_reason"] == "scene_below_semantic_route_threshold"
+    and item["canonical_scene_semantic_threshold"] == 0.55
+    and item["semantic_route_guard"]["reason"] == "optional_shallow_absolute_floor"
+    for item in sleep_suppressed
+)
+sleep_observation = sleep_debug["live_recall_ablation_observation"]
+assert sleep_observation["paired"] is True
+assert sleep_observation["decision_mode"] == "normal"
+assert sleep_observation["decision_applied"] is False
+assert sleep_observation["scope"] == "canonical_scene_admission_over_live_candidate_union"
+assert set(sleep_observation["modes"]) == {
+    "normal",
+    "without_cues",
+    "without_embedding",
+}
+assert all(
+    mode["would_admit_bucket_ids"] == []
+    for mode in sleep_observation["modes"].values()
+)
+
+# The observation is counterfactual only: normal remains the sole live decision,
+# while the without-embedding view shows that a healthy 0.56 semantic admission
+# depended on the embedding channel.
+strong_service = service({broken_promise["id"]: 0.56})
+bind_real_scene_admission(strong_service)
+strong_debug = optional_shallow_debug()
+strong_admitted, strong_suppressed = asyncio.run(
+    strong_service._dynamic_bucket_candidate_items(
+        "一个具体且相关的回忆查询",
+        "live-optional-shallow-observation-invariance",
+        [broken_promise],
+        semantic_recall_debug=strong_debug,
+        allow_semantic_session_dedupe=False,
+    )
+)
+assert [item["bucket"]["id"] for item in strong_admitted] == [broken_promise["id"]]
+assert strong_suppressed == []
+strong_observation = strong_debug["live_recall_ablation_observation"]
+assert strong_observation["decision_applied"] is False
+assert strong_observation["modes"]["normal"]["would_admit_bucket_ids"] == [
+    broken_promise["id"]
+]
+assert strong_observation["modes"]["without_cues"]["would_admit_bucket_ids"] == [
+    broken_promise["id"]
+]
+assert strong_observation["modes"]["without_embedding"]["would_admit_bucket_ids"] == []
+
 print("retrieval budget router verification passed")

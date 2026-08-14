@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "dataset_version": 8,
+  "dataset_version": 9,
   "routes": [
     {
       "name": "simple_contact",
@@ -35,7 +35,8 @@
     },
     {
       "name": "present_reality",
-      "action": "recall",
+      "action": "skip",
+      "threshold": 0.6,
       "utterances": [
         {"text": "今天太阳很大", "source": "seed"},
         {"text": "外面下雨了", "source": "seed"},

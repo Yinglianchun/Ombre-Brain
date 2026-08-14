@@ -16,6 +16,7 @@ from memory_recall.retrieval_budget import (
     apply_fact_event_probe,
     build_retrieval_budget,
     finalize_retrieval_budget,
+    router_hard_skip_allowed,
 )
 
 
@@ -87,6 +88,41 @@ explicit = build_retrieval_budget(
     semantic_debug={"route": "recall_needed", "route_action": "recall"},
 )
 assert explicit["final_budget"] == BUDGET_DEEP
+
+present_reality = build_retrieval_budget(
+    "八点半醒了一次本来想定个闹钟结果在按确定的瞬间又睡下了",
+    route="present_reality",
+    route_action="skip",
+    semantic_debug={
+        "route": "present_reality",
+        "route_action": "skip",
+        "confidence": 0.625,
+        "margin": 0.075,
+        "threshold": 0.60,
+    },
+)
+assert present_reality["memory_need"] == "optional"
+assert present_reality["final_budget"] == BUDGET_SHALLOW
+assert router_hard_skip_allowed(present_reality, route_skip_proposed=True) is True
+
+explicit_present_reality = build_retrieval_budget(
+    "还记得我上次按下闹钟又睡着那次吗",
+    route="present_reality",
+    route_action="skip",
+    semantic_debug={
+        "route": "present_reality",
+        "route_action": "skip",
+        "confidence": 0.90,
+        "margin": 0.20,
+        "threshold": 0.60,
+    },
+)
+assert explicit_present_reality["memory_need"] == "required"
+assert explicit_present_reality["final_budget"] == BUDGET_DEEP
+assert (
+    router_hard_skip_allowed(explicit_present_reality, route_skip_proposed=True)
+    is False
+)
 
 plain_prior = build_retrieval_budget(
     "之前我们把好多记录进度的都删掉了",

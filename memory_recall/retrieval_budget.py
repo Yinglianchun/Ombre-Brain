@@ -242,13 +242,18 @@ def router_hard_skip_allowed(
     *,
     route_skip_proposed: bool,
 ) -> bool:
-    """Only a payload-free social surface may bypass candidate retrieval."""
+    """Allow no-recall only when query structure does not require memory."""
 
     if not route_skip_proposed or not isinstance(budget, Mapping):
         return False
+    if str(budget.get("final_budget") or "") == BUDGET_DEEP:
+        return False
+    memory_need = str(budget.get("memory_need") or "")
+    if memory_need == "bypass":
+        return True
     return bool(
-        budget.get("memory_need") == "bypass"
-        and str(budget.get("final_budget") or "") != BUDGET_DEEP
+        memory_need == "optional"
+        and str(budget.get("surface_route") or "") == "present_reality"
     )
 
 

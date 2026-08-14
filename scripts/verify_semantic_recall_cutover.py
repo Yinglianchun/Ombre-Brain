@@ -90,7 +90,7 @@ legacy_shadow = router(None, shadow_enabled=True)
 assert legacy_shadow.mode == "shadow"
 
 route_source = load_route_source(ROOT / "resources" / "semantic_recall_routes.json")
-assert route_source["dataset_version"] == 8
+assert route_source["dataset_version"] == 9
 route_examples = {
     route["name"]: {
         item["text"]: item["source"]
@@ -98,6 +98,14 @@ route_examples = {
     }
     for route in route_source["routes"]
 }
+route_actions = {route["name"]: route["action"] for route in route_source["routes"]}
+assert route_actions["present_reality"] == "skip"
+assert route_actions["recall_needed"] == "recall"
+assert next(
+    route["threshold"]
+    for route in route_source["routes"]
+    if route["name"] == "present_reality"
+) == 0.60
 assert not next(route for route in route_source["routes"] if route["name"] == "simple_contact").get("enabled", True)
 assert route_examples["simple_contact"] == {}
 for query in ("爱你", "最爱哥哥了", "想和哥哥贴贴"):

@@ -2574,6 +2574,19 @@ class GatewayService:
             "date_recall_injected": bool(debug_payload.get("date_recall_injected")),
             "prepare_timing_debug": dict(debug_payload.get("prepare_timing_debug") or {}),
         }
+        semantic_debug = debug_payload.get("semantic_recall_debug")
+        ablation_observation = (
+            semantic_debug.get("live_recall_ablation_observation")
+            if isinstance(semantic_debug, dict)
+            else None
+        )
+        if isinstance(ablation_observation, dict):
+            minimal_debug["live_recall_ablation_observation"] = ablation_observation
+            logger.info(
+                "Gateway live recall ablation observation | session=%s observation=%s",
+                session_id,
+                json.dumps(ablation_observation, ensure_ascii=False, separators=(",", ":")),
+            )
         response: dict[str, Any] = {
             "ok": True,
             "query": query,
@@ -2953,20 +2966,25 @@ class GatewayService:
             )
             if optional_shallow_probe_allowed(structure_budget):
                 semantic_recall_debug["live_probe_mode"] = "optional_shallow"
+            structure_allows_pre_skip = router_hard_skip_allowed(
+                structure_budget,
+                route_skip_proposed=semantic_skip_broad,
+            )
             if semantic_recall_result is None:
-                semantic_skip_broad = await self._apply_semantic_scene_evidence_veto(
-                    current_user_query,
-                    semantic_skip_broad,
-                    semantic_recall_query_vector,
-                    semantic_recall_debug,
-                    all_buckets=all_buckets,
-                )
+                if structure_allows_pre_skip:
+                    semantic_skip_broad = True
+                    semantic_recall_debug["reason"] = "direct_current_turn_no_recall"
+                else:
+                    semantic_skip_broad = await self._apply_semantic_scene_evidence_veto(
+                        current_user_query,
+                        semantic_skip_broad,
+                        semantic_recall_query_vector,
+                        semantic_recall_debug,
+                        all_buckets=all_buckets,
+                    )
             else:
                 semantic_skip_broad = bool(semantic_recall_debug.get("skip_applied"))
-            if semantic_skip_broad and not router_hard_skip_allowed(
-                structure_budget,
-                route_skip_proposed=True,
-            ):
+            if semantic_skip_broad and not structure_allows_pre_skip:
                 semantic_skip_broad = False
                 semantic_recall_debug["query_structure_veto"] = {
                     "applied": True,
@@ -3509,6 +3527,11 @@ class GatewayService:
             applied_action = "skip" if skip_broad_dynamic_recall else "recall"
             semantic_recall_debug["applied_action"] = applied_action
             semantic_recall_debug["final_injected_ids"] = list(injected_ids or [])
+            ablation_observation = semantic_recall_debug.get(
+                "live_recall_ablation_observation"
+            )
+            if isinstance(ablation_observation, dict):
+                ablation_observation["actual_injected_ids"] = list(injected_ids or [])
             if semantic_recall_debug.get("called"):
                 logger.info(
                     "Semantic recall route | session=%s mode=%s semantic=%s "
@@ -15729,6 +15752,14 @@ class GatewayService:
         if allow_rerank:
             scored_candidates = await self._rerank_scored_bucket_candidates(query, scored_candidates)
         mark("rerank_bucket_candidates", stage_started_at)
+        if optional_shallow_probe and isinstance(semantic_recall_debug, dict):
+            semantic_recall_debug["live_recall_ablation_observation"] = (
+                self._build_live_recall_ablation_observation(
+                    policy_query,
+                    session_id,
+                    scored_candidates,
+                )
+            )
         stage_started_at = time.perf_counter()
         # Pick the best candidates before session de-duplication. The final
         # selected set is filtered later, without backfilling weaker cards.
@@ -16736,7 +16767,7 @@ class GatewayService:
     ) -> dict[str, Any]:
         debug = semantic_recall_debug if isinstance(semantic_recall_debug, dict) else {}
         route_reason = str(debug.get("reason") or "")
-        if not (
+        skip_route_probe = bool(
             debug.get("enabled")
             and debug.get("active")
             and debug.get("called")
@@ -16744,34 +16775,127 @@ class GatewayService:
             and str(debug.get("route_action") or "") == "skip"
             and not debug.get("skip_applied")
             and route_reason in {"below_threshold", "matched_skip_route"}
-        ):
+        )
+        optional_shallow_probe = bool(
+            debug.get("live_probe_mode") == "optional_shallow"
+        )
+        if not skip_route_probe and not optional_shallow_probe:
             return {}
         thresholds = self.config.get("recall_thresholds", {})
         if not isinstance(thresholds, dict):
             thresholds = {}
         base_threshold = self._canonical_scene_semantic_threshold(bucket)
-        guarded_threshold = max(
-            base_threshold,
-            self._clamp(
-                self._safe_float(
-                    thresholds.get("skip_route_vector_min_score"),
-                    0.60,
-                )
-            ),
-        )
-        return {
-            "active": True,
-            "reason": (
+        if skip_route_probe:
+            guarded_threshold = max(
+                base_threshold,
+                self._clamp(
+                    self._safe_float(
+                        thresholds.get("skip_route_vector_min_score"),
+                        0.60,
+                    )
+                ),
+            )
+            guard_reason = (
                 "forced_skip_route_probe"
                 if route_reason == "matched_skip_route"
                 else "low_confidence_skip_route"
-            ),
+            )
+        else:
+            guarded_threshold = max(base_threshold, self.first_card_min_score)
+            guard_reason = "optional_shallow_absolute_floor"
+        return {
+            "active": True,
+            "reason": guard_reason,
             "route_reason": route_reason,
             "route": str(debug.get("route") or ""),
             "confidence": round(self._safe_float(debug.get("confidence"), 0.0), 6),
             "margin": round(self._safe_float(debug.get("margin"), 0.0), 6),
             "base_semantic_threshold": round(base_threshold, 4),
             "semantic_threshold": round(guarded_threshold, 4),
+        }
+
+    def _build_live_recall_ablation_observation(
+        self,
+        query: str,
+        session_id: str,
+        candidates: list[dict],
+    ) -> dict[str, Any]:
+        """Observe admission counterfactuals without changing live candidates."""
+        canonical_candidates = [
+            item
+            for item in candidates or []
+            if isinstance(item, dict)
+            and self._is_canonical_scene_bucket(item.get("bucket"))
+        ]
+        observation_id = hashlib.sha256(
+            f"{session_id}\n{query}\n{time.time_ns()}".encode("utf-8")
+        ).hexdigest()[:24]
+        modes: dict[str, Any] = {}
+        for mode in ("normal", "without_cues", "without_embedding"):
+            rows: list[dict[str, Any]] = []
+            admitted_ids: list[str] = []
+            for raw_item in canonical_candidates:
+                item = dict(raw_item)
+                bucket = item.get("bucket") or {}
+                bucket_id = str(bucket.get("id") or "")
+                metadata = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+                if mode == "without_cues":
+                    for key, empty_value in (
+                        ("authored_cue_match", False),
+                        ("authored_cue_terms", []),
+                        ("authored_cue_candidate_match", False),
+                        ("authored_cue_candidate_terms", []),
+                        ("cue_semantic_candidate_match", False),
+                        ("cue_semantic_score", 0.0),
+                        ("cue_semantic_terms", []),
+                    ):
+                        item[key] = empty_value
+                elif mode == "without_embedding":
+                    item["semantic_score"] = 0.0
+                    item["vector_norm"] = 0.0
+                    if not self._item_has_direct_recall_evidence(item):
+                        item["score"] = 0.0
+                        item["fusion_score"] = 0.0
+                        item["combined_score"] = 0.0
+                admitted = self._admit_bucket_for_recall(query, item)
+                if admitted and bucket_id:
+                    admitted_ids.append(bucket_id)
+                rows.append(
+                    {
+                        "bucket_id": bucket_id,
+                        "title": str(metadata.get("name") or bucket_id),
+                        "admitted": bool(admitted),
+                        "admission_reason": str(item.get("admission_reason") or ""),
+                        "semantic_score": round(
+                            self._safe_float(item.get("semantic_score"), 0.0),
+                            4,
+                        ),
+                        "semantic_threshold": round(
+                            self._safe_float(
+                                item.get("canonical_scene_semantic_threshold"),
+                                self._canonical_scene_semantic_threshold(bucket),
+                            ),
+                            4,
+                        ),
+                        "direct_evidence": list(
+                            (item.get("recall_policy_debug") or {}).get("direct_evidence") or []
+                        ),
+                    }
+                )
+            modes[mode] = {
+                "would_admit_bucket_ids": admitted_ids,
+                "candidates": rows,
+            }
+        return {
+            "schema_version": "live-recall-ablation-observation-v1",
+            "observation_id": observation_id,
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "paired": True,
+            "decision_mode": "normal",
+            "decision_applied": False,
+            "scope": "canonical_scene_admission_over_live_candidate_union",
+            "candidate_count": len(canonical_candidates),
+            "modes": modes,
         }
 
     def _item_has_high_confidence_semantic_evidence(
