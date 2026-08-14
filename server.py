@@ -11724,8 +11724,7 @@ async def read_memory(
     return await _read_scene_memory(safe_id)
 
 
-@mcp.tool()
-async def list_handoff_scenes(limit: int = 500) -> dict:
+async def _list_handoff_scenes(limit: int = 500) -> dict:
     """List active canonical Scenes for an explicit Bridge window handoff.
 
     This is a bounded read-only compatibility tool.  It deliberately omits
@@ -11794,6 +11793,25 @@ async def list_handoff_scenes(limit: int = 500) -> dict:
         "items": scenes[:safe_limit],
         "count": len(scenes),
     }
+
+
+@mcp.custom_route("/api/handoff-scenes", methods=["GET"])
+async def api_list_handoff_scenes(request):
+    """List active canonical Scenes for the co-located Haven Bridge."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        return JSONResponse(
+            await _list_handoff_scenes(
+                limit=_int_between(request.query_params.get("limit"), 500, 1, 1000)
+            )
+        )
+    except Exception as exc:
+        logger.warning("Bridge handoff Scene list failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 async def _validate_scene_evidence_target(scene_id: str) -> tuple[str, str]:
