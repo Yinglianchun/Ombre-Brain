@@ -780,8 +780,13 @@ class GatewayService:
         relevance_facets_ms = max(0, int((time.perf_counter() - stage_started_at) * 1000))
         if self.passage_candidate_shadow_enabled:
             try:
+                # Canonical activity lives in metadata. Some active authored
+                # Scenes are still physically stored below archive/.
+                passage_shadow_buckets = await self.bucket_mgr.list_all(
+                    include_archive=True
+                )
                 self._passage_candidate_shadow_sync = await self._sync_passage_candidate_shadow(
-                    all_buckets
+                    passage_shadow_buckets
                 )
             except Exception as exc:
                 self._passage_candidate_shadow_sync = {
