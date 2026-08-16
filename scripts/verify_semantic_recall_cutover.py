@@ -189,6 +189,21 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
         "reason": "high_confidence_pure_chitchat",
     }
 
+    mirrored = await service.handle_hook_recall(
+        RequestStub({
+            "query": "老公亲亲抱抱",
+            "recall_mode": "full",
+            "include_debug": True,
+            "simulation": True,
+            "simulation_scope": "live_mirror",
+        })
+    )
+    mirrored_body = json.loads(mirrored.body)
+    mirrored_semantic = mirrored_body["debug"]["semantic_recall_debug"]
+    assert mirrored_semantic["simulation_scope"] == "live_mirror"
+    assert mirrored_semantic["direct_skip"]["applied"] is True
+    assert "retrieval_budget" not in mirrored_semantic
+
     async def full_recall(**kwargs):
         raise AssertionError("full recall must not run after a semantic skip")
 

@@ -100,8 +100,13 @@ async function readJsonBody(request, maxBytes = 32_768) {
 
 export function normalizeRecallSimulationOptions(body = {}) {
   const recallAblation = String(body.recall_ablation || "normal").trim().toLowerCase();
+  const simulationScope = String(body.simulation_scope || "live_mirror").trim().toLowerCase();
   const allowedRecallAblations = new Set(["normal", "without_cues", "without_embedding"]);
+  const allowedSimulationScopes = new Set(["live_mirror", "full_shadow"]);
   const simulation = [true, 1, "1", "true", "yes", "on"].includes(body.simulation);
+  if (!allowedSimulationScopes.has(simulationScope)) {
+    return { ok: false, error: "invalid_simulation_scope", message: "模拟范围不正确。" };
+  }
   if (!allowedRecallAblations.has(recallAblation)) {
     return { ok: false, error: "invalid_recall_ablation", message: "消融模式不正确。" };
   }
@@ -112,7 +117,14 @@ export function normalizeRecallSimulationOptions(body = {}) {
       message: "消融只允许从召回模拟发起。",
     };
   }
-  return { ok: true, recallAblation, simulation };
+  if (recallAblation !== "normal" && simulationScope !== "full_shadow") {
+    return {
+      ok: false,
+      error: "recall_ablation_requires_full_shadow",
+      message: "消融只在完整 shadow 诊断里运行。",
+    };
+  }
+  return { ok: true, recallAblation, simulation, simulationScope };
 }
 
 function parseMcpEvent(text) {
@@ -865,7 +877,7 @@ function sereinGatewayBridge() {
             }));
             return;
           }
-          const { recallAblation, simulation } = simulationOptions;
+          const { recallAblation, simulation, simulationScope } = simulationOptions;
 
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 30_000);
@@ -881,6 +893,7 @@ function sereinGatewayBridge() {
               recall_mode: "full",
               include_debug: true,
               simulation,
+              simulation_scope: simulationScope,
               recall_ablation: recallAblation,
               include_context: false,
               include_recent_context: false,

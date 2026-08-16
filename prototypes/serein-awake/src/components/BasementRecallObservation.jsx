@@ -28,6 +28,7 @@ import {
   reviewedObservationIds,
 } from "../storage/recallObservationPagination.js";
 import { readRecallSimulationTrainingLabels } from "../storage/recallSimulationTraining.js";
+import { resolveBridgeObservationOutcome } from "../recallObservationOutcome.js";
 
 const snapshotRouteLabels = Object.fromEntries(
   semanticRouteSnapshot.routes.map((route) => [route.name, route.label || route.name]),
@@ -142,10 +143,7 @@ function normalizeBridgeObservation(row, routeActions = snapshotRouteActions) {
   const route = String(row?.gateway_memory_route || "").trim();
   const routeAction = routeActions[route] || "";
   const query = String(row?.query || "").trim();
-  const outcome = injected.length || hookOutcome === "injected"
-    ? "injected"
-    : routeAction === "skip" ? "skip"
-      : ["no_match", "gateway_no_match", "below_threshold", "insufficient_margin"].includes(trigger) ? "no_match" : "skip";
+  const outcome = resolveBridgeObservationOutcome({ injected, hookOutcome, trigger, routeAction });
   return {
     id: `hook-${row?.id}`,
     createdAt: row?.created_at || "",

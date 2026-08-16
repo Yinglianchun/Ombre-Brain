@@ -1157,6 +1157,7 @@ export function MemoryPage() {
                             : <Sparkle size={15} weight="light" aria-hidden="true" />}
                           {scene.status}
                         </span>
+                        {scene.statusConsistent === false ? <span>状态待修复</span> : null}
                       </span>
                       {!selectionMode ? (
                         <CaretRight className="scene-entry__chevron" size={18} weight="light" aria-hidden="true" />

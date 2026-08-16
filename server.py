@@ -11401,9 +11401,23 @@ def _scene_storage_status(bucket: dict | None) -> str:
     if (
         str(meta.get("type") or "").strip().lower() == "archived"
         or str(meta.get("scene_status") or "").strip().lower() == "archived"
+        or meta.get("active") is False
     ):
         return "archived"
     return "active"
+
+
+def _scene_projection_status(bucket: dict | None) -> dict[str, object]:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    storage_status = _scene_storage_status(bucket)
+    return {
+        "status": "已沉底" if storage_status == "archived" else "可浮现",
+        "storage_status": storage_status,
+        "type": str(meta.get("type") or ""),
+        "active": meta.get("active"),
+        "scene_status": str(meta.get("scene_status") or ""),
+        "status_consistent": _scene_status_metadata_is_consistent(bucket, storage_status),
+    }
 
 
 def _scene_status_metadata_is_consistent(bucket: dict | None, status: str) -> bool:
@@ -12730,6 +12744,7 @@ async def api_serein_memory_projection(request):
                 meta.get("updated_at") or meta.get("last_active") or meta.get("created") or ""
             )
             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            projection_status = _scene_projection_status(bucket)
             scenes.append({
                 "source_id": source_id,
                 "title": str(meta.get("name") or source_id),
@@ -12740,7 +12755,7 @@ async def api_serein_memory_projection(request):
                     or ("Haven" if meta.get("memory_value_source") == "authored_scene" else "legacy_unknown")
                 ),
                 "object_kind": object_kind,
-                "status": "已沉底" if str(meta.get("type") or "").lower() == "archived" else "可浮现",
+                **projection_status,
                 "bucket_domain": domains[0] if domains else "",
                 "self_anchor": is_self_anchor_bucket(bucket),
                 "favorite": bool(meta.get("favorite") is True or "haven_favorite" in tags),

@@ -2222,6 +2222,13 @@ class GatewayService:
         simulation_probe = self._truthy_header(
             str(body.get("simulation")) if body.get("simulation") is not None else None
         )
+        simulation_scope = str(body.get("simulation_scope") or "full_shadow").strip().lower()
+        if simulation_scope not in {"live_mirror", "full_shadow"}:
+            return JSONResponse(
+                {"error": "simulation_scope must be live_mirror or full_shadow"},
+                status_code=400,
+            )
+        full_shadow_probe = bool(simulation_probe and simulation_scope == "full_shadow")
         if simulation_probe:
             include_debug = True
         try:
@@ -2229,7 +2236,7 @@ class GatewayService:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         if recall_ablation_mode != "normal" and (
-            not simulation_probe or not include_debug or recall_mode != "full"
+            not full_shadow_probe or not include_debug or recall_mode != "full"
         ):
             return JSONResponse(
                 {
@@ -2252,7 +2259,10 @@ class GatewayService:
         semantic_recall_debug, semantic_query_vector = (
             await self._route_semantic_query_views(query)
         )
-        if simulation_probe:
+        semantic_recall_debug["simulation_scope"] = (
+            simulation_scope if simulation_probe else "live"
+        )
+        if full_shadow_probe:
             ablation_debug = recall_ablation_debug_payload(
                 recall_ablation_mode,
                 source=(
@@ -2321,14 +2331,17 @@ class GatewayService:
             direct_skip_budget,
             route_skip_proposed=route_skip_proposed,
         )
-        direct_chitchat_skip = bool(not simulation_probe and structure_allows_pre_skip)
+        direct_chitchat_skip = bool(
+            (not simulation_probe or simulation_scope == "live_mirror")
+            and structure_allows_pre_skip
+        )
         semantic_recall_debug["direct_skip"] = {
             "applied": direct_chitchat_skip,
             "reason": (
                 "high_confidence_pure_chitchat"
                 if direct_chitchat_skip
                 else "explicit_simulation_shadow"
-                if simulation_probe
+                if full_shadow_probe
                 else "not_high_confidence_pure_chitchat"
             ),
         }
@@ -2342,7 +2355,7 @@ class GatewayService:
                 semantic_query_vector,
                 semantic_recall_debug,
             )
-        if simulation_probe:
+        if full_shadow_probe:
             retrieval_budget = semantic_recall_debug.get("retrieval_budget")
             if isinstance(retrieval_budget, dict):
                 evidence_veto_applied = bool(
@@ -13680,7 +13693,12 @@ class GatewayService:
             str(metadata.get("memory_value_source") or "") == "authored_scene"
             or str(metadata.get("object_kind") or "").strip().lower() == "scene"
         )
-        if not authored or str(metadata.get("status") or "active").strip().lower() != "active":
+        storage_archived = (
+            str(metadata.get("type") or "").strip().lower() == "archived"
+            or str(metadata.get("scene_status") or "").strip().lower() == "archived"
+            or metadata.get("active") is False
+        )
+        if not authored or storage_archived:
             return None
         scene_id = str(bucket.get("id") or "").strip()
         content = bucket_text_for_embedding(bucket)

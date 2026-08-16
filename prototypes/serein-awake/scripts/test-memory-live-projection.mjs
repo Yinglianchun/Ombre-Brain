@@ -33,7 +33,12 @@ globalThis.fetch = async (url, options = {}) => {
             content: "这是从 canonical 读取的正文。",
             author: "Haven",
             favorite: true,
-            status: "可浮现",
+            status: "已沉底",
+            storage_status: "archived",
+            type: "archived",
+            active: true,
+            scene_status: "",
+            status_consistent: false,
             bucket_domain: "relationship",
             self_anchor: false,
             updated_at: "2026-08-10T10:00:00Z",
@@ -55,6 +60,11 @@ assert.equal(scenes.length, 1);
 assert.equal(scenes[0].id, "scene-live-1");
 assert.equal(scenes[0].title, "德国机真实 Scene");
 assert.equal(scenes[0].sourceKind, "ombre-live-readonly");
+assert.equal(scenes[0].status, "已沉底");
+assert.equal(scenes[0].storageStatus, "archived");
+assert.equal(scenes[0].storageActive, true);
+assert.equal(scenes[0].sceneStatus, "");
+assert.equal(scenes[0].statusConsistent, false);
 assert.equal(scenes.some((scene) => scene.id === "first-door"), false);
 
 const cachedScenes = await loadMemorySnapshot();

@@ -72,6 +72,23 @@ service._passage_candidate_shadow_catalog = {
     "event-a": {"owner_kind": "event", "title": "E", "importance": 3, "body": "event body"},
 }
 
+active_scene = {
+    "id": "scene-active",
+    "content": "active",
+    "metadata": {"object_kind": "scene", "active": True, "scene_status": "active"},
+}
+assert service._passage_shadow_scene(active_scene) is not None
+for dirty_archive_metadata in (
+    {"object_kind": "scene", "type": "archived", "active": True},
+    {"object_kind": "scene", "scene_status": "archived", "active": True},
+    {"object_kind": "scene", "type": "dynamic", "active": False},
+):
+    assert service._passage_shadow_scene({
+        "id": "scene-archived",
+        "content": "archived",
+        "metadata": dirty_archive_metadata,
+    }) is None
+
 debug = service._passage_candidate_shadow_debug("我们的初遇", [1.0, 0.0])
 assert debug["status"] == "ok"
 assert debug["decision_applied"] is False

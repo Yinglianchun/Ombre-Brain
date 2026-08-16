@@ -149,6 +149,11 @@ const recallAblationOptions = [
   { value: "without_embedding", label: "关闭 embedding", description: "只看 cue / 正文词面" },
 ];
 
+const recallSimulationScopeOptions = [
+  { value: "live_mirror", label: "按 live 跑", description: "线上会提前停就提前停，不展开 shadow 诊断" },
+  { value: "full_shadow", label: "展开 shadow", description: "额外运行候选池、reranker 与局部证据观察" },
+];
+
 const recallCandidateSourceLabels = {
   exact_anchor: "精确锚点",
   title_anchor: "标题锚点",
@@ -221,6 +226,7 @@ function RecallSimulator() {
   const [status, setStatus] = useState("idle");
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [simulationScope, setSimulationScope] = useState("live_mirror");
   const [recallAblation, setRecallAblation] = useState("normal");
   const [trainingForm, setTrainingForm] = useState({ expectedAction: "", expectedRoute: "", memoryIds: "" });
   const [candidateJudgments, setCandidateJudgments] = useState({});
@@ -239,6 +245,7 @@ function RecallSimulator() {
         body: JSON.stringify({
           query: text,
           simulation: true,
+          simulation_scope: simulationScope,
           include_debug: true,
           recall_mode: "full",
           recall_ablation: recallAblation,
@@ -283,6 +290,7 @@ function RecallSimulator() {
   const ablationDebug = retrievalBudget.recall_ablation ?? semantic.recall_ablation ?? {
     mode: recallAblation,
   };
+  const resultSimulationScope = semantic.simulation_scope || simulationScope;
   const candidateEvidence = Array.isArray(cheapRetrieval.candidates)
     ? cheapRetrieval.candidates
     : [];
@@ -366,9 +374,30 @@ function RecallSimulator() {
           </div>
           <button className="basement-primary-action" type="submit" disabled={!query.trim() || status === "loading"}>
             {status === "loading" ? <ArrowClockwise size={17} className="is-spinning" aria-hidden="true" /> : <Flask size={17} aria-hidden="true" />}
-            {status === "loading" ? "正在走一遍" : "现场模拟"}
+            {status === "loading" ? "正在走一遍" : simulationScope === "live_mirror" ? "按 live 模拟" : "展开 shadow"}
           </button>
         </div>
+        <fieldset className="recall-ablation-control">
+          <legend>模拟范围</legend>
+          <div className="recall-ablation-control__options recall-simulation-scope__options">
+            {recallSimulationScopeOptions.map((option) => (
+              <label key={option.value} className={simulationScope === option.value ? "is-active" : ""}>
+                <input
+                  type="radio"
+                  name="recall-simulation-scope"
+                  value={option.value}
+                  checked={simulationScope === option.value}
+                  onChange={(event) => {
+                    setSimulationScope(event.target.value);
+                    if (event.target.value === "live_mirror") setRecallAblation("normal");
+                  }}
+                />
+                <span><strong>{option.label}</strong><small>{option.description}</small></span>
+              </label>
+            ))}
+          </div>
+          <p>两档都不写正式注入记录。默认档复现线上停点；完整档只用于排查为什么某条候选被捞起。</p>
+        </fieldset>
         <fieldset className="recall-ablation-control">
           <legend>消融观察</legend>
           <div className="recall-ablation-control__options">
@@ -379,13 +408,14 @@ function RecallSimulator() {
                   name="recall-ablation"
                   value={option.value}
                   checked={recallAblation === option.value}
+                  disabled={simulationScope !== "full_shadow"}
                   onChange={(event) => setRecallAblation(event.target.value)}
                 />
                 <span><strong>{option.label}</strong><small>{option.description}</small></span>
               </label>
             ))}
           </div>
-          <p>Route 与 evidence veto 保持不变；这里只切换 simulation 候选通道，不把 cue 混进 Scene 正文向量。</p>
+          <p>{simulationScope === "full_shadow" ? "Route 与 evidence veto 保持不变；这里只切换 shadow 候选通道，不把 cue 混进 Scene 正文向量。" : "切到“展开 shadow”后才能使用消融。"}</p>
         </fieldset>
       </form>
 
@@ -418,9 +448,11 @@ function RecallSimulator() {
               <div><dt>候选记忆</dt><dd>{debug.candidate_count ?? 0}</dd></div>
               <div><dt>最终注入</dt><dd>{debug.injected_bucket_ids?.length ?? result.recalled_ids?.length ?? 0}</dd></div>
               <div><dt>原因</dt><dd>{reasonLabels[semantic.reason] || semantic.reason || "继续按证据判断"}</dd></div>
+              <div><dt>模拟范围</dt><dd>{resultSimulationScope === "full_shadow" ? "完整 shadow 诊断" : "live mirror"}</dd></div>
             </dl>
           </section>
 
+          {resultSimulationScope === "full_shadow" && (
           <section className="recall-result-section">
             <div className="recall-result-section__heading">
               <h3>预算 Router（simulation shadow）</h3>
@@ -454,7 +486,9 @@ function RecallSimulator() {
               sentinel 只复用现有 query vector 做 top1/2 救援检查，不扩图、不 rerank、不注入、不写正式记录；异常一律 fail-open。
             </p>
           </section>
+          )}
 
+          {resultSimulationScope === "full_shadow" && (
           <section className="recall-result-section recall-evidence-decomposition">
             <div className="recall-result-section__heading">
               <h3>局部证据候选（simulation shadow）</h3>
@@ -499,6 +533,7 @@ function RecallSimulator() {
               各路原始候选数：cue 绑定 {passageCandidateLanes.cue_passage?.candidate_count ?? 0} · passage {passageCandidateLanes.passage?.candidate_count ?? 0} · Fact/Event 正文 {passageCandidateLanes.fact_event_body?.candidate_count ?? 0} · Fact/Event 词语 {passageCandidateLanes.fact_event_lexical?.candidate_count ?? 0}。
             </p>
           </section>
+          )}
 
           <section className="recall-result-section">
             <div className="recall-result-section__heading"><h3>路线对照</h3><span>同一原句只做一次 query embedding</span></div>
@@ -513,6 +548,7 @@ function RecallSimulator() {
             </div>
           </section>
 
+          {resultSimulationScope === "full_shadow" && (
           <section className="recall-result-section recall-evidence-decomposition">
             <div className="recall-result-section__heading">
               <h3>候选证据拆解</h3>
@@ -572,6 +608,7 @@ function RecallSimulator() {
               </div>
             ) : <p className="recall-none">本轮没有进入廉价候选池的记忆。</p>}
           </section>
+          )}
 
           {boundaryCandidate && (
             <section className="recall-result-section">
