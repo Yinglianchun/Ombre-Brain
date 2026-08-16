@@ -223,6 +223,7 @@ class FactEventSemanticIndex:
         *,
         top_k: int = 8,
         memory_kinds: Iterable[str] = ("fact", "event"),
+        min_importance: int = 1,
     ) -> dict[str, Any]:
         if not self.enabled:
             return {"status": "disabled", "matches": []}
@@ -240,6 +241,8 @@ class FactEventSemanticIndex:
         matches: list[dict[str, Any]] = []
         for row in rows:
             if str(row["item_type"]) not in kinds or str(row["model"]) != model:
+                continue
+            if int(row["importance"] or 0) < max(1, int(min_importance or 1)):
                 continue
             try:
                 vector = [float(value) for value in json.loads(row["embedding"])]
@@ -262,5 +265,6 @@ class FactEventSemanticIndex:
         return {
             "status": "ok",
             "candidate_count": len(matches),
+            "min_importance": max(1, int(min_importance or 1)),
             "matches": matches[: max(1, min(30, int(top_k or 8)))],
         }

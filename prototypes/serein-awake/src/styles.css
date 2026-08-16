@@ -5376,6 +5376,7 @@ label:has(input:focus-visible) {
 .recall-evidence-row dl div { min-width: 0; }
 .recall-evidence-row dt { color: #9aa39f; font-size: 9px; }
 .recall-evidence-row dd { margin: 4px 0 0; color: #60716a; font-family: var(--font-editorial-cjk); font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
+.recall-shadow-evidence-text { margin: 12px 0 0; padding: 10px 12px; border-left: 2px solid rgba(74, 116, 99, 0.28); background: rgba(74, 116, 99, 0.045); color: #53675f; font-family: var(--font-editorial-cjk); font-size: 11px; line-height: 1.75; white-space: pre-wrap; }
 .recall-candidate-review { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
 .recall-candidate-review > span { margin-right: 2px; color: #8d9893; font-size: 9px; }
 .recall-candidate-review button { padding: 5px 9px; border: 1px solid rgba(72, 94, 86, 0.14); border-radius: 999px; background: rgba(255, 255, 255, 0.62); color: #74827c; font-size: 9px; cursor: pointer; }

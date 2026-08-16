@@ -117,6 +117,17 @@ async def main() -> None:
         fact_probe = index.search_by_embedding([1.0, 0.0, 0.0], top_k=1)
         assert fact_probe["matches"][0]["importance"] == 5
 
+        store.revise(event_id, importance=2)
+        reused = await index.sync(store)
+        assert reused["embedded"] == 0 and reused["reused"] == 2
+        gated_probe = index.search_by_embedding(
+            [0.0, 1.0, 0.0],
+            top_k=2,
+            min_importance=3,
+        )
+        assert gated_probe["min_importance"] == 3
+        assert all(row["memory_id"] != event_id for row in gated_probe["matches"])
+
         store.set_status(event_id, "archived")
         removed = await index.sync(store)
         assert removed["removed"] == 1

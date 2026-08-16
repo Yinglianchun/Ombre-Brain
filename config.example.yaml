@@ -161,6 +161,29 @@ embedding:
   #   OMBRE_EMBEDDING_MAX_CHARS
   #   OMBRE_EMBEDDING_QUERY_INSTRUCTION
 
+# --- Rebuildable passage projections / 可重建局部证据 ---
+# These stores are used only by the explicit simulator path and its rebuild
+# scripts. They never admit or inject a memory or become canonical objects.
+passage_shadow:
+  simulation_enabled: true       # explicit simulator only; never changes admission or injection
+  target_chars: 160
+  max_chars: 240
+  min_chars: 40
+  overlap_sentences: 1
+  embedding_concurrency: 6
+  min_fact_event_importance: 3   # filter before any Fact/Event candidate scoring
+
+cue_passage_shadow:
+  concurrency: 4                  # changed Scenes bound in parallel during an explicit rebuild
+  binding_model: ""               # empty = reuse dehydration.model (for example deepseek-v4-flash)
+  binding_timeout_seconds: 15
+
+fact_event_lexical_shadow:
+  k1: 1.2
+  b: 0.75
+  max_df_ratio: 0.2          # corpus-derived specificity; no hand-written stop list
+  max_short_term_df: 3       # one short term must be rare in the eligible corpus
+
 # --- Reranker / 重排序配置 ---
 # Uses the embedding base_url/api_key when these are left empty.
 # 留空时复用 embedding 的 base_url/api_key。

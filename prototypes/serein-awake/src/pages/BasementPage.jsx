@@ -157,7 +157,31 @@ const recallCandidateSourceLabels = {
   cue_semantic: "cue embedding",
   body_semantic: "正文 embedding",
   retrieval_alias: "检索别名",
+  cue_passage_embedding: "cue 绑定片段",
+  passage_embedding: "局部原文 embedding",
+  fact_event_body_embedding: "Fact / Event 正文 embedding",
+  fact_event_lexical: "Fact / Event 词语命中",
 };
+
+const passageCandidateLaneLabels = {
+  cue_passage: "cue 绑定片段",
+  passage: "局部原文",
+  fact_event_body: "Fact / Event 正文",
+  fact_event_lexical: "Fact / Event 词语",
+};
+
+const passageCandidateKindLabels = {
+  scene: "Scene",
+  event: "Event",
+  fact: "Fact",
+};
+
+function passageCandidateScore(candidate) {
+  const score = Number(candidate?.score || 0);
+  return (candidate?.candidate_sources || []).includes("fact_event_lexical")
+    ? score.toFixed(4)
+    : percent(score);
+}
 
 const rerankerShadowLabels = {
   eligible_not_called: "达到 floor，shadow 未调用",
@@ -249,6 +273,12 @@ function RecallSimulator() {
   const rerankerShadow = retrievalBudget.rerank ?? {};
   const cueSemanticShadow = retrievalBudget.cue_semantic ?? {};
   const factEventProbe = retrievalBudget.fact_event_probe ?? {};
+  const passageCandidateShadow = retrievalBudget.passage_candidate_shadow ?? {};
+  const passageCandidatePolicy = passageCandidateShadow.policy ?? {};
+  const passageCandidateLanes = passageCandidateShadow.lanes ?? {};
+  const passageCandidates = Array.isArray(passageCandidateShadow.candidates)
+    ? passageCandidateShadow.candidates
+    : [];
   const episodeVerifier = retrievalBudget.episode_verifier ?? {};
   const ablationDebug = retrievalBudget.recall_ablation ?? semantic.recall_ablation ?? {
     mode: recallAblation,
@@ -410,6 +440,7 @@ function RecallSimulator() {
               <div><dt>reranker gray zone</dt><dd>{cheapRetrieval.gray_zone_count ?? 0} / {cheapRetrieval.reranker_eligible_count ?? 0} eligible</dd></div>
               <div><dt>cue embedding</dt><dd>{cueSemanticShadow.status === "available" ? `${cueSemanticShadow.candidate_count ?? 0} 条候选 · v${cueSemanticShadow.dataset_version ?? "?"}` : cueSemanticShadow.reason || "未建立索引"}</dd></div>
               <div><dt>Fact / Event probe</dt><dd>{factEventProbe.status === "ok" ? `${factEventProbe.candidate_count ?? 0} 条 · ${(factEventProbe.matches || []).slice(0, 3).map((item) => `${item.memory_kind}:${percent(item.score)}`).join(" · ") || "无达标候选"}` : factEventProbe.reason || factEventProbe.status || "未启用"}</dd></div>
+              <div><dt>passage candidate shadow</dt><dd>{passageCandidateShadow.status === "ok" ? `${passageCandidateShadow.candidate_count ?? 0} / ${passageCandidatePolicy.pool_limit ?? 7} 条占席 · 不参与决定` : passageCandidateShadow.reason || passageCandidateShadow.status || "未启用"}</dd></div>
               <div><dt>reranker shadow</dt><dd>{rerankerShadow.called ? `${rerankerShadow.score_count ?? 0} / ${rerankerShadow.candidate_count ?? 0} 已评分 · 不参与决定` : rerankerShadow.would_call ? rerankerShadowReasonLabels[rerankerShadow.reason] || rerankerShadow.reason || "有资格，尚未调用" : rerankerShadowReasonLabels[rerankerShadow.reason] || rerankerShadow.reason || "未进入"}</dd></div>
               <div><dt>同一事件核对</dt><dd>{episodeVerifier.called ? `${episodeVerifier.decisions?.length ?? 0} / ${episodeVerifier.candidate_count ?? 0} 已核对 · ${episodeVerifier.timing_ms ?? 0} ms` : episodeVerifier.reason || "未进入"}</dd></div>
               <div><dt>query_facets</dt><dd>{(retrievalBudget.query_facets || []).map((facet) => `${facet.kind}:${facet.value}`).join(" · ") || "—"}</dd></div>
@@ -421,6 +452,51 @@ function RecallSimulator() {
             )}
             <p className="recall-evidence-decomposition__note">
               sentinel 只复用现有 query vector 做 top1/2 救援检查，不扩图、不 rerank、不注入、不写正式记录；异常一律 fail-open。
+            </p>
+          </section>
+
+          <section className="recall-result-section recall-evidence-decomposition">
+            <div className="recall-result-section__heading">
+              <h3>局部证据候选（simulation shadow）</h3>
+              <span>{passageCandidates.length} 条 · live injection 关闭</span>
+            </div>
+            <p className="recall-evidence-decomposition__note">
+              四路各自占席，不跨路叠分：cue 绑定片段 2、普通 passage 2、Fact/Event 正文 2、Fact/Event 词语 1。同一父记忆重复命中只合并来源；Fact/Event 重要度低于 {passageCandidatePolicy.min_fact_event_importance ?? 3} 已在评分前排除。
+            </p>
+            {passageCandidateShadow.status === "ok" ? (
+              passageCandidates.length ? (
+                <div className="recall-evidence-list">
+                  {passageCandidates.map((candidate) => {
+                    const evidence = candidate.passages?.[0]?.evidence_text
+                      || candidate.passages?.[0]?.text
+                      || candidate.matched_spans?.[0]?.text
+                      || "未返回精确片段";
+                    return (
+                      <article className="recall-evidence-row is-qualified" key={`${candidate.owner_kind}:${candidate.owner_id}`}>
+                        <header>
+                          <strong>{candidate.title || candidate.owner_id}</strong>
+                          <span>{passageCandidateKindLabels[candidate.owner_kind] || candidate.owner_kind} · {passageCandidateLaneLabels[candidate.candidate_lane] || candidate.candidate_lane}</span>
+                        </header>
+                        <dl>
+                          <div><dt>候选分数</dt><dd>{passageCandidateScore(candidate)}</dd></div>
+                          <div><dt>重要度</dt><dd>{candidate.importance == null ? "Scene 不适用" : candidate.importance}</dd></div>
+                          <div><dt>发现来源</dt><dd>{(candidate.candidate_sources || []).map((source) => recallCandidateSourceLabels[source] || source).join(" · ") || "未记录"}</dd></div>
+                          <div><dt>命中 cue / 词语</dt><dd>{[...(candidate.matched_cues || []), ...(candidate.specific_terms || [])].join(" · ") || "—"}</dd></div>
+                        </dl>
+                        <p className="recall-shadow-evidence-text">{evidence}</p>
+                        {candidate.owner_kind === "scene" && (
+                          <button type="button" className="recall-card__memory-link" onClick={() => openSceneInMemory({ bucket_id: candidate.owner_id })}>
+                            在记忆卡里查看 Scene
+                          </button>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : <p className="recall-none">四路都没有捞到候选。</p>
+            ) : <p className="recall-none">{passageCandidateShadow.reason || passageCandidateShadow.status || "局部证据索引尚未建立"}</p>}
+            <p className="recall-evidence-decomposition__note">
+              各路原始候选数：cue 绑定 {passageCandidateLanes.cue_passage?.candidate_count ?? 0} · passage {passageCandidateLanes.passage?.candidate_count ?? 0} · Fact/Event 正文 {passageCandidateLanes.fact_event_body?.candidate_count ?? 0} · Fact/Event 词语 {passageCandidateLanes.fact_event_lexical?.candidate_count ?? 0}。
             </p>
           </section>
 

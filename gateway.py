@@ -99,6 +99,7 @@ from recall_eval import RECALL_EVAL_BLOCKED_SECTIONS, RECALL_EVAL_DEFAULT_CASES
 from recall_policy import QueryAnchorPlan, RecallPolicy, diffusion_seed_topic_term_has_specific_residue
 from memory_nodes import MemoryNodeStore
 from memory_recall import DomainRecallPolicy, SemanticRecallRouter
+from memory_recall.cue_passage_shadow import CuePassageShadowIndex
 from memory_recall.cue_semantic import (
     CueSemanticIndex,
     scene_cue_hash,
@@ -106,6 +107,8 @@ from memory_recall.cue_semantic import (
     scene_is_cue_indexable,
 )
 from memory_recall.fact_event_semantic import FactEventSemanticIndex
+from memory_recall.fact_event_lexical_shadow import FactEventLexicalShadowIndex
+from memory_recall.passage_shadow import PassageShadowIndex
 from memory_recall.retrieval_budget import (
     apply_fact_event_probe,
     build_retrieval_budget,
@@ -411,6 +414,24 @@ class GatewayService:
             config,
             self.embedding_engine,
         )
+        passage_shadow_cfg = config.get("passage_shadow")
+        passage_shadow_cfg = passage_shadow_cfg if isinstance(passage_shadow_cfg, dict) else {}
+        self.passage_candidate_shadow_enabled = self._bool_config_value(
+            passage_shadow_cfg.get("simulation_enabled"),
+            True,
+        )
+        self.passage_shadow_min_fact_event_importance = max(
+            1,
+            int(passage_shadow_cfg.get("min_fact_event_importance") or 3),
+        )
+        self.passage_shadow_index = PassageShadowIndex(config, self.embedding_engine)
+        self.cue_passage_shadow_index = CuePassageShadowIndex(config, self.embedding_engine)
+        self.fact_event_lexical_shadow_index = FactEventLexicalShadowIndex(config)
+        self._passage_candidate_shadow_catalog: dict[str, dict[str, Any]] = {}
+        self._passage_candidate_shadow_sync: dict[str, Any] = {
+            "status": "not_warmed",
+            "decision_applied": False,
+        }
         self.domain_recall_policy = DomainRecallPolicy(config)
         self.reranker_engine = reranker_engine or RerankerEngine(config)
         self.scene_evidence_store = scene_evidence_store or SceneEvidenceStore(config)
@@ -757,6 +778,21 @@ class GatewayService:
         for bucket in all_buckets:
             facets_for_node(self._bucket_relevance_node(bucket), self.relevance_options)
         relevance_facets_ms = max(0, int((time.perf_counter() - stage_started_at) * 1000))
+        if self.passage_candidate_shadow_enabled:
+            try:
+                self._passage_candidate_shadow_sync = await self._sync_passage_candidate_shadow(
+                    all_buckets
+                )
+            except Exception as exc:
+                self._passage_candidate_shadow_sync = {
+                    "status": "unavailable",
+                    "reason": type(exc).__name__,
+                    "decision_applied": False,
+                }
+                logger.warning(
+                    "Passage candidate shadow warm failed | error=%s",
+                    type(exc).__name__,
+                )
         logger.info(
             "Gateway recall runtime warmed | latency_ms=%s query_plan_ms=%s list_buckets_ms=%s "
             "lexical_profiles_ms=%s relevance_facets_ms=%s buckets=%s lexical_buckets=%s",
@@ -2235,10 +2271,29 @@ class GatewayService:
             finalize_retrieval_budget(retrieval_budget, sentinel_debug)
             apply_fact_event_probe(
                 retrieval_budget,
-                self.fact_event_semantic_index.search_by_embedding(
-                    semantic_query_vector or [],
-                    top_k=max(3, int(retrieval_budget.get("semantic_top_k") or 3)),
+                (
+                    self.fact_event_semantic_index.search_by_embedding(
+                        semantic_query_vector or [],
+                        top_k=max(3, int(retrieval_budget.get("semantic_top_k") or 3)),
+                        min_importance=getattr(
+                            self,
+                            "passage_shadow_min_fact_event_importance",
+                            3,
+                        ),
+                    )
+                    if hasattr(self, "fact_event_semantic_index")
+                    else {
+                        "status": "unavailable",
+                        "reason": "fact_event_semantic_index_unavailable",
+                        "matches": [],
+                    }
                 ),
+            )
+            retrieval_budget["passage_candidate_shadow"] = (
+                self._passage_candidate_shadow_debug(
+                    query,
+                    semantic_query_vector or [],
+                )
             )
         route_skip_proposed = self.semantic_recall_router.should_apply_skip(
             semantic_recall_debug
@@ -13599,6 +13654,282 @@ class GatewayService:
             "allow_direct": plan.allow_direct,
             "allow_diffusion_seed": plan.allow_diffusion_seed,
             "debug": dict(plan.debug or {}),
+        }
+
+    @staticmethod
+    def _active_fact_event_shadow_items(store: FactEventStore) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            page = store.list(status="active", limit=500, offset=offset)
+            items = list(page.get("items") or [])
+            output.extend(items)
+            offset += len(items)
+            if not items or offset >= int(page.get("count") or 0):
+                return output
+
+    @staticmethod
+    def _passage_shadow_scene(bucket: dict[str, Any]) -> dict[str, Any] | None:
+        metadata = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+        authored = (
+            str(metadata.get("memory_value_source") or "") == "authored_scene"
+            or str(metadata.get("object_kind") or "").strip().lower() == "scene"
+        )
+        if not authored or str(metadata.get("status") or "active").strip().lower() != "active":
+            return None
+        scene_id = str(bucket.get("id") or "").strip()
+        content = bucket_text_for_embedding(bucket)
+        if not scene_id or not content.strip():
+            return None
+        return {
+            "id": scene_id,
+            "title": str(metadata.get("name") or bucket.get("name") or "").strip(),
+            "content": content,
+            "cues": metadata.get("scene_cues"),
+            "cue_indexable": scene_is_cue_indexable(bucket),
+        }
+
+    async def _sync_passage_candidate_shadow(
+        self,
+        all_buckets: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        scenes = [
+            scene
+            for scene in (self._passage_shadow_scene(bucket) for bucket in all_buckets)
+            if scene is not None
+        ]
+        active_fact_events = self._active_fact_event_shadow_items(self.fact_event_store)
+        eligible_fact_events = [
+            item
+            for item in active_fact_events
+            if int(item.get("importance") or 0)
+            >= self.passage_shadow_min_fact_event_importance
+        ]
+        eligible_events = [
+            item for item in eligible_fact_events if str(item.get("item_type") or "") == "event"
+        ]
+        passage_sync = await self.passage_shadow_index.sync(
+            scenes=scenes,
+            events=eligible_events,
+        )
+        cue_scenes = [scene for scene in scenes if scene.get("cue_indexable")]
+        passages_by_owner = self.passage_shadow_index.passages_for_owners(
+            [("scene", str(scene["id"])) for scene in cue_scenes],
+            limit_per_owner=100,
+        )
+        cue_plan = await self.cue_passage_shadow_index.sync(
+            scenes=cue_scenes,
+            passages_by_owner=passages_by_owner,
+            dry_run=True,
+        )
+        if int(cue_plan.get("to_bind") or 0) <= 3:
+            cue_sync = await self.cue_passage_shadow_index.sync(
+                scenes=cue_scenes,
+                passages_by_owner=passages_by_owner,
+            )
+        else:
+            cue_sync = {
+                **cue_plan,
+                "status": "stale",
+                "reason": "bulk_binding_requires_explicit_rebuild",
+                "decision_applied": False,
+            }
+        lexical_sync = self.fact_event_lexical_shadow_index.sync(
+            active_fact_events,
+            min_importance=self.passage_shadow_min_fact_event_importance,
+        )
+        fact_semantic_sync = await self.fact_event_semantic_index.sync(self.fact_event_store)
+        self._passage_candidate_shadow_catalog = {
+            **{
+                str(scene["id"]): {
+                    "owner_kind": "scene",
+                    "title": str(scene.get("title") or ""),
+                    "importance": None,
+                }
+                for scene in scenes
+            },
+            **{
+                str(item.get("item_id") or ""): {
+                    "owner_kind": str(item.get("item_type") or ""),
+                    "title": str(item.get("title") or ""),
+                    "importance": int(item.get("importance") or 0),
+                    "body": str(item.get("body") or ""),
+                }
+                for item in eligible_fact_events
+            },
+        }
+        return {
+            "status": "ok",
+            "passage": passage_sync,
+            "cue_passage": cue_sync,
+            "fact_event_lexical": lexical_sync,
+            "fact_event_semantic": fact_semantic_sync,
+            "scene_count": len(scenes),
+            "eligible_fact_event_count": len(eligible_fact_events),
+            "excluded_fact_event_count": len(active_fact_events) - len(eligible_fact_events),
+            "min_fact_event_importance": self.passage_shadow_min_fact_event_importance,
+            "decision_applied": False,
+        }
+
+    @staticmethod
+    def _source_balanced_passage_shadow_pool(
+        lanes: list[tuple[str, list[dict[str, Any]], int]],
+        *,
+        limit: int = 7,
+    ) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = []
+        positions: dict[tuple[str, str], int] = {}
+
+        def add(row: dict[str, Any], lane: str) -> None:
+            key = (str(row.get("owner_kind") or ""), str(row.get("owner_id") or ""))
+            if not all(key):
+                return
+            if key in positions:
+                current = output[positions[key]]
+                for field in ("candidate_sources", "matched_terms", "specific_terms", "matched_cues"):
+                    values = list(current.get(field) or [])
+                    for value in row.get(field) or []:
+                        if value not in values:
+                            values.append(value)
+                    if values:
+                        current[field] = values
+                spans = list(current.get("matched_spans") or [])
+                for span in row.get("matched_spans") or []:
+                    if span not in spans:
+                        spans.append(span)
+                if spans:
+                    current["matched_spans"] = spans
+                return
+            if len(output) >= limit:
+                return
+            output.append({**row, "candidate_lane": lane, "decision_applied": False})
+            positions[key] = len(output) - 1
+
+        for lane, rows, quota in lanes:
+            for row in rows[:quota]:
+                add(row, lane)
+        for lane, rows, _quota in lanes:
+            for row in rows:
+                add(row, lane)
+                if len(output) >= limit:
+                    return output
+        return output
+
+    def _passage_candidate_shadow_debug(
+        self,
+        query: str,
+        query_embedding: list[float],
+    ) -> dict[str, Any]:
+        if not getattr(self, "passage_candidate_shadow_enabled", False):
+            return {
+                "status": "disabled",
+                "decision_applied": False,
+                "live_injection_enabled": False,
+            }
+        required = (
+            "passage_shadow_index",
+            "cue_passage_shadow_index",
+            "fact_event_lexical_shadow_index",
+            "fact_event_semantic_index",
+        )
+        if any(not hasattr(self, name) for name in required):
+            return {
+                "status": "unavailable",
+                "reason": "shadow_indexes_unavailable",
+                "decision_applied": False,
+                "live_injection_enabled": False,
+            }
+        catalog = getattr(self, "_passage_candidate_shadow_catalog", {})
+        allowed_scene_ids = {
+            item_id
+            for item_id, row in catalog.items()
+            if row.get("owner_kind") == "scene"
+        }
+
+        passage_search = self.passage_shadow_index.search_by_embedding(
+            query_embedding,
+            top_k=10,
+            passages_per_owner=2,
+        )
+        passage_rows = list(passage_search.get("matches") or [])
+        for row in passage_rows:
+            row["candidate_sources"] = ["passage_embedding"]
+
+        cue_search = self.cue_passage_shadow_index.search_by_embedding(
+            query_embedding,
+            top_k=10,
+            allowed_scene_ids=allowed_scene_ids,
+        )
+        cue_rows = list(cue_search.get("matches") or [])
+        for row in cue_rows:
+            row["candidate_sources"] = ["cue_passage_embedding"]
+
+        fact_search = self.fact_event_semantic_index.search_by_embedding(
+            query_embedding,
+            top_k=10,
+            min_importance=self.passage_shadow_min_fact_event_importance,
+        )
+        fact_rows: list[dict[str, Any]] = []
+        for match in fact_search.get("matches") or []:
+            item_id = str(match.get("memory_id") or "")
+            item = catalog.get(item_id) or {}
+            body = str(item.get("body") or "")
+            fact_rows.append({
+                "owner_kind": str(match.get("memory_kind") or ""),
+                "owner_id": item_id,
+                "score": float(match.get("score") or 0.0),
+                "importance": int(match.get("importance") or 0),
+                "passages": [{
+                    "ordinal": 0,
+                    "start_offset": 0,
+                    "end_offset": len(body),
+                    "text": body,
+                    "score": float(match.get("score") or 0.0),
+                }],
+                "candidate_sources": ["fact_event_body_embedding"],
+                "candidate_only": True,
+                "decision_applied": False,
+            })
+
+        lexical_search = self.fact_event_lexical_shadow_index.search(query, top_k=10)
+        lexical_rows = list(lexical_search.get("matches") or [])
+        lanes = [
+            ("cue_passage", cue_rows, 2),
+            ("passage", passage_rows, 2),
+            ("fact_event_body", fact_rows, 2),
+            ("fact_event_lexical", lexical_rows, 1),
+        ]
+        pool = self._source_balanced_passage_shadow_pool(lanes, limit=7)
+        for row in pool:
+            item = catalog.get(str(row.get("owner_id") or "")) or {}
+            row["title"] = str(item.get("title") or "")
+            if row.get("importance") is None:
+                row["importance"] = item.get("importance")
+        return {
+            "status": "ok",
+            "mode": "simulation_shadow",
+            "decision_applied": False,
+            "live_injection_enabled": False,
+            "sync": getattr(self, "_passage_candidate_shadow_sync", {}),
+            "policy": {
+                "pool_limit": 7,
+                "lane_quotas": {
+                    "cue_passage": 2,
+                    "passage": 2,
+                    "fact_event_body": 2,
+                    "fact_event_lexical": 1,
+                },
+                "duplicate_score_boost": False,
+                "min_fact_event_importance": self.passage_shadow_min_fact_event_importance,
+            },
+            "lanes": {
+                "cue_passage": {**cue_search, "matches": cue_rows},
+                "passage": {**passage_search, "matches": passage_rows},
+                "fact_event_body": {**fact_search, "matches": fact_rows},
+                "fact_event_lexical": {**lexical_search, "matches": lexical_rows},
+            },
+            "candidate_count": len(pool),
+            "candidates": pool,
         }
 
     def _build_retrieval_budget_debug(
