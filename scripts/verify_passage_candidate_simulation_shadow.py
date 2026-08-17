@@ -128,14 +128,30 @@ query_view_service = GatewayService.__new__(GatewayService)
 query_view_service.embedding_engine = QueryEmbedding()
 
 
+class ClausePassageIndex:
+    def search_by_embedding(self, vector: list[float], **_kwargs):
+        assert vector == [0.0, 1.0]
+        return {
+            "status": "ok",
+            "candidate_count": 1,
+            "matches": [row("scene", "scene-target", 0.88)],
+        }
+
+
+query_view_service.passage_shadow_index = ClausePassageIndex()
+query_view_service._passage_candidate_shadow_catalog = {
+    "scene-target": {"owner_kind": "scene", "title": "Target", "importance": None},
+}
+
+
 def fake_passage_debug(self, _query: str, vector: list[float]):
-    item_id = "scene-target" if vector == [0.0, 1.0] else "scene-baseline"
+    assert vector == [1.0, 0.0]
     return {
         "status": "ok",
         "decision_applied": False,
         "live_injection_enabled": False,
         "policy": {"pool_limit": 7},
-        "candidates": [row("scene", item_id, 0.8)],
+        "candidates": [row("scene", "scene-baseline", 0.8)],
     }
 
 

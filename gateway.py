@@ -14012,6 +14012,36 @@ class GatewayService:
                 continue
         return max(scores, default=0.0)
 
+    def _passage_clause_query_view_candidates(
+        self,
+        query_embedding: list[float],
+        *,
+        limit: int = 7,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        search = self.passage_shadow_index.search_by_embedding(
+            query_embedding,
+            top_k=max(10, limit),
+            passages_per_owner=2,
+        )
+        catalog = getattr(self, "_passage_candidate_shadow_catalog", {})
+        rows = []
+        for match in search.get("matches") or []:
+            row = {
+                **match,
+                "candidate_lane": "passage_query_view",
+                "candidate_sources": ["passage_query_view_embedding"],
+                "candidate_only": True,
+                "decision_applied": False,
+            }
+            item = catalog.get(str(row.get("owner_id") or "")) or {}
+            row["title"] = str(item.get("title") or "")
+            if row.get("importance") is None:
+                row["importance"] = item.get("importance")
+            rows.append(row)
+            if len(rows) >= max(1, limit):
+                break
+        return search, rows
+
     @classmethod
     def _merge_passage_query_view_candidates(
         cls,
@@ -14101,8 +14131,10 @@ class GatewayService:
                     "candidate_count": 0,
                 })
                 continue
-            view_result = self._passage_candidate_shadow_debug(view, vector)
-            candidates = list(view_result.get("candidates") or [])
+            view_result, candidates = self._passage_clause_query_view_candidates(
+                vector,
+                limit=int((baseline.get("policy") or {}).get("pool_limit") or 7),
+            )
             rows_by_view.append((view, candidates))
             view_debug.append({
                 "query": view,
@@ -14130,7 +14162,7 @@ class GatewayService:
             "decision_applied": False,
             "live_injection_enabled": False,
             "policy": {
-                "kind": "deterministic_clause_discovery_only",
+                "kind": "deterministic_clause_passage_discovery_only",
                 "max_views": 3,
                 "candidate_limit": int((baseline.get("policy") or {}).get("pool_limit") or 7),
             },
