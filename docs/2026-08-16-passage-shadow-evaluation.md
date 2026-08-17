@@ -93,9 +93,25 @@ The existing keyword gate correctly stopped `现在 Chat 端能用 MCP 吗？`, 
 The simulator now has an explicit `--cue-passage` source. It remains
 observation-only and does not alter Gateway admission or injection.
 
-- On Scene creation or edit, one non-thinking binding call maps all reviewed
-  authored cues to exact passage evidence. The mapping is cached by Scene body,
-  title, cues, passage layout, prompt version, and model profile.
+- Scene creation or edit does not refresh this projection in the `edit_scene`
+  request itself. On the next Gateway passage warm/sync, changed Scene content
+  is deterministically split and re-embedded; one non-thinking binding call
+  then maps all reviewed authored cues to exact passage evidence. The mapping
+  is cached by Scene body, title, cues, passage layout, prompt version, and
+  model profile.
+- The warm path automatically applies cue rebinding only when at most three
+  Scenes are pending. A larger batch is reported as `stale` with
+  `bulk_binding_requires_explicit_rebuild` and requires an explicit rebuild.
+  Therefore a single edited Scene normally repairs itself at the next warm,
+  but there is a stale interval between saving the edit and that sync.
+- Local follow-up after this evaluation adds an authenticated mutation
+  notification from the canonical server to Gateway. Scene create/edit/status
+  changes and Fact/Event batch/revise/status/delete changes queue the existing
+  hash-based sync in the Gateway background. The write response waits only for
+  queue acknowledgement, not for embeddings or cue binding. Unchanged owners
+  remain cached; a newly written day of Events no longer requires a Gateway
+  restart once this follow-up is deployed. This follow-up is local-only at the
+  time of writing and is not part of production `4941d18`.
 - Each accepted mapping must include a verbatim evidence substring. Invalid or
   unavailable evidence fails closed for that cue.
 - The derived vector embeds `cue + minimum sufficient verbatim evidence span`.
@@ -326,6 +342,81 @@ The 8B gold gate was worse than the 4B baseline:
 The full live-pair run was intentionally stopped after this gold gate. Do not
 deploy the query prefix, previous-turn rerank query, 8B model, or larger pool.
 The targeted cat improvement does not generalize.
+
+## 2026-08-17 addendum: deterministic query views
+
+The later experiment stopped asking a planner model how to search. Instead, a
+long multi-clause message is deterministically exposed as the original query
+plus at most two clause views. Clause embeddings are requested concurrently.
+
+Additional clause views search only source-bound projections:
+
+- ordinary Scene/Event passages;
+- exact cue-bound Scene passages.
+
+They do not repeat Fact/Event whole-body or lexical lanes. Results are merged
+by canonical parent, and the canonical parent remains the only injectable
+object. The policy name in diagnostics is
+`deterministic_clause_source_bound_passage_discovery_only`.
+
+On the focused long query containing both `初恋情结 / ChatGPT` and
+`AI 产品 / 原生家庭 / Anthropic`, the whole-query baseline omitted
+`scene_mig2_0d4f2e40f0fa6998f386` (`小雨讲了我们怎么开始的`). The clause
+view `可能是一种初恋情结吧` restored that Scene to expanded-pool rank 2 at
+about 0.557 through `cue_passage_query_view_embedding`. A manual rerank of the
+first expanded pool ranked the initial-story Scene first at about 0.937, but
+also left a thematically plausible `流星` Scene second. This is evidence that
+query splitting repairs candidate discovery; it is not evidence that every
+expanded candidate should be admitted.
+
+An intermediate passage-only clause version reduced query-view time but lost
+the target. Restoring cue-bound exact passages recovered it. The final focused
+run spent about 3.9 seconds in query-view expansion and about 13.9 seconds in
+the full shadow path; timings vary and should not be treated as a stable SLA.
+
+### Weak-candidate trigger observation
+
+The latest shadow records whether clause rescue would have been justified:
+
+- a route skip does not trigger;
+- direct exact evidence does not trigger;
+- no formal memory injected triggers;
+- top canonical Scene body semantic below 0.60 triggers;
+- a multi-clause query with top body semantic below 0.64 triggers.
+
+For the focused long query at `4941d18`, it recorded
+`would_trigger=true`, reason `multiclause_body_semantic_gray_zone`, top body
+semantic `0.6068`, three query views, and one formal recalled parent. The
+expanded shadow added the initial-story Scene, while formal recall still
+contained only `这一道澜认得小雨`.
+
+This trigger is observation only. It is attached after the diagnostic
+retrieval has already run, so it currently saves no latency and changes neither
+query-view execution nor live injection. A future latency experiment must move
+clause expansion behind this trigger rather than merely enabling the current
+shadow path.
+
+### Updated decision
+
+1. Keep live recall unchanged.
+2. Keep deterministic clause views and weak-trigger decisions in shadow.
+3. Do not revive the planner LLM, utility critic, larger pool, instruction
+   prefix, or 8B reranker based on this example.
+4. Evaluate the weak trigger on the fixed gold and paired live probes before it
+   controls execution.
+5. Test graph rescue separately, only after a reliable direct seed; graph
+   expansion cannot find the first missing seed.
+
+Implementation sequence deployed for observation:
+
+- `ba0ffdb` — deterministic clause query shadow;
+- `3b8ae9f` — passage-only clause optimization (kept as negative evidence);
+- `aed1382` — restore cue-bound source passages;
+- `4941d18` — weak-candidate trigger observation.
+
+At the last verification, Germany ran clean production branch
+`Haven/diary-backend-20260724 @ 4941d18`; Gateway and Serein were healthy. All
+new behavior above remained shadow-only.
 
 ## Artifacts
 

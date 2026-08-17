@@ -585,6 +585,52 @@ def _gateway_debug_injections_url() -> str:
     return parsed._replace(path=f"{path}/api/debug/injections", query="", fragment="").geturl()
 
 
+def _gateway_passage_shadow_refresh_url() -> str:
+    admin_url = os.environ.get("OMBRE_GATEWAY_ADMIN_URL", "").strip()
+    if not admin_url:
+        return ""
+    parsed = urlparse(admin_url)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/api/config"):
+        path = path[: -len("/api/config")]
+    return parsed._replace(
+        path=f"{path}/api/admin/passage-shadow/refresh",
+        query="",
+        fragment="",
+    ).geturl()
+
+
+async def _queue_gateway_passage_shadow_refresh(
+    *,
+    scene_ids: list[str] | None = None,
+    fact_event_ids: list[str] | None = None,
+) -> str:
+    url = _gateway_passage_shadow_refresh_url()
+    token = os.environ.get("OMBRE_GATEWAY_TOKEN", "").strip()
+    if not url or not token:
+        return "unavailable"
+    payload = {
+        "scene_ids": [str(item) for item in (scene_ids or []) if str(item).strip()],
+        "fact_event_ids": [
+            str(item) for item in (fact_event_ids or []) if str(item).strip()
+        ],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+        if response.status_code >= 400:
+            return f"failed:{response.status_code}"
+        body = response.json()
+        return str(body.get("status") or "queued") if isinstance(body, dict) else "queued"
+    except Exception as exc:
+        logger.warning("Gateway passage shadow refresh queue failed: %s", exc)
+        return f"failed:{type(exc).__name__}"
+
+
 async def _fetch_gateway_injection_debug(
     *,
     session_id: str = "",
@@ -11161,6 +11207,7 @@ async def _write_scene_memory(
     )
     _queue_scene_linking(bucket_id)
     await _capture_narrative_revision_candidates(scene_ids=[bucket_id])
+    await _queue_gateway_passage_shadow_refresh(scene_ids=[bucket_id])
     action = "合并→" if is_merged else "新建→"
     related_note = (
         _format_readonly_related_memory(related_bucket) if related_bucket else ""
@@ -11372,6 +11419,9 @@ async def _edit_scene_memory(
         entity_edges_refreshed = True
     except Exception as exc:
         logger.warning("Edited Scene entity reindex failed / Scene 修订后实体索引失败: %s", exc)
+    passage_shadow_refresh = await _queue_gateway_passage_shadow_refresh(
+        scene_ids=[scene_id]
+    )
 
     return {
         "status": "updated",
@@ -11386,6 +11436,7 @@ async def _edit_scene_memory(
         "moment_index_refreshed": moment_index_refreshed,
         "entity_edges_refreshed": entity_edges_refreshed,
         "scene_linking_queued": _queue_scene_linking(scene_id),
+        "passage_shadow_refresh": passage_shadow_refresh,
         "scene": _bucket_read_payload(updated_bucket),
     }
 
@@ -11583,6 +11634,9 @@ async def _set_scene_status_memory(
         index_changes, index_errors = _archive_scene_indexes(scene_id)
     else:
         index_changes, index_errors = _restore_scene_indexes(updated_bucket)
+    passage_shadow_refresh = await _queue_gateway_passage_shadow_refresh(
+        scene_ids=[scene_id]
+    )
 
     return {
         "status": "updated",
@@ -11608,6 +11662,7 @@ async def _set_scene_status_memory(
         ],
         "index_changes": index_changes,
         "index_errors": index_errors,
+        "passage_shadow_refresh": passage_shadow_refresh,
         "scene": _bucket_read_payload(updated_bucket),
     }
 
@@ -14013,6 +14068,18 @@ async def api_write_fact_events(request):
     try:
         result = fact_event_store.write_many(body.get("items"))
         result["scene_coverage"] = await _reconcile_scene_covered_events()
+        inserted_ids = [
+            str(item.get("item_id") or "")
+            for item in result.get("items") or []
+            if isinstance(item, dict)
+            and str(item.get("status") or "") == "inserted"
+            and str(item.get("item_id") or "")
+        ]
+        result["passage_shadow_refresh"] = (
+            await _queue_gateway_passage_shadow_refresh(fact_event_ids=inserted_ids)
+            if inserted_ids
+            else "not_needed"
+        )
         return JSONResponse(result)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -14157,6 +14224,9 @@ async def api_revise_fact_event(request):
         result["item"] = fact_event_store.read(
             str(result["item"]["item_id"]), include_sources=True
         )
+        result["passage_shadow_refresh"] = await _queue_gateway_passage_shadow_refresh(
+            fact_event_ids=[str(result["item"]["item_id"]), str(body.get("item_id") or "")]
+        )
         return JSONResponse(result)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -14180,12 +14250,15 @@ async def api_set_fact_event_status(request):
     if not isinstance(body, dict):
         return JSONResponse({"error": "request body must be an object"}, status_code=400)
     try:
-        return JSONResponse(
-            fact_event_store.set_status(
-                str(body.get("item_id") or ""),
-                str(body.get("status") or ""),
-            )
+        item_id = str(body.get("item_id") or "")
+        result = fact_event_store.set_status(
+            item_id,
+            str(body.get("status") or ""),
         )
+        result["passage_shadow_refresh"] = await _queue_gateway_passage_shadow_refresh(
+            fact_event_ids=[item_id]
+        )
+        return JSONResponse(result)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception as exc:
@@ -14208,9 +14281,12 @@ async def api_delete_fact_event(request):
     if not isinstance(body, dict):
         return JSONResponse({"error": "request body must be an object"}, status_code=400)
     try:
-        return JSONResponse(
-            fact_event_store.delete(str(body.get("item_id") or ""))
+        item_id = str(body.get("item_id") or "")
+        result = fact_event_store.delete(item_id)
+        result["passage_shadow_refresh"] = await _queue_gateway_passage_shadow_refresh(
+            fact_event_ids=[item_id]
         )
+        return JSONResponse(result)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception as exc:

@@ -255,4 +255,52 @@ skip_trigger = skip_trigger_semantic["retrieval_budget"]["passage_candidate_shad
 assert skip_trigger["would_trigger"] is False
 assert skip_trigger["reason"] == "route_skip"
 
+
+async def verify_mutation_refresh_queue() -> None:
+    refresh_service = GatewayService.__new__(GatewayService)
+    refresh_service.passage_candidate_shadow_enabled = True
+    refresh_service._passage_shadow_refresh_requested = False
+    refresh_service._passage_shadow_refresh_scene_ids = set()
+    refresh_service._passage_shadow_refresh_fact_event_ids = set()
+    refresh_service._passage_shadow_refresh_task = None
+    refresh_service._passage_candidate_shadow_sync = {}
+    refresh_service._clear_gateway_bucket_cache = lambda: None
+
+    class Buckets:
+        async def list_all(self, *, include_archive: bool):
+            assert include_archive is True
+            return [{"id": "scene-edited"}]
+
+    refresh_service.bucket_mgr = Buckets()
+    calls = []
+
+    async def fake_sync(self, buckets):
+        calls.append(buckets)
+        await asyncio.sleep(0)
+        return {"status": "ok", "decision_applied": False}
+
+    refresh_service._sync_passage_candidate_shadow = types.MethodType(
+        fake_sync,
+        refresh_service,
+    )
+    queued = refresh_service._queue_passage_candidate_shadow_refresh(
+        scene_ids=["scene-edited"],
+        fact_event_ids=["event-new"],
+    )
+    assert queued["status"] == "queued"
+    await refresh_service._passage_shadow_refresh_task
+    assert len(calls) == 1
+    assert refresh_service._passage_candidate_shadow_sync["requested_scene_ids"] == [
+        "scene-edited"
+    ]
+    assert refresh_service._passage_candidate_shadow_sync["requested_fact_event_ids"] == [
+        "event-new"
+    ]
+    assert refresh_service._passage_candidate_shadow_sync["refresh_source"] == (
+        "canonical_mutation_notification"
+    )
+
+
+asyncio.run(verify_mutation_refresh_queue())
+
 print("PASSAGE_CANDIDATE_SIMULATION_SHADOW_OK")

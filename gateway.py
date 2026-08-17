@@ -432,6 +432,10 @@ class GatewayService:
             "status": "not_warmed",
             "decision_applied": False,
         }
+        self._passage_shadow_refresh_requested = False
+        self._passage_shadow_refresh_scene_ids: set[str] = set()
+        self._passage_shadow_refresh_fact_event_ids: set[str] = set()
+        self._passage_shadow_refresh_task: asyncio.Task | None = None
         self.domain_recall_policy = DomainRecallPolicy(config)
         self.reranker_engine = reranker_engine or RerankerEngine(config)
         self.scene_evidence_store = scene_evidence_store or SceneEvidenceStore(config)
@@ -761,6 +765,13 @@ class GatewayService:
         self.http_client = http_client or httpx.AsyncClient(timeout=60.0)
 
     async def close(self) -> None:
+        refresh_task = getattr(self, "_passage_shadow_refresh_task", None)
+        if refresh_task is not None and not refresh_task.done():
+            refresh_task.cancel()
+            try:
+                await refresh_task
+            except asyncio.CancelledError:
+                pass
         if self.http_client and not getattr(self.http_client, "is_closed", False):
             await self.http_client.aclose()
 
@@ -13804,6 +13815,98 @@ class GatewayService:
             "decision_applied": False,
         }
 
+    def _queue_passage_candidate_shadow_refresh(
+        self,
+        *,
+        scene_ids: list[str] | None = None,
+        fact_event_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if not self.passage_candidate_shadow_enabled:
+            return {
+                "status": "disabled",
+                "reason": "passage_candidate_shadow_disabled",
+                "decision_applied": False,
+            }
+        clean_scene_ids = {
+            str(item or "").strip() for item in (scene_ids or []) if str(item or "").strip()
+        }
+        clean_fact_event_ids = {
+            str(item or "").strip()
+            for item in (fact_event_ids or [])
+            if str(item or "").strip()
+        }
+        self._passage_shadow_refresh_scene_ids.update(clean_scene_ids)
+        self._passage_shadow_refresh_fact_event_ids.update(clean_fact_event_ids)
+        self._passage_shadow_refresh_requested = True
+        task = getattr(self, "_passage_shadow_refresh_task", None)
+        if task is None or task.done():
+            self._passage_shadow_refresh_task = asyncio.create_task(
+                self._run_passage_candidate_shadow_refresh()
+            )
+        return {
+            "status": "queued",
+            "scene_ids": sorted(clean_scene_ids),
+            "fact_event_ids": sorted(clean_fact_event_ids),
+            "decision_applied": False,
+        }
+
+    async def _run_passage_candidate_shadow_refresh(self) -> None:
+        while self._passage_shadow_refresh_requested:
+            self._passage_shadow_refresh_requested = False
+            scene_ids = sorted(self._passage_shadow_refresh_scene_ids)
+            fact_event_ids = sorted(self._passage_shadow_refresh_fact_event_ids)
+            self._passage_shadow_refresh_scene_ids.clear()
+            self._passage_shadow_refresh_fact_event_ids.clear()
+            try:
+                self._clear_gateway_bucket_cache()
+                all_buckets = await self.bucket_mgr.list_all(include_archive=True)
+                result = await self._sync_passage_candidate_shadow(all_buckets)
+                self._passage_candidate_shadow_sync = {
+                    **result,
+                    "refresh_source": "canonical_mutation_notification",
+                    "requested_scene_ids": scene_ids,
+                    "requested_fact_event_ids": fact_event_ids,
+                }
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._passage_candidate_shadow_sync = {
+                    "status": "unavailable",
+                    "reason": type(exc).__name__,
+                    "refresh_source": "canonical_mutation_notification",
+                    "requested_scene_ids": scene_ids,
+                    "requested_fact_event_ids": fact_event_ids,
+                    "decision_applied": False,
+                }
+                logger.warning(
+                    "Passage candidate shadow incremental refresh failed | error=%s",
+                    type(exc).__name__,
+                )
+
+    async def handle_passage_shadow_refresh(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+
+        def ids(name: str) -> list[str]:
+            raw = body.get(name) or []
+            if not isinstance(raw, list):
+                return []
+            return list(dict.fromkeys(
+                str(item or "").strip() for item in raw[:500] if str(item or "").strip()
+            ))
+
+        return JSONResponse(self._queue_passage_candidate_shadow_refresh(
+            scene_ids=ids("scene_ids"),
+            fact_event_ids=ids("fact_event_ids"),
+        ))
+
     @staticmethod
     def _source_balanced_passage_shadow_pool(
         lanes: list[tuple[str, list[dict[str, Any]], int]],
@@ -22275,6 +22378,9 @@ def create_gateway_app(
     async def injection_debug(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_injection_debug(request)
 
+    async def passage_shadow_refresh(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_passage_shadow_refresh(request)
+
     async def hook_recall(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_hook_recall(request)
 
@@ -22302,6 +22408,7 @@ def create_gateway_app(
             Route("/health", health, methods=["GET"]),
             Route("/api/config", config_route, methods=["GET", "POST"]),
             Route("/api/debug/injections", injection_debug, methods=["GET"]),
+            Route("/api/admin/passage-shadow/refresh", passage_shadow_refresh, methods=["POST"]),
             Route("/api/hook/recall", hook_recall, methods=["POST"]),
             Route("/api/semantic-recall/routes", semantic_recall_routes, methods=["GET"]),
             Route("/api/semantic-recall/routes/publish", semantic_recall_publish, methods=["POST"]),
