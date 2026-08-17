@@ -286,6 +286,10 @@ function RecallSimulator() {
   const passageCandidates = Array.isArray(passageCandidateShadow.candidates)
     ? passageCandidateShadow.candidates
     : [];
+  const passageQueryViewShadow = passageCandidateShadow.query_view_shadow ?? {};
+  const passageQueryViewCandidates = Array.isArray(passageQueryViewShadow.candidates)
+    ? passageQueryViewShadow.candidates
+    : [];
   const episodeVerifier = retrievalBudget.episode_verifier ?? {};
   const ablationDebug = retrievalBudget.recall_ablation ?? semantic.recall_ablation ?? {
     mode: recallAblation,
@@ -497,6 +501,17 @@ function RecallSimulator() {
             <p className="recall-evidence-decomposition__note">
               四路各自占席，不跨路叠分：cue 绑定片段 2、普通 passage 2、Fact/Event 正文 2、Fact/Event 词语 1。同一父记忆重复命中只合并来源；Fact/Event 重要度低于 {passageCandidatePolicy.min_fact_event_importance ?? 3} 已在评分前排除。
             </p>
+            {passageQueryViewShadow.status === "ok" && (
+              <div className="recall-shadow-query-views">
+                <p className="recall-evidence-decomposition__note">
+                  分句 query shadow：{(passageQueryViewShadow.views || []).map((view) => typeof view === "string" ? view : view.query).filter(Boolean).join(" · ") || "—"}
+                  {` · ${passageQueryViewShadow.timing_ms ?? 0} ms · 只扩候选`}
+                </p>
+                <p className="recall-evidence-decomposition__note">
+                  分句池前列：{passageQueryViewCandidates.slice(0, 5).map((candidate) => `${candidate.title || candidate.owner_id}${(passageQueryViewShadow.added_owner_ids || []).includes(candidate.owner_id) ? "（新增）" : ""}`).join(" · ") || "无"}
+                </p>
+              </div>
+            )}
             {passageCandidateShadow.status === "ok" ? (
               passageCandidates.length ? (
                 <div className="recall-evidence-list">

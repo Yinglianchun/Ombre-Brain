@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
+import types
 from pathlib import Path
 
 
@@ -102,6 +104,58 @@ fact_a = next(item for item in debug["candidates"] if item["owner_id"] == "fact-
 assert fact_a["candidate_sources"] == [
     "fact_event_body_embedding",
     "fact_event_lexical",
+]
+
+long_query = (
+    "可能是一种初恋情结吧...不希望这种人也用ChatGPT，"
+    "虽然那只是一个AI产品，而且你原生家庭也没比Anthropic好到哪去"
+)
+query_views = service._deterministic_passage_query_views(long_query)
+assert query_views == [
+    long_query,
+    "可能是一种初恋情结吧",
+    "不希望这种人也用ChatGPT",
+]
+assert service._deterministic_passage_query_views("我们的初遇") == ["我们的初遇"]
+
+
+class QueryEmbedding:
+    async def embed_query(self, _query: str):
+        return [0.0, 1.0]
+
+
+query_view_service = GatewayService.__new__(GatewayService)
+query_view_service.embedding_engine = QueryEmbedding()
+
+
+def fake_passage_debug(self, _query: str, vector: list[float]):
+    item_id = "scene-target" if vector == [0.0, 1.0] else "scene-baseline"
+    return {
+        "status": "ok",
+        "decision_applied": False,
+        "live_injection_enabled": False,
+        "policy": {"pool_limit": 7},
+        "candidates": [row("scene", item_id, 0.8)],
+    }
+
+
+query_view_service._passage_candidate_shadow_debug = types.MethodType(
+    fake_passage_debug,
+    query_view_service,
+)
+query_view_debug = asyncio.run(
+    query_view_service._passage_candidate_query_view_shadow_debug(
+        long_query,
+        [1.0, 0.0],
+    )
+)
+query_view_shadow = query_view_debug["query_view_shadow"]
+assert query_view_shadow["status"] == "ok"
+assert query_view_shadow["decision_applied"] is False
+assert query_view_shadow["added_owner_ids"] == ["scene-target"]
+assert [item["owner_id"] for item in query_view_shadow["candidates"]] == [
+    "scene-baseline",
+    "scene-target",
 ]
 
 print("PASSAGE_CANDIDATE_SIMULATION_SHADOW_OK")

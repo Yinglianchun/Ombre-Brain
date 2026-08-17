@@ -2305,7 +2305,7 @@ class GatewayService:
                 ),
             )
             retrieval_budget["passage_candidate_shadow"] = (
-                self._passage_candidate_shadow_debug(
+                await self._passage_candidate_query_view_shadow_debug(
                     query,
                     semantic_query_vector or [],
                 )
@@ -13954,6 +13954,193 @@ class GatewayService:
             "candidate_count": len(pool),
             "candidates": pool,
         }
+
+    @staticmethod
+    def _deterministic_passage_query_views(
+        query: str,
+        *,
+        max_views: int = 3,
+    ) -> list[str]:
+        original = " ".join(str(query or "").split()).strip()
+        if not original:
+            return []
+        compact = re.sub(r"\s+", "", original)
+        if len(compact) < 18 or max_views <= 1:
+            return [original]
+
+        prepared = re.sub(r"(?:\.{2,}|…{2,})", "。", original)
+        prepared = re.sub(
+            r"(?<!^)(?=(?:虽然|但是|不过|而且|另外|还有|只是|可是))",
+            "。",
+            prepared,
+        )
+        raw_parts = re.split(r"[。！？!?；;\n]+", prepared)
+        parts: list[str] = []
+        seen = {compact.lower()}
+        for raw_part in raw_parts:
+            part = re.sub(
+                r"^(?:所以|然后|以及|并且|同时|虽然|但是|不过|而且|另外|还有|只是|可是)[，,、：:\s]*",
+                "",
+                str(raw_part or "").strip(),
+            )
+            part = part.strip("，,、：:。！？!?；;~～… ")
+            part_compact = re.sub(r"\s+", "", part)
+            key = part_compact.lower()
+            if not (4 <= len(part_compact) <= 80) or key in seen:
+                continue
+            if not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", part):
+                continue
+            seen.add(key)
+            parts.append(part)
+            if len(parts) >= max_views - 1:
+                break
+        return [original, *parts] if len(parts) >= 2 else [original]
+
+    @staticmethod
+    def _query_view_candidate_score(row: dict[str, Any]) -> float:
+        values = [row.get("score")]
+        values.extend(
+            passage.get("score")
+            for passage in row.get("passages") or []
+            if isinstance(passage, dict)
+        )
+        scores = []
+        for value in values:
+            try:
+                scores.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        return max(scores, default=0.0)
+
+    @classmethod
+    def _merge_passage_query_view_candidates(
+        cls,
+        rows_by_view: list[tuple[str, list[dict[str, Any]]]],
+        *,
+        limit: int = 7,
+    ) -> list[dict[str, Any]]:
+        merged: dict[tuple[str, str], dict[str, Any]] = {}
+        order: list[tuple[str, str]] = []
+        max_rank = max((len(rows) for _query_view, rows in rows_by_view), default=0)
+        for rank in range(max_rank):
+            for query_view, rows in rows_by_view:
+                if rank >= len(rows):
+                    continue
+                row = rows[rank]
+                key = (str(row.get("owner_kind") or ""), str(row.get("owner_id") or ""))
+                if not all(key):
+                    continue
+                current = merged.get(key)
+                if current is None:
+                    current = {**row, "matched_query_views": [query_view]}
+                    merged[key] = current
+                    order.append(key)
+                    continue
+                if query_view not in current["matched_query_views"]:
+                    current["matched_query_views"].append(query_view)
+                if cls._query_view_candidate_score(row) > cls._query_view_candidate_score(current):
+                    matched_views = list(current["matched_query_views"])
+                    current = {**row, "matched_query_views": matched_views}
+                    merged[key] = current
+                for field in ("candidate_sources", "matched_terms", "specific_terms", "matched_cues"):
+                    values = list(current.get(field) or [])
+                    for value in row.get(field) or []:
+                        if value not in values:
+                            values.append(value)
+                    if values:
+                        current[field] = values
+        return [merged[key] for key in order[: max(1, limit)]]
+
+    async def _passage_candidate_query_view_shadow_debug(
+        self,
+        query: str,
+        query_embedding: list[float],
+    ) -> dict[str, Any]:
+        baseline = self._passage_candidate_shadow_debug(query, query_embedding)
+        if baseline.get("status") != "ok":
+            return baseline
+        query_views = self._deterministic_passage_query_views(query)
+        baseline["query_view_shadow"] = {
+            "status": "not_needed" if len(query_views) <= 1 else "pending",
+            "decision_applied": False,
+            "live_injection_enabled": False,
+            "views": query_views,
+            "candidate_count": 0,
+            "candidates": [],
+        }
+        if len(query_views) <= 1:
+            return baseline
+        embed_query = getattr(getattr(self, "embedding_engine", None), "embed_query", None)
+        if not callable(embed_query):
+            baseline["query_view_shadow"].update({
+                "status": "unavailable",
+                "reason": "query_embedding_unavailable",
+            })
+            return baseline
+
+        started_at = time.perf_counter()
+        embedded = await asyncio.gather(
+            *(embed_query(view) for view in query_views[1:]),
+            return_exceptions=True,
+        )
+        rows_by_view: list[tuple[str, list[dict[str, Any]]]] = [
+            (query_views[0], list(baseline.get("candidates") or [])),
+        ]
+        view_debug = [{
+            "query": query_views[0],
+            "source": "original",
+            "status": "ok",
+            "candidate_count": len(baseline.get("candidates") or []),
+        }]
+        for view, vector in zip(query_views[1:], embedded):
+            if isinstance(vector, BaseException) or not isinstance(vector, list) or not vector:
+                view_debug.append({
+                    "query": view,
+                    "source": "deterministic_clause",
+                    "status": "embedding_failed",
+                    "candidate_count": 0,
+                })
+                continue
+            view_result = self._passage_candidate_shadow_debug(view, vector)
+            candidates = list(view_result.get("candidates") or [])
+            rows_by_view.append((view, candidates))
+            view_debug.append({
+                "query": view,
+                "source": "deterministic_clause",
+                "status": str(view_result.get("status") or "unknown"),
+                "candidate_count": len(candidates),
+            })
+
+        expanded = self._merge_passage_query_view_candidates(
+            rows_by_view,
+            limit=int((baseline.get("policy") or {}).get("pool_limit") or 7),
+        )
+        baseline_ids = {
+            (str(row.get("owner_kind") or ""), str(row.get("owner_id") or ""))
+            for row in baseline.get("candidates") or []
+        }
+        added_owner_ids = [
+            str(row.get("owner_id") or "")
+            for row in expanded
+            if (str(row.get("owner_kind") or ""), str(row.get("owner_id") or ""))
+            not in baseline_ids
+        ]
+        baseline["query_view_shadow"] = {
+            "status": "ok",
+            "decision_applied": False,
+            "live_injection_enabled": False,
+            "policy": {
+                "kind": "deterministic_clause_discovery_only",
+                "max_views": 3,
+                "candidate_limit": int((baseline.get("policy") or {}).get("pool_limit") or 7),
+            },
+            "views": view_debug,
+            "candidate_count": len(expanded),
+            "added_owner_ids": added_owner_ids,
+            "candidates": expanded,
+            "timing_ms": max(0, int((time.perf_counter() - started_at) * 1000)),
+        }
+        return baseline
 
     def _build_retrieval_budget_debug(
         self,
