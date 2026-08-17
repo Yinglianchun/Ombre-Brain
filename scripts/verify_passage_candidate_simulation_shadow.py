@@ -138,7 +138,18 @@ class ClausePassageIndex:
         }
 
 
+class ClauseCuePassageIndex:
+    def search_by_embedding(self, vector: list[float], **_kwargs):
+        assert vector == [0.0, 1.0]
+        return {
+            "status": "ok",
+            "candidate_count": 1,
+            "matches": [row("scene", "scene-target", 0.91)],
+        }
+
+
 query_view_service.passage_shadow_index = ClausePassageIndex()
+query_view_service.cue_passage_shadow_index = ClauseCuePassageIndex()
 query_view_service._passage_candidate_shadow_catalog = {
     "scene-target": {"owner_kind": "scene", "title": "Target", "importance": None},
 }

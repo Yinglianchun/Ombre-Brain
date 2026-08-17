@@ -164,6 +164,7 @@ const recallCandidateSourceLabels = {
   retrieval_alias: "检索别名",
   cue_passage_embedding: "cue 绑定片段",
   passage_embedding: "局部原文 embedding",
+  cue_passage_query_view_embedding: "分句 cue 绑定片段",
   passage_query_view_embedding: "分句局部原文 embedding",
   fact_event_body_embedding: "Fact / Event 正文 embedding",
   fact_event_lexical: "Fact / Event 词语命中",
@@ -172,6 +173,7 @@ const recallCandidateSourceLabels = {
 const passageCandidateLaneLabels = {
   cue_passage: "cue 绑定片段",
   passage: "局部原文",
+  cue_passage_query_view: "分句 cue 绑定片段",
   passage_query_view: "分句局部原文",
   fact_event_body: "Fact / Event 正文",
   fact_event_lexical: "Fact / Event 词语",

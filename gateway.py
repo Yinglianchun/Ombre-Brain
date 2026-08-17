@@ -14018,29 +14018,47 @@ class GatewayService:
         *,
         limit: int = 7,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        search = self.passage_shadow_index.search_by_embedding(
+        passage_search = self.passage_shadow_index.search_by_embedding(
             query_embedding,
             top_k=max(10, limit),
             passages_per_owner=2,
         )
         catalog = getattr(self, "_passage_candidate_shadow_catalog", {})
-        rows = []
-        for match in search.get("matches") or []:
-            row = {
-                **match,
-                "candidate_lane": "passage_query_view",
-                "candidate_sources": ["passage_query_view_embedding"],
-                "candidate_only": True,
-                "decision_applied": False,
-            }
+        allowed_scene_ids = {
+            item_id
+            for item_id, row in catalog.items()
+            if row.get("owner_kind") == "scene"
+        }
+        cue_search = self.cue_passage_shadow_index.search_by_embedding(
+            query_embedding,
+            top_k=max(10, limit),
+            allowed_scene_ids=allowed_scene_ids,
+        )
+        passage_rows = list(passage_search.get("matches") or [])
+        for row in passage_rows:
+            row["candidate_sources"] = ["passage_query_view_embedding"]
+            row["candidate_only"] = True
+        cue_rows = list(cue_search.get("matches") or [])
+        for row in cue_rows:
+            row["candidate_sources"] = ["cue_passage_query_view_embedding"]
+            row["candidate_only"] = True
+        rows = self._source_balanced_passage_shadow_pool(
+            [
+                ("cue_passage_query_view", cue_rows, 3),
+                ("passage_query_view", passage_rows, 3),
+            ],
+            limit=max(1, limit),
+        )
+        for row in rows:
             item = catalog.get(str(row.get("owner_id") or "")) or {}
             row["title"] = str(item.get("title") or "")
             if row.get("importance") is None:
                 row["importance"] = item.get("importance")
-            rows.append(row)
-            if len(rows) >= max(1, limit):
-                break
-        return search, rows
+        return {
+            "status": "ok",
+            "passage": passage_search,
+            "cue_passage": cue_search,
+        }, rows
 
     @classmethod
     def _merge_passage_query_view_candidates(
@@ -14162,7 +14180,7 @@ class GatewayService:
             "decision_applied": False,
             "live_injection_enabled": False,
             "policy": {
-                "kind": "deterministic_clause_passage_discovery_only",
+                "kind": "deterministic_clause_source_bound_passage_discovery_only",
                 "max_views": 3,
                 "candidate_limit": int((baseline.get("policy") or {}).get("pool_limit") or 7),
             },
