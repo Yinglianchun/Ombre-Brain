@@ -185,4 +185,74 @@ assert [item["owner_id"] for item in query_view_shadow["candidates"]] == [
     "scene-target",
 ]
 
+weak_trigger_semantic = {
+    "applied_action": "recall",
+    "retrieval_budget": {
+        "cheap_retrieval": {
+            "candidates": [{
+                "canonical_scene": True,
+                "body_semantic_score": 0.6088,
+                "exact_anchor_match": False,
+                "full_title_recall_match": False,
+                "source_bound_raw_quote_match": False,
+            }],
+        },
+        "passage_candidate_shadow": {},
+    },
+}
+service._attach_passage_weak_candidate_trigger_shadow(
+    long_query,
+    weak_trigger_semantic,
+    recalled_ids=["scene-live"],
+)
+weak_trigger = weak_trigger_semantic["retrieval_budget"]["passage_candidate_shadow"][
+    "weak_candidate_trigger_shadow"
+]
+assert weak_trigger["would_trigger"] is True
+assert weak_trigger["reason"] == "multiclause_body_semantic_gray_zone"
+assert weak_trigger["decision_applied"] is False
+assert weak_trigger["live_execution_changed"] is False
+
+strong_trigger_semantic = {
+    "applied_action": "recall",
+    "retrieval_budget": {
+        "cheap_retrieval": {
+            "candidates": [{
+                "canonical_scene": True,
+                "body_semantic_score": 0.71,
+                "exact_anchor_match": False,
+            }],
+        },
+        "passage_candidate_shadow": {},
+    },
+}
+service._attach_passage_weak_candidate_trigger_shadow(
+    long_query,
+    strong_trigger_semantic,
+    recalled_ids=["scene-strong"],
+)
+strong_trigger = strong_trigger_semantic["retrieval_budget"]["passage_candidate_shadow"][
+    "weak_candidate_trigger_shadow"
+]
+assert strong_trigger["would_trigger"] is False
+assert strong_trigger["reason"] == "strong_candidate"
+
+skip_trigger_semantic = {
+    "applied_action": "skip",
+    "retrieval_budget": {
+        "cheap_retrieval": {"candidates": []},
+        "passage_candidate_shadow": {},
+    },
+}
+service._attach_passage_weak_candidate_trigger_shadow(
+    "今天好热",
+    skip_trigger_semantic,
+    recalled_ids=[],
+)
+skip_trigger = skip_trigger_semantic["retrieval_budget"]["passage_candidate_shadow"][
+    "weak_candidate_trigger_shadow"
+]
+assert skip_trigger["would_trigger"] is False
+assert skip_trigger["reason"] == "route_skip"
+
 print("PASSAGE_CANDIDATE_SIMULATION_SHADOW_OK")

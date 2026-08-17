@@ -291,6 +291,7 @@ function RecallSimulator() {
     ? passageCandidateShadow.candidates
     : [];
   const passageQueryViewShadow = passageCandidateShadow.query_view_shadow ?? {};
+  const weakCandidateTriggerShadow = passageCandidateShadow.weak_candidate_trigger_shadow ?? {};
   const passageQueryViewCandidates = Array.isArray(passageQueryViewShadow.candidates)
     ? passageQueryViewShadow.candidates
     : [];
@@ -505,6 +506,13 @@ function RecallSimulator() {
             <p className="recall-evidence-decomposition__note">
               四路各自占席，不跨路叠分：cue 绑定片段 2、普通 passage 2、Fact/Event 正文 2、Fact/Event 词语 1。同一父记忆重复命中只合并来源；Fact/Event 重要度低于 {passageCandidatePolicy.min_fact_event_importance ?? 3} 已在评分前排除。
             </p>
+            {weakCandidateTriggerShadow.status === "observed" && (
+              <p className="recall-evidence-decomposition__note">
+                弱候选触发 shadow：{weakCandidateTriggerShadow.would_trigger ? "会启动分句检索" : "不会启动"}
+                {` · ${weakCandidateTriggerShadow.reason || "—"} · top body ${percent(weakCandidateTriggerShadow.top_body_semantic)} · ${weakCandidateTriggerShadow.multi_clause ? "多分句" : "单一短句"}`}
+                {" · 只记录判断，不改变 live 或本轮 shadow 执行"}
+              </p>
+            )}
             {passageQueryViewShadow.status === "ok" && (
               <div className="recall-shadow-query-views">
                 <p className="recall-evidence-decomposition__note">

@@ -2389,6 +2389,11 @@ class GatewayService:
             "skip" if semantic_skip else "recall"
         )
         if semantic_skip:
+            self._attach_passage_weak_candidate_trigger_shadow(
+                query,
+                semantic_recall_debug,
+                recalled_ids=[],
+            )
             narrative_recall_debug = self._narrative_roll_shadow_debug(
                 query,
                 [],
@@ -2648,6 +2653,11 @@ class GatewayService:
             "prepare_timing_debug": dict(debug_payload.get("prepare_timing_debug") or {}),
         }
         semantic_debug = debug_payload.get("semantic_recall_debug")
+        self._attach_passage_weak_candidate_trigger_shadow(
+            query,
+            semantic_debug,
+            recalled_ids=recalled_ids,
+        )
         ablation_observation = (
             semantic_debug.get("live_recall_ablation_observation")
             if isinstance(semantic_debug, dict)
@@ -14059,6 +14069,82 @@ class GatewayService:
             "passage": passage_search,
             "cue_passage": cue_search,
         }, rows
+
+    def _attach_passage_weak_candidate_trigger_shadow(
+        self,
+        query: str,
+        semantic_recall_debug: dict[str, Any] | None,
+        *,
+        recalled_ids: list[str],
+    ) -> None:
+        if not isinstance(semantic_recall_debug, dict):
+            return
+        retrieval_budget = semantic_recall_debug.get("retrieval_budget")
+        if not isinstance(retrieval_budget, dict):
+            return
+        passage_shadow = retrieval_budget.get("passage_candidate_shadow")
+        if not isinstance(passage_shadow, dict):
+            return
+
+        cheap_retrieval = retrieval_budget.get("cheap_retrieval")
+        cheap_retrieval = cheap_retrieval if isinstance(cheap_retrieval, dict) else {}
+        candidate_rows = [
+            row
+            for row in cheap_retrieval.get("candidates") or []
+            if isinstance(row, dict) and row.get("canonical_scene")
+        ]
+        top_body_semantic = max(
+            (
+                self._safe_float(row.get("body_semantic_score"), 0.0)
+                for row in candidate_rows
+            ),
+            default=0.0,
+        )
+        exact_anchor = any(
+            row.get("exact_anchor_match")
+            or row.get("full_title_recall_match")
+            or row.get("source_bound_raw_quote_match")
+            for row in candidate_rows
+        )
+        query_views = self._deterministic_passage_query_views(query)
+        multi_clause = len(query_views) > 1
+        applied_action = str(semantic_recall_debug.get("applied_action") or "recall")
+        recalled_count = len([item for item in recalled_ids or [] if str(item or "").strip()])
+
+        would_trigger = False
+        reason = "strong_candidate"
+        if applied_action == "skip":
+            reason = "route_skip"
+        elif exact_anchor:
+            reason = "direct_exact_evidence"
+        elif recalled_count == 0:
+            would_trigger = True
+            reason = "no_formal_memory_injected"
+        elif top_body_semantic < 0.60:
+            would_trigger = True
+            reason = "top_body_semantic_below_060"
+        elif multi_clause and top_body_semantic < 0.64:
+            would_trigger = True
+            reason = "multiclause_body_semantic_gray_zone"
+
+        passage_shadow["weak_candidate_trigger_shadow"] = {
+            "status": "observed",
+            "would_trigger": would_trigger,
+            "reason": reason,
+            "decision_applied": False,
+            "live_execution_changed": False,
+            "query_view_execution_changed": False,
+            "multi_clause": multi_clause,
+            "query_view_count": len(query_views),
+            "top_body_semantic": round(top_body_semantic, 4),
+            "canonical_scene_candidate_count": len(candidate_rows),
+            "formal_recalled_count": recalled_count,
+            "exact_anchor": exact_anchor,
+            "thresholds": {
+                "weak_body_semantic": 0.60,
+                "multiclause_gray_ceiling": 0.64,
+            },
+        }
 
     @classmethod
     def _merge_passage_query_view_candidates(
