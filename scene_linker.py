@@ -135,6 +135,18 @@ def _ensure_scene_edge_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE scene_edges ADD COLUMN lifecycle_status TEXT NOT NULL DEFAULT 'active'"
         )
     conn.execute(
+        """
+        UPDATE scene_edges
+           SET lifecycle_status = CASE
+               WHEN deactivation_reason = 'scene_archived' THEN 'archived'
+               WHEN deactivation_reason = 'scene_content_changed' THEN 'needs_review'
+               WHEN deactivation_reason = 'relinked' THEN 'replaced'
+               ELSE 'cancelled'
+           END
+         WHERE active = 0 AND lifecycle_status = 'active'
+        """
+    )
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_scene_edges_active_source "
         "ON scene_edges(active, source_scene_id)"
     )

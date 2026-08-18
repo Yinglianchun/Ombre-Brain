@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import tempfile
 from pathlib import Path
 import sys
@@ -54,8 +55,64 @@ class SceneManager:
         return list(self.scenes.values())
 
 
+def verify_legacy_status_migration(temp_dir: str) -> None:
+    state_dir = Path(temp_dir) / "legacy-state"
+    state_dir.mkdir()
+    db_path = state_dir / "scene_edge_proposals.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE scene_edges (
+            edge_id TEXT PRIMARY KEY,
+            source_scene_id TEXT NOT NULL,
+            target_scene_id TEXT NOT NULL,
+            relation_type TEXT NOT NULL,
+            directionality TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            reason TEXT NOT NULL,
+            source_evidence TEXT NOT NULL,
+            target_evidence TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            target_hash TEXT NOT NULL,
+            proposal_id TEXT NOT NULL UNIQUE,
+            linker_version TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            accepted_at TEXT NOT NULL,
+            accepted_by TEXT,
+            deactivated_at TEXT,
+            deactivated_by TEXT,
+            deactivation_reason TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    values = (
+        "scene_source", "scene_target", "continues", "directed", 0.9,
+        "legacy", "source", "target", "source-hash", "target-hash",
+        "scene_edge_legacy", "scene-linker-v1", "2026-08-01T00:00:00Z",
+        "Rain", "2026-08-02T00:00:00Z", "system", "2026-08-02T00:00:00Z",
+    )
+    conn.execute(
+        """
+        INSERT INTO scene_edges (
+            edge_id, source_scene_id, target_scene_id, relation_type, directionality,
+            confidence, reason, source_evidence, target_evidence, source_hash, target_hash,
+            proposal_id, linker_version, active, accepted_at, accepted_by,
+            deactivated_at, deactivated_by, deactivation_reason, updated_at
+        ) VALUES ('scene_rel_legacy', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, NULL, ?)
+        """,
+        values,
+    )
+    conn.commit()
+    conn.close()
+    migrated = SceneEdgeStore({"state_dir": str(state_dir)}, create=False)
+    edge = migrated.list_edges(include_inactive=True)[0]
+    assert edge["lifecycle_status"] == "cancelled"
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="scene-edge-lifecycle-") as temp_dir:
+        verify_legacy_status_migration(temp_dir)
         config = {"state_dir": str(Path(temp_dir) / "state")}
         proposals = SceneEdgeProposalStore(config)
         reviewed = SceneEdgeStore(config)
