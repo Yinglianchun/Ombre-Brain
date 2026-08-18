@@ -789,6 +789,10 @@ class GatewayService:
         for bucket in all_buckets:
             facets_for_node(self._bucket_relevance_node(bucket), self.relevance_options)
         relevance_facets_ms = max(0, int((time.perf_counter() - stage_started_at) * 1000))
+        warm_embedding_index = getattr(self.embedding_engine, "warm_search_cache", None)
+        embedding_index_ms = (
+            warm_embedding_index() if callable(warm_embedding_index) else 0
+        )
         if self.passage_candidate_shadow_enabled:
             try:
                 # Canonical activity lives in metadata. Some active authored
@@ -811,12 +815,14 @@ class GatewayService:
                 )
         logger.info(
             "Gateway recall runtime warmed | latency_ms=%s query_plan_ms=%s list_buckets_ms=%s "
-            "lexical_profiles_ms=%s relevance_facets_ms=%s buckets=%s lexical_buckets=%s",
+            "lexical_profiles_ms=%s relevance_facets_ms=%s embedding_index_ms=%s "
+            "buckets=%s lexical_buckets=%s",
             max(0, int((time.perf_counter() - started_at) * 1000)),
             query_plan_ms,
             list_buckets_ms,
             lexical_profiles_ms,
             relevance_facets_ms,
+            embedding_index_ms,
             len(all_buckets),
             lexical_buckets,
         )

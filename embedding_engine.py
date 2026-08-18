@@ -20,6 +20,7 @@ import logging
 import asyncio
 from pathlib import Path
 
+import numpy as np
 from openai import AsyncOpenAI
 
 logger = logging.getLogger("ombre_brain.embedding")
@@ -75,6 +76,9 @@ class EmbeddingEngine:
 
         # --- Initialize SQLite ---
         self._init_db()
+        self._search_cache_signature: tuple | None = None
+        self._search_cache_owner_ids: tuple[str, ...] = ()
+        self._search_cache_matrix = np.empty((0, 0), dtype=np.float64)
 
     def _init_db(self):
         """Create embeddings table if not exists."""
@@ -227,6 +231,7 @@ class EmbeddingEngine:
             conn.commit()
         finally:
             conn.close()
+        self._invalidate_search_cache()
 
     async def _generate_embedding(self, text: str, *, kind: str = "document") -> list[float]:
         """Call API to generate embedding vector."""
@@ -270,6 +275,7 @@ class EmbeddingEngine:
         )
         conn.commit()
         conn.close()
+        self._invalidate_search_cache()
 
     def delete_embedding(self, bucket_id: str):
         """Remove embedding when bucket is deleted."""
@@ -278,6 +284,73 @@ class EmbeddingEngine:
         conn.execute("DELETE FROM scene_embedding_chunks WHERE scene_id = ?", (bucket_id,))
         conn.commit()
         conn.close()
+        self._invalidate_search_cache()
+
+    def _invalidate_search_cache(self) -> None:
+        self._search_cache_signature = None
+        self._search_cache_owner_ids = ()
+        self._search_cache_matrix = np.empty((0, 0), dtype=np.float64)
+
+    @staticmethod
+    def _search_index_signature(conn: sqlite3.Connection) -> tuple:
+        return tuple(
+            value
+            for table in ("embeddings", "scene_embedding_chunks")
+            for value in conn.execute(
+                f"SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM {table}"
+            ).fetchone()
+        )
+
+    def _search_index_matrix(self) -> tuple[tuple[str, ...], np.ndarray]:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            signature = self._search_index_signature(conn)
+            if signature == self._search_cache_signature:
+                return self._search_cache_owner_ids, self._search_cache_matrix
+            rows = conn.execute(
+                "SELECT bucket_id, embedding, model, dimension FROM embeddings"
+            ).fetchall()
+            chunk_rows = conn.execute(
+                "SELECT scene_id, embedding, model, dimension FROM scene_embedding_chunks"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        owner_ids: list[str] = []
+        normalized_vectors: list[np.ndarray] = []
+        for owner_id, payload, model, dimension in [*rows, *chunk_rows]:
+            try:
+                embedding = json.loads(payload)
+                if not self._row_matches_current_model(model, dimension, embedding):
+                    continue
+                vector = np.asarray(embedding, dtype=np.float64)
+                if vector.ndim != 1 or vector.size == 0:
+                    continue
+                norm = float(np.linalg.norm(vector))
+                if norm <= 0:
+                    continue
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            owner_ids.append(str(owner_id))
+            normalized_vectors.append(vector / norm)
+
+        matrix = (
+            np.vstack(normalized_vectors)
+            if normalized_vectors
+            else np.empty((0, 0), dtype=np.float64)
+        )
+        self._search_cache_signature = signature
+        self._search_cache_owner_ids = tuple(owner_ids)
+        self._search_cache_matrix = matrix
+        return self._search_cache_owner_ids, self._search_cache_matrix
+
+    def warm_search_cache(self) -> int:
+        """Load and normalize the rebuildable body index before the first query."""
+        import time
+
+        started_at = time.perf_counter()
+        self._search_index_matrix()
+        return max(0, int((time.perf_counter() - started_at) * 1000))
 
     async def get_embedding(self, bucket_id: str) -> list[float] | None:
         """Retrieve stored embedding for a bucket. Returns None if not found."""
@@ -356,41 +429,23 @@ class EmbeddingEngine:
         if not self.enabled or not query_embedding:
             return []
 
-        # Load all embeddings from SQLite
-        conn = sqlite3.connect(self.db_path)
-        rows = conn.execute("SELECT bucket_id, embedding, model, dimension FROM embeddings").fetchall()
-        chunk_rows = conn.execute(
-            "SELECT scene_id, embedding, model, dimension FROM scene_embedding_chunks"
-        ).fetchall()
-        conn.close()
-
-        if not rows and not chunk_rows:
+        owner_ids, matrix = self._search_index_matrix()
+        if not owner_ids or matrix.size == 0:
             return []
 
-        # Aggregate all derived vectors back to their owning Scene. Chunk ids
-        # never leave this function and never become memory references.
-        best_scores: dict[str, float] = {}
-        for bucket_id, emb_json, model, dimension in rows:
-            try:
-                stored_embedding = json.loads(emb_json)
-                if not self._row_matches_current_model(model, dimension, stored_embedding):
-                    continue
-                sim = self._cosine_similarity(query_embedding, stored_embedding)
-                key = str(bucket_id)
-                best_scores[key] = max(best_scores.get(key, -1.0), sim)
-            except (json.JSONDecodeError, Exception):
-                continue
+        query_vector = np.asarray(query_embedding, dtype=np.float64)
+        if query_vector.ndim != 1 or query_vector.size != matrix.shape[1]:
+            return []
+        query_norm = float(np.linalg.norm(query_vector))
+        if query_norm <= 0:
+            return []
+        scores = matrix @ (query_vector / query_norm)
 
-        for scene_id, emb_json, model, dimension in chunk_rows:
-            try:
-                stored_embedding = json.loads(emb_json)
-                if not self._row_matches_current_model(model, dimension, stored_embedding):
-                    continue
-                sim = self._cosine_similarity(query_embedding, stored_embedding)
-                key = str(scene_id)
-                best_scores[key] = max(best_scores.get(key, -1.0), sim)
-            except (json.JSONDecodeError, Exception):
-                continue
+        # Aggregate all derived vectors back to their owning Scene. Chunk rows
+        # remain source-bound projections and never become memory references.
+        best_scores: dict[str, float] = {}
+        for owner_id, score in zip(owner_ids, scores.tolist()):
+            best_scores[owner_id] = max(best_scores.get(owner_id, -1.0), float(score))
 
         results = sorted(best_scores.items(), key=lambda x: x[1], reverse=True)
         return results[:top_k]

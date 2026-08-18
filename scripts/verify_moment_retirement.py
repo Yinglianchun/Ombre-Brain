@@ -2,6 +2,8 @@
 
 import sys
 import asyncio
+import json
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -77,6 +79,43 @@ async def main() -> None:
         results = await engine.search_similar_by_embedding([0.0, 1.0], top_k=5)
         assert results[0][0] == scene["id"]
         assert results[0][1] == 1.0
+        cached_matrix = engine._search_cache_matrix
+        repeated = await engine.search_similar_by_embedding([0.0, 1.0], top_k=5)
+        assert repeated == results
+        assert engine._search_cache_matrix is cached_matrix
+
+        conn = sqlite3.connect(engine.db_path)
+        conn.execute(
+            "INSERT INTO embeddings(bucket_id, embedding, model, dimension, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("scene-external", json.dumps([0.0, 1.0]), engine.model, 2, "later"),
+        )
+        conn.commit()
+        conn.close()
+        refreshed = await engine.search_similar_by_embedding([0.0, 1.0], top_k=5)
+        assert {item[0] for item in refreshed[:2]} == {scene["id"], "scene-external"}
+        assert engine._search_cache_matrix is not cached_matrix
+
+        refreshed_matrix = engine._search_cache_matrix
+        conn = sqlite3.connect(engine.db_path)
+        conn.execute(
+            "UPDATE embeddings SET embedding = ?, updated_at = ? WHERE bucket_id = ?",
+            (json.dumps([1.0, 0.0]), "latest", "scene-external"),
+        )
+        conn.commit()
+        conn.close()
+        same_count_refresh = await engine.search_similar_by_embedding(
+            [0.0, 1.0],
+            top_k=5,
+        )
+        external_score = dict(same_count_refresh)["scene-external"]
+        assert abs(external_score) < 1e-12
+        assert engine._search_cache_matrix is not refreshed_matrix
+
+        engine.delete_embedding(scene["id"])
+        after_delete = await engine.search_similar_by_embedding([0.0, 1.0], top_k=5)
+        assert after_delete[0][0] == "scene-external"
+        assert scene["id"] not in {item[0] for item in after_delete}
 
     print("MOMENT_RETIREMENT_OK")
 
