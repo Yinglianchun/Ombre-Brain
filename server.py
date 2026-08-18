@@ -54,6 +54,7 @@ import json as _json_lib
 import re
 import secrets
 import time
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any, Literal
 from typing_extensions import NotRequired, TypedDict
@@ -16431,31 +16432,42 @@ if __name__ == "__main__":
             _app = mcp.streamable_http_app()
         else:
             _app = mcp.sse_app()
-        if hasattr(_app, "add_event_handler"):
-            async def _start_decay_engine_on_app_startup():
-                await _ensure_decay_engine_started_for_transport(transport)
+        async def _start_decay_engine_on_app_startup():
+            await _ensure_decay_engine_started_for_transport(transport)
 
-            async def _reconcile_scene_edges_on_app_startup():
-                try:
-                    result = await scene_linker.reconcile_lifecycle(bucket_mgr)
-                    queued = [
-                        scene_id
-                        for scene_id in result.get("normal_relink_scene_ids", [])
-                        if _queue_scene_linking(scene_id)
-                    ]
-                    if result.get("status") != "skipped" or queued:
-                        logger.info(
-                            "Scene edge lifecycle maintenance complete / Scene 关系边生命周期维护完成: %s",
-                            {**result, "normal_relink_queued": queued},
-                        )
-                except Exception as exc:
-                    logger.warning(
-                        "Scene edge lifecycle maintenance failed / Scene 关系边生命周期维护失败: %s",
-                        exc,
+        async def _reconcile_scene_edges_on_app_startup():
+            try:
+                result = await scene_linker.reconcile_lifecycle(bucket_mgr)
+                queued = [
+                    scene_id
+                    for scene_id in result.get("normal_relink_scene_ids", [])
+                    if _queue_scene_linking(scene_id)
+                ]
+                if result.get("status") != "skipped" or queued:
+                    logger.info(
+                        "Scene edge lifecycle maintenance complete / Scene 关系边生命周期维护完成: %s",
+                        {**result, "normal_relink_queued": queued},
                     )
+            except Exception as exc:
+                logger.warning(
+                    "Scene edge lifecycle maintenance failed / Scene 关系边生命周期维护失败: %s",
+                    exc,
+                )
 
+        if hasattr(_app, "add_event_handler"):
             _app.add_event_handler("startup", _start_decay_engine_on_app_startup)
             _app.add_event_handler("startup", _reconcile_scene_edges_on_app_startup)
+        elif hasattr(getattr(_app, "router", None), "lifespan_context"):
+            original_lifespan = _app.router.lifespan_context
+
+            @asynccontextmanager
+            async def _ombre_lifespan(app):
+                async with original_lifespan(app) as state:
+                    await _start_decay_engine_on_app_startup()
+                    await _reconcile_scene_edges_on_app_startup()
+                    yield state
+
+            _app.router.lifespan_context = _ombre_lifespan
         _app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
