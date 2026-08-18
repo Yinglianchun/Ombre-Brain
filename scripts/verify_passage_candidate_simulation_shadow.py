@@ -349,6 +349,46 @@ async def verify_weak_trigger_controls_query_view_execution() -> None:
     assert query_view_service.embedding_engine.calls == []
 
 
+async def verify_full_handler_uses_prefetched_query_vector() -> None:
+    handler = GatewayService.__new__(GatewayService)
+    captured_vectors: list[list[float]] = []
+
+    async def fake_prepare_payload(self, *_args, **kwargs):
+        assert kwargs["semantic_recall_result"][1] == [0.25, 0.75]
+        return {}, ["scene-live"], {"semantic_recall_debug": {}}
+
+    async def fake_apply(self, _query, query_embedding, _semantic_debug, **_kwargs):
+        captured_vectors.append(query_embedding)
+
+    handler.prepare_payload = types.MethodType(fake_prepare_payload, handler)
+    handler._apply_passage_weak_candidate_query_view_shadow = types.MethodType(
+        fake_apply,
+        handler,
+    )
+    handler._hook_recall_cards_from_debug = lambda *_args, **_kwargs: []
+    handler._hook_recall_full_dynamic_context = lambda *_args, **_kwargs: ""
+    handler._clip_text = lambda text, _limit: text
+    handler._render_hook_recall_full_additional_context = lambda _context: ""
+
+    response = await handler._handle_hook_recall_full(
+        query=long_query,
+        session_id="weak-trigger-vector-check",
+        messages=[{"role": "user", "content": long_query}],
+        model="gpt-5.5",
+        max_cards=3,
+        max_chars=1000,
+        max_context_chars=4200,
+        include_diffused=False,
+        include_context_debug=False,
+        include_debug=True,
+        include_recent_context=False,
+        semantic_recall_result=({}, [0.25, 0.75]),
+        record_hook_injection=False,
+    )
+    assert response.status_code == 200
+    assert captured_vectors == [[0.25, 0.75]]
+
+
 async def verify_mutation_refresh_queue() -> None:
     refresh_service = GatewayService.__new__(GatewayService)
     refresh_service.passage_candidate_shadow_enabled = True
@@ -395,6 +435,7 @@ async def verify_mutation_refresh_queue() -> None:
 
 
 asyncio.run(verify_weak_trigger_controls_query_view_execution())
+asyncio.run(verify_full_handler_uses_prefetched_query_vector())
 asyncio.run(verify_mutation_refresh_queue())
 
 print("PASSAGE_CANDIDATE_SIMULATION_SHADOW_OK")

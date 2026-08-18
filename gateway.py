@@ -2665,6 +2665,11 @@ class GatewayService:
             "prepare_timing_debug": dict(debug_payload.get("prepare_timing_debug") or {}),
         }
         semantic_debug = debug_payload.get("semantic_recall_debug")
+        semantic_query_vector = (
+            semantic_recall_result[1]
+            if semantic_recall_result is not None
+            else None
+        )
         await self._apply_passage_weak_candidate_query_view_shadow(
             query,
             semantic_query_vector or [],
