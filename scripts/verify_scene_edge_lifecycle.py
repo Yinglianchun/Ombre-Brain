@@ -158,6 +158,14 @@ def main() -> None:
         revalidation = proposals.get(lifecycle["revalidation_proposal_ids"][0])
         assert revalidation["proposal_origin"] == "snapshot_revalidation"
         assert revalidation["supersedes_edge_id"] == inactive["edge_id"]
+        automatic_overlap = proposals.replace_for_anchor(
+            source,
+            {target["id"]: target},
+            [edge(source["id"], target["id"], 0.99)],
+            model="automatic-overlap",
+        )
+        assert automatic_overlap == []
+        assert proposals.get(revalidation["proposal_id"])["status"] == "pending"
 
         reaccepted = proposals.promote(revalidation["proposal_id"], reviewed_by="Rain")
         assert reaccepted and reaccepted["edge"]["active"] is True
@@ -237,6 +245,34 @@ def main() -> None:
         assert maintenance["formal_edges_needing_review"] == 1
         assert len(maintenance["revalidation_proposal_ids"]) == 1
         assert maintenance["normal_relink_scene_ids"] == []
+
+        lost_revalidation_id = maintenance["revalidation_proposal_ids"][0]
+        proposals.set_status(lost_revalidation_id, "superseded", expected_status="pending")
+        automatic_edge = {
+            "anchor_scene_id": source["id"],
+            "candidate_scene_id": target["id"],
+            "source_scene_id": relinked_edge["source"],
+            "target_scene_id": relinked_edge["target"],
+            "relation_type": relinked_edge["relation_type"],
+            "directionality": relinked_edge["directionality"],
+            "confidence": 0.99,
+            "reason": relinked_edge["reason"],
+            "source_evidence": relinked_edge["source_evidence"],
+            "target_evidence": relinked_edge["target_evidence"],
+        }
+        created_automatic = proposals.replace_for_anchor(
+            source,
+            {target["id"]: target},
+            [automatic_edge],
+            model="automatic-before-repair",
+        )
+        assert created_automatic[0]["proposal_origin"] == "automatic"
+        repaired = asyncio.run(linker.reconcile_lifecycle(manager))
+        assert len(repaired["repaired_revalidation_proposal_ids"]) == 1
+        repaired_row = proposals.get(repaired["repaired_revalidation_proposal_ids"][0])
+        assert repaired_row["proposal_origin"] == "snapshot_revalidation"
+        assert repaired_row["status"] == "pending"
+        assert proposals.get(created_automatic[0]["proposal_id"])["status"] == "superseded"
 
     print("scene edge lifecycle verification passed")
 

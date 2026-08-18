@@ -26,6 +26,12 @@ SCENE_EDGE_LIFECYCLE_STATUSES = frozenset(
 SCENE_EDGE_PROPOSAL_ORIGINS = frozenset(
     {"automatic", "manual", "snapshot_revalidation", "manual_relink"}
 )
+SCENE_EDGE_PROPOSAL_ORIGIN_PRIORITY = {
+    "automatic": 0,
+    "snapshot_revalidation": 1,
+    "manual": 2,
+    "manual_relink": 2,
+}
 SCENE_EDGE_REVIEW_CONFIRMATIONS = {
     "accept": "ACCEPT_SCENE_EDGE",
     "reject": "REJECT_SCENE_EDGE",
@@ -783,7 +789,7 @@ class SceneEdgeProposalStore:
             SELECT proposal_id, canonical_edge_id,
                    anchor_scene_id, source_scene_id, target_scene_id, relation_type,
                    anchor_hash, candidate_hash,
-                   confidence, updated_at, created_at
+                   confidence, proposal_origin, updated_at, created_at
               FROM scene_edge_proposals
              WHERE status = 'pending' AND canonical_edge_id <> ''
             """
@@ -823,6 +829,9 @@ class SceneEdgeProposalStore:
             keep = max(
                 proposals,
                 key=lambda row: (
+                    SCENE_EDGE_PROPOSAL_ORIGIN_PRIORITY.get(
+                        str(row["proposal_origin"] or "automatic"), 0
+                    ),
                     float(row["confidence"] or 0.0),
                     str(row["updated_at"] or ""),
                     str(row["created_at"] or ""),
@@ -871,6 +880,7 @@ class SceneEdgeProposalStore:
             UPDATE scene_edge_proposals
                SET status = 'superseded', updated_at = ?
              WHERE anchor_scene_id = ? AND linker_version = ? AND status = 'pending'
+               AND proposal_origin = 'automatic'
             """,
             (now, anchor_id, version),
         )
@@ -930,6 +940,8 @@ class SceneEdgeProposalStore:
                 (canonical_edge_id,),
             ).fetchone()
             if existing is not None:
+                if str(existing["proposal_origin"] or "automatic") != "automatic":
+                    continue
                 proposal_id = str(existing["proposal_id"])
                 existing_hashes = _scene_edge_snapshot_hashes(
                     str(existing["source_scene_id"] or ""),
@@ -1937,6 +1949,76 @@ class SceneLinker:
             if result.get("normal_relink_required"):
                 relink_scene_ids.append(scene_id)
 
+        pending_rows = proposal_store.list(status="pending", limit=1000)
+        rejected_rows = proposal_store.list(status="rejected", limit=1000)
+        repaired_revalidation_ids: list[str] = []
+        for edge in edges:
+            if edge["lifecycle_status"] != "needs_review":
+                continue
+            source = scene_map.get(edge["source"])
+            target = scene_map.get(edge["target"])
+            if not _is_authored_scene(source) or not _is_authored_scene(target):
+                continue
+            source_ok, _ = _evidence_is_verbatim(
+                str(source.get("content") or ""), edge["source_evidence"]
+            )
+            target_ok, _ = _evidence_is_verbatim(
+                str(target.get("content") or ""), edge["target_evidence"]
+            )
+            if not source_ok or not target_ok:
+                continue
+            current_hashes = (_scene_hash(source), _scene_hash(target))
+
+            def proposal_matches_current(row: dict) -> bool:
+                return _scene_edge_snapshot_hashes(
+                    str(row.get("source_scene_id") or ""),
+                    str(row.get("target_scene_id") or ""),
+                    str(row.get("relation_type") or ""),
+                    str(row.get("anchor_scene_id") or ""),
+                    str(row.get("anchor_hash") or ""),
+                    str(row.get("candidate_hash") or ""),
+                ) == current_hashes
+
+            protected_pending = any(
+                str(row.get("canonical_edge_id") or "") == edge["edge_id"]
+                and str(row.get("proposal_origin") or "automatic") != "automatic"
+                and proposal_matches_current(row)
+                for row in pending_rows
+            )
+            rejected_revalidation = any(
+                str(row.get("supersedes_edge_id") or "") == edge["edge_id"]
+                and str(row.get("proposal_origin") or "") == "snapshot_revalidation"
+                and proposal_matches_current(row)
+                for row in rejected_rows
+            )
+            if protected_pending or rejected_revalidation:
+                continue
+            result = proposal_store.create_review_proposal(
+                source,
+                target,
+                {
+                    "source_scene_id": edge["source"],
+                    "target_scene_id": edge["target"],
+                    "relation_type": edge["relation_type"],
+                    "directionality": edge["directionality"],
+                    "confidence": edge["confidence"],
+                    "reason": edge["reason"],
+                    "source_evidence": edge["source_evidence"],
+                    "target_evidence": edge["target_evidence"],
+                },
+                model="deterministic_revalidation",
+                proposal_origin="snapshot_revalidation",
+                created_by="startup_maintenance",
+                supersedes_edge_id=edge["edge_id"],
+                linker_version=edge["linker_version"] or SCENE_LINKER_VERSION,
+                nonce=f"startup_repair:{current_hashes[0]}:{current_hashes[1]}",
+            )
+            proposal = result.get("proposal") or {}
+            if proposal.get("proposal_id"):
+                proposal_id = str(proposal["proposal_id"])
+                repaired_revalidation_ids.append(proposal_id)
+                revalidation_ids.append(proposal_id)
+
         restored_archived: list[str] = []
         for edge in edges:
             if edge["lifecycle_status"] != "archived":
@@ -1953,6 +2035,7 @@ class SceneLinker:
             "stale_proposals_superseded": stale_pending,
             "formal_edges_needing_review": needs_review,
             "revalidation_proposal_ids": revalidation_ids,
+            "repaired_revalidation_proposal_ids": repaired_revalidation_ids,
             "normal_relink_scene_ids": relink_scene_ids,
             "archive_deactivated": archive_deactivated,
             "missing_scene_deactivated": missing_deactivated,
