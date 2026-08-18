@@ -23,9 +23,9 @@ services:
     volumes:
       # Mount your Obsidian vault (or any host directory) for persistent storage
       # 挂载你的 Obsidian 仓库（或任意宿主机目录）做持久化存储
-      # Example / 示例:
-      #   - /path/to/your/Obsidian Vault/Ombre Brain:/data
-      - /Users/p0lar1s/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian Vault/Ombre Brain:/data
+      # Set OMBRE_DATA_DIR in .env to override the default local data directory.
+      # 可在 .env 中设置 OMBRE_DATA_DIR，覆盖默认的本地数据目录。
+      - ${OMBRE_DATA_DIR:-./buckets}:/data
       - ./config.yaml:/app/config.yaml
 
   # Cloudflare Tunnel (optional) — expose to public internet
