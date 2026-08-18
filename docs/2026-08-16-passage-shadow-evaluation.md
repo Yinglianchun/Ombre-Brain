@@ -438,6 +438,39 @@ and add explicit present/current-state/context-required vetoes before the
 expensive branch. Re-run the same fixed suites without changing admission or
 injection.
 
+### Gate-tightening follow-ups
+
+`d5bb65d` required more than one query view and added branch-local
+current-turn/context vetoes. It reduced reviewed false-positive execution from
+7/11 to 2/11, saving five expansions or roughly 22.4 seconds over the gold set.
+However, it retained only one of the two executable formal misses: the focused
+initial-story query was incorrectly vetoed as `current_turn_optional`.
+
+`0ca878a` narrowed that veto to current-turn-optional queries with zero formal
+recalled memories. A 29-request shadow rerun covered one focused smoke, gold 22,
+and focused six; live pairs were not repeated because all 40 were single-view
+and the multi-view gate was unchanged.
+
+- Executable gold rescue recovered from 1/2 to 2/2; the third formal miss stayed
+  separately visible as single-view and therefore not solvable by query splitting.
+- Reviewed false-positive execution rose slightly from 2/11 to 3/11, still below
+  the original 7/11.
+- Gold query-view execution added zero labeled-correct parents. Three reviewed
+  false-positive queries exposed 11 added-parent noise occurrences; three
+  correct-labeled executions added seven non-target parent occurrences.
+- The focused initial-story query executed again but still added only the
+  unrelated pen-pal roster Scene and a thematically plausible non-target love
+  letter Scene.
+- All 29 requests retained the shadow contract; both health checks stayed green
+  and Gateway logs contained no traceback or error.
+
+This closes the gate experiment. The gate can reduce waste while preserving
+executable rescue, but clause expansion itself still has zero measured positive
+utility. Do not keep tuning gate thresholds to make trigger metrics look better.
+Any future splitter experiment must first target cases where the correct parent
+is absent from the original-query baseline and must demonstrate newly added
+correct parents over newly added noise.
+
 ### Updated decision
 
 1. Keep live recall unchanged.

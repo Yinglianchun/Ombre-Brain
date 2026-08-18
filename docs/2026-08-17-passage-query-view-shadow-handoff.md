@@ -16,7 +16,7 @@ shadow 直接切成 live，也不要同时重开 LLM planner、扩大 reranker p
 - 本地分支：`Haven/scene-event-passage-shadow-20260815`
 - 生产目标分支：`origin/Haven/diary-backend-20260724`
 - 德国源目录：`/opt/Ombre-Brain-src`
-- 当前 Gateway 运行代码：`ceff1ad`
+- 当前 Gateway 运行代码：`0ca878a`
 - 2026-08-18 发布与批测后已核验：生产 repo clean，Gateway 新容器 healthy，18001 / 18002
   均 HTTP 200；Ombre Brain 没有重启，canonical 数据没有修改。
 
@@ -50,6 +50,8 @@ shadow 直接切成 live，也不要同时重开 LLM planner、扩大 reranker p
 5. `f24e393 Refresh passage shadows after memory mutations`
 6. `f78c5ce Gate clause query shadow on weak candidates`
 7. `ceff1ad Pass semantic vector into gated shadow`
+8. `d5bb65d Tighten query view execution gate`
+9. `0ca878a Preserve gray-zone query view rescue`
 
 ### 已发布的派生索引自动刷新
 
@@ -219,6 +221,29 @@ traceback/error。
 2. expensive branch 前增加 present/current-state/context-required veto；
 3. 原样重跑同一固定套件。
 
+### Gate 收紧后的最终结果
+
+`d5bb65d` 先要求 multi-view，并加入 current-turn/context branch veto：
+
+- reviewed false-positive 真执行从 7/11 降到 2/11，省 5 次，约 22.4 秒；
+- 但两个 executable formal miss 只保住 1 个，聚焦初遇被
+  `current_turn_optional_query_view_veto` 误杀；
+- 说明 surface route + optional structure 仍不能独立否决混合长句。
+
+`0ca878a` 把 current-turn veto 收窄到 `formal_recalled_count == 0`：
+
+- executable gold rescue 恢复为 2/2；第三个 formal miss 是 single-view，只能作为“值得
+  救但分句无能为力”单列；
+- reviewed false-positive 真执行为 3/11，仍比原始 7/11 少 4 次；
+- gold 新增正确 parent 仍为 0；三个 false-positive 暴露 11 个新增噪声 occurrence，三个
+  correct 执行新增 7 个 parent 也都不是 target；
+- 聚焦初遇恢复执行，但仍只新增无关的笔友名册 Scene 和非 target 的情书 Scene；
+- 29 次复测 contract violation 0，双 health 200，Gateway 无 traceback/error。
+
+因此 gate 实验到这里结束。它证明了“可以更会挑什么时候尝试”，没有证明“分句尝试后
+能新增正确候选”。不要继续为了 trigger precision 调阈值。若未来重开 splitter，gold 必须
+先限定为 target 不在 original-query baseline，并直接比较新增正确与新增噪声。
+
 ## 已否掉或暂不上线的方向
 
 - DeepSeek query planner：正例不稳定，猫狐重复三次排名 1/4/4，平均 fallback
@@ -280,11 +305,11 @@ Passage 找局部句子；reranker 选 seed；arc 限制故事线；Scene edge �
 
 1. 先读本文件和 `docs/2026-08-16-passage-shadow-evaluation.md`，不要重跑已经否掉的
    planner、critic、pool 12、8B 实验。
-2. `ceff1ad` weak-trigger shadow 和固定套件已完成；不要再重跑本轮 70 请求。
-3. 下一刀只做 multi-view executable 条件与 present/current-state/context-required veto，
-   formal recall/injection 继续不变。
-4. 用同一 gold、live pairs 和六个重点样本复测，比较触发、真实执行、新增 parent 与延迟。
-5. 只有弱触发 gate 稳定后，才另开 graph one-hop shadow；不要同一提交里加 arc cluster。
+2. `0ca878a` gate 收紧与复测已完成；不要再重跑本轮 70 + 70 + 29 请求。
+3. 停止继续调 weak-trigger 阈值；当前 splitter 没有新增正确 parent，不能升 live。
+4. 若重开 splitter，先建立“target 明确缺席 baseline”的 fixed gold，再验证 expansion
+   utility；不能拿 trigger accuracy 代替召回收益。
+5. Graph one-hop 与 arc cluster 仍然分开；不要用图去掩盖第一跳 splitter 无收益。
 6. arc cluster 先离线产 proposal/review artifact，不进入 hot path，不生成新的 canonical
    summary。
 
@@ -309,13 +334,13 @@ Passage 找局部句子；reranker 选 seed；arc 限制故事线；Scene edge �
 所有 query-view、weak-trigger、passage expansion 和 Scene diffusion 都是 shadow。
 不要把 expanded candidates 或 UI 诊断说成 live injection。
 
-`ceff1ad` 已发布。若后续再改 tracked 文件，仍走唯一生产链：本地精确改动 -> commit ->
+`0ca878a` 已发布。若后续再改 tracked 文件，仍走唯一生产链：本地精确改动 -> commit ->
 push 当前生产分支 -> 德国标准部署。不要 SCP/rsync 覆盖 tracked 运行文件。
 
 ## 一句话接手口径
 
-分句 + source-bound passage 能扩张候选，但当前 weak gate 在 reviewed negatives 上严重
-过触发，且本轮没有新增 labeled correct parent；下一刀先要求 multi-view，再挡住
-present/current-state/context-required，继续 shadow，不碰 admission/injection。
+gate 已经能减少垃圾执行并保住 2/2 executable rescue，但分句扩张仍新增正确 0、噪声多。
+当前方案保持 shadow，不升 live，也不继续调 gate；未来只有在 target 缺席 baseline 的
+固定 gold 上证明 expansion utility 为正，才值得重开 splitter。
 图只能从可靠 seed 补一跳，叙事弧只能先做限制图噪声的 derived index，二者都不能替代
 第一跳检索，也不能直接获得注入权。
