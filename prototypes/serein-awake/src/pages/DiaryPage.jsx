@@ -72,6 +72,11 @@ const formatDarkroomCountdown = (totalSeconds) => {
   return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
 };
 
+const isDarkroomEntryLocked = (entry, now) => {
+  const unlockTime = new Date(entry.unlockAt).getTime();
+  return Number.isFinite(unlockTime) ? now < unlockTime : entry.locked === true;
+};
+
 export function DiaryPage() {
   const readerRef = useRef(null);
   const [diaryUserIdentity, setDiaryUserIdentity] = useState(readDiaryUserIdentity);
@@ -169,13 +174,10 @@ export function DiaryPage() {
   const calendarEntries = calendarDate ? entriesByDate.get(calendarDate) ?? [] : [];
   const selectedDayEntries = selectedEntry ? entriesByDate.get(selectedEntry.date) ?? [] : [];
   const selectedDayIndex = selectedDayEntries.findIndex((entry) => entry.id === selectedEntry?.id);
-  const lockedDarkroomEntry = darkroomEntries.find((entry) => (
-    entry.locked === true
-    || (entry.unlockAt && new Date(entry.unlockAt).getTime() > darkroomClock)
-  ));
+  const lockedDarkroomEntry = darkroomEntries.find((entry) => isDarkroomEntryLocked(entry, darkroomClock));
   const darkroomUnlockAt = lockedDarkroomEntry?.unlockAt || defaultDarkroom.unlockAt;
   const darkroomUnlockTime = new Date(darkroomUnlockAt).getTime();
-  const darkroomLocked = lockedDarkroomEntry?.locked === true || darkroomClock < darkroomUnlockTime;
+  const darkroomLocked = lockedDarkroomEntry != null;
   const darkroomRemainingSeconds = Math.max(0, Math.ceil((darkroomUnlockTime - darkroomClock) / 1000));
   const selectedDarkroomEntry = darkroomEntries.find((entry) => entry.id === darkroomEntryId)
     ?? darkroomEntries[0]
@@ -199,6 +201,20 @@ export function DiaryPage() {
     return () => {
       lineTimers.forEach((timer) => window.clearTimeout(timer));
       window.clearInterval(clockTimer);
+    };
+  }, [darkroomLocked, darkroomOpen]);
+
+  useEffect(() => {
+    if (!darkroomOpen || darkroomLocked || !darkroomEntries.some((entry) => entry.locked === true)) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    loadDiarySnapshot().then((snapshotEntries) => {
+      if (!cancelled && snapshotEntries?.length) setEntries(sortEntries(snapshotEntries));
+    });
+    return () => {
+      cancelled = true;
     };
   }, [darkroomLocked, darkroomOpen]);
 
