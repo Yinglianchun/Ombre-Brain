@@ -16330,6 +16330,17 @@ class GatewayService:
         )
         mark("strong_literal_evidence", stage_started_at)
         stage_started_at = time.perf_counter()
+        authored_cue_query_term_keys = (
+            {
+                self._compact_lookup_key(term)
+                for term in self._specific_query_terms(raw_query)
+                if self._matched_query_term_is_specific(term)
+                and self._compact_lookup_key(term)
+            }
+            if not optional_shallow_probe
+            else set()
+        )
+        authored_cue_term_cache: dict[str, set[str]] = {}
         authored_cue_debug = (
             {
                 str(bucket.get("id") or ""): cue_terms
@@ -16340,6 +16351,8 @@ class GatewayService:
                         raw_query,
                         bucket,
                         literal_only=optional_shallow_probe,
+                        query_term_keys=authored_cue_query_term_keys,
+                        cue_term_cache=authored_cue_term_cache,
                     )
                 )
             }
@@ -17102,21 +17115,19 @@ class GatewayService:
         key = self._compact_lookup_key(term)
         if not key:
             return False
-        generic_keys = {
-            self._compact_lookup_key(value)
-            for value in GENERIC_KEYWORD_MATCH_TERMS
-            if self._compact_lookup_key(value)
-        }
-        generic_keys.update(
-            self._compact_lookup_key(value)
-            for value in GENERIC_LEXICAL_STOPWORDS
-            if self._compact_lookup_key(value)
-        )
-        generic_keys.update(
-            self._compact_lookup_key(value)
-            for value in QUERY_PLANNER_GENERIC_TERMS
-            if self._compact_lookup_key(value)
-        )
+        generic_keys = getattr(self, "_generic_query_term_keys_cache", None)
+        if generic_keys is None:
+            generic_keys = {
+                self._compact_lookup_key(value)
+                for values in (
+                    GENERIC_KEYWORD_MATCH_TERMS,
+                    GENERIC_LEXICAL_STOPWORDS,
+                    QUERY_PLANNER_GENERIC_TERMS,
+                )
+                for value in values
+                if self._compact_lookup_key(value)
+            }
+            self._generic_query_term_keys_cache = generic_keys
         return key not in generic_keys
 
     @staticmethod
@@ -17129,6 +17140,8 @@ class GatewayService:
         bucket: dict,
         *,
         literal_only: bool = False,
+        query_term_keys: set[str] | None = None,
+        cue_term_cache: dict[str, set[str]] | None = None,
     ) -> list[str]:
         if not query or not isinstance(bucket, dict):
             return []
@@ -17161,23 +17174,32 @@ class GatewayService:
                 for cue in cues
                 if (cue_key := self._compact_lookup_key(cue)) and cue_key in query_key
             ]
-        query_term_keys = {
-            self._compact_lookup_key(term)
-            for term in self._specific_query_terms(query)
-            if self._matched_query_term_is_specific(term)
-            and self._compact_lookup_key(term)
-        }
+        if query_term_keys is None:
+            query_term_keys = {
+                self._compact_lookup_key(term)
+                for term in self._specific_query_terms(query)
+                if self._matched_query_term_is_specific(term)
+                and self._compact_lookup_key(term)
+            }
         matched: list[str] = []
         for cue in cues:
             cue_key = self._compact_lookup_key(cue)
             if not cue_key:
                 continue
-            cue_term_keys = {
-                self._compact_lookup_key(term)
-                for term in self._specific_query_terms(cue)
-                if self._matched_query_term_is_specific(term)
-                and self._compact_lookup_key(term)
-            }
+            cue_term_keys = (
+                cue_term_cache.get(cue)
+                if cue_term_cache is not None
+                else None
+            )
+            if cue_term_keys is None:
+                cue_term_keys = {
+                    self._compact_lookup_key(term)
+                    for term in self._specific_query_terms(cue)
+                    if self._matched_query_term_is_specific(term)
+                    and self._compact_lookup_key(term)
+                }
+                if cue_term_cache is not None:
+                    cue_term_cache[cue] = cue_term_keys
             shared_keys = query_term_keys & cue_term_keys
             paraphrase_match = (
                 any(len(key) >= 4 for key in shared_keys)
