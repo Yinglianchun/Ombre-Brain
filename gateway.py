@@ -14254,6 +14254,9 @@ class GatewayService:
             and all(context_reference_re.search(view) for view in clause_views)
         )
         current_turn_optional = optional_shallow_probe_allowed(retrieval_budget)
+        current_turn_optional_veto = bool(
+            current_turn_optional and recalled_count == 0
+        )
 
         would_trigger = False
         reason = "strong_candidate"
@@ -14265,7 +14268,7 @@ class GatewayService:
             reason = "strong_candidate"
         elif not multi_clause:
             reason = "single_query_view_no_expansion"
-        elif current_turn_optional:
+        elif current_turn_optional_veto:
             reason = "current_turn_optional_query_view_veto"
         elif all_clause_views_require_context and not has_previous_turn:
             reason = "context_required_query_view_veto"
@@ -14294,6 +14297,7 @@ class GatewayService:
                 "has_previous_turn": has_previous_turn,
                 "all_clause_views_require_context": all_clause_views_require_context,
                 "current_turn_optional": current_turn_optional,
+                "current_turn_optional_veto": current_turn_optional_veto,
                 "veto_reason": "" if would_trigger else reason,
             },
             "thresholds": {

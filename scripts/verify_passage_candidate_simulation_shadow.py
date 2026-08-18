@@ -347,8 +347,33 @@ async def verify_weak_trigger_controls_query_view_execution() -> None:
     assert current_trigger["would_trigger"] is False
     assert current_trigger["reason"] == "current_turn_optional_query_view_veto"
     assert current_trigger["execution_gate"]["current_turn_optional"] is True
+    assert current_trigger["execution_gate"]["current_turn_optional_veto"] is True
     assert query_view_service.embedding_engine.calls == []
 
+    current_gray_semantic = semantic_payload(
+        0.6088,
+        memory_need="optional",
+        surface_route="present_reality",
+    )
+    await query_view_service._apply_passage_weak_candidate_query_view_shadow(
+        current_query,
+        [1.0, 0.0],
+        current_gray_semantic,
+        recalled_ids=["scene-live"],
+    )
+    current_gray_passage = current_gray_semantic["retrieval_budget"][
+        "passage_candidate_shadow"
+    ]
+    current_gray_trigger = current_gray_passage["weak_candidate_trigger_shadow"]
+    assert current_gray_trigger["would_trigger"] is True
+    assert current_gray_trigger["reason"] == "multiclause_body_semantic_gray_zone"
+    assert current_gray_trigger["execution_gate"]["current_turn_optional"] is True
+    assert current_gray_trigger["execution_gate"]["current_turn_optional_veto"] is False
+    assert query_view_service.embedding_engine.calls == (
+        query_view_service._deterministic_passage_query_views(current_query)[1:]
+    )
+
+    query_view_service.embedding_engine.calls.clear()
     context_query = "这种方式是不是不对？那件事后来怎么办"
     context_semantic = semantic_payload(0.0)
     await query_view_service._apply_passage_weak_candidate_query_view_shadow(
