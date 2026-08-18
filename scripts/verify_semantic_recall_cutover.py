@@ -204,6 +204,20 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
     assert mirrored_semantic["direct_skip"]["applied"] is True
     assert "retrieval_budget" not in mirrored_semantic
 
+    invalid_query_view_scope = await service.handle_hook_recall(
+        RequestStub({
+            "query": "老公亲亲抱抱",
+            "recall_mode": "full",
+            "simulation": True,
+            "simulation_scope": "live_mirror",
+            "passage_query_view_shadow": True,
+        })
+    )
+    assert invalid_query_view_scope.status_code == 400
+    assert json.loads(invalid_query_view_scope.body)["error"] == (
+        "passage_query_view_shadow_requires_full_shadow_simulation"
+    )
+
     async def full_recall(**kwargs):
         raise AssertionError("full recall must not run after a semantic skip")
 

@@ -2242,6 +2242,19 @@ class GatewayService:
         full_shadow_probe = bool(simulation_probe and simulation_scope == "full_shadow")
         if simulation_probe:
             include_debug = True
+        passage_query_view_shadow_requested = self._truthy_header(
+            str(body.get("passage_query_view_shadow"))
+            if body.get("passage_query_view_shadow") is not None
+            else None
+        )
+        if passage_query_view_shadow_requested and not full_shadow_probe:
+            return JSONResponse(
+                {
+                    "error": "passage_query_view_shadow_requires_full_shadow_simulation",
+                    "message": "分句 passage 实验只允许显式 full-shadow 模拟请求。",
+                },
+                status_code=400,
+            )
         try:
             recall_ablation_mode = normalize_recall_ablation_mode(body.get("recall_ablation"))
         except ValueError as exc:
@@ -2405,7 +2418,7 @@ class GatewayService:
                 semantic_query_vector or [],
                 semantic_recall_debug,
                 recalled_ids=[],
-                messages=messages,
+                execution_enabled=passage_query_view_shadow_requested,
             )
             narrative_recall_debug = self._narrative_roll_shadow_debug(
                 query,
@@ -2456,6 +2469,7 @@ class GatewayService:
                 include_debug=include_debug,
                 include_recent_context=include_recent_context,
                 semantic_recall_result=(semantic_recall_debug, semantic_query_vector),
+                passage_query_view_shadow_enabled=passage_query_view_shadow_requested,
                 record_hook_injection=record_hook_injection,
             )
 
@@ -2618,6 +2632,7 @@ class GatewayService:
         include_debug: bool,
         include_recent_context: bool,
         semantic_recall_result: tuple[dict[str, Any], list[float] | None] | None = None,
+        passage_query_view_shadow_enabled: bool = False,
         record_hook_injection: bool = False,
     ) -> JSONResponse:
         """Run the normal Gateway recall pipeline without forwarding upstream."""
@@ -2676,7 +2691,7 @@ class GatewayService:
             semantic_query_vector or [],
             semantic_debug,
             recalled_ids=recalled_ids,
-            messages=messages,
+            execution_enabled=passage_query_view_shadow_enabled,
         )
         ablation_observation = (
             semantic_debug.get("live_recall_ablation_observation")
@@ -14188,7 +14203,6 @@ class GatewayService:
         semantic_recall_debug: dict[str, Any] | None,
         *,
         recalled_ids: list[str],
-        messages: list[dict[str, Any]] | None = None,
     ) -> None:
         if not isinstance(semantic_recall_debug, dict):
             return
@@ -14236,23 +14250,6 @@ class GatewayService:
             weak_candidate_detected = True
             weak_candidate_reason = "multiclause_body_semantic_gray_zone"
 
-        user_turn_count = sum(
-            1
-            for message in messages or []
-            if isinstance(message, dict)
-            and message.get("role") == "user"
-            and self._coerce_message_text(message.get("content")).strip()
-        )
-        has_previous_turn = user_turn_count > 1
-        context_reference_re = re.compile(
-            r"(?:这样|这种|那样|那种|这件事|那件事|刚才|刚刚|"
-            r"(?:^|[，。！？、\s]|然后|所以)(?:她|他|它|他们|她们|它们))"
-        )
-        clause_views = query_views[1:]
-        all_clause_views_require_context = bool(
-            clause_views
-            and all(context_reference_re.search(view) for view in clause_views)
-        )
         current_turn_optional = optional_shallow_probe_allowed(retrieval_budget)
         current_turn_optional_veto = bool(
             current_turn_optional and recalled_count == 0
@@ -14270,8 +14267,6 @@ class GatewayService:
             reason = "single_query_view_no_expansion"
         elif current_turn_optional_veto:
             reason = "current_turn_optional_query_view_veto"
-        elif all_clause_views_require_context and not has_previous_turn:
-            reason = "context_required_query_view_veto"
         else:
             would_trigger = True
             reason = weak_candidate_reason
@@ -14294,8 +14289,6 @@ class GatewayService:
             "execution_gate": {
                 "eligible": would_trigger,
                 "requires_multiple_views": True,
-                "has_previous_turn": has_previous_turn,
-                "all_clause_views_require_context": all_clause_views_require_context,
                 "current_turn_optional": current_turn_optional,
                 "current_turn_optional_veto": current_turn_optional_veto,
                 "veto_reason": "" if would_trigger else reason,
@@ -14313,13 +14306,12 @@ class GatewayService:
         semantic_recall_debug: dict[str, Any] | None,
         *,
         recalled_ids: list[str],
-        messages: list[dict[str, Any]] | None = None,
+        execution_enabled: bool = False,
     ) -> None:
         self._attach_passage_weak_candidate_trigger_shadow(
             query,
             semantic_recall_debug,
             recalled_ids=recalled_ids,
-            messages=messages,
         )
         if not isinstance(semantic_recall_debug, dict):
             return
@@ -14333,10 +14325,23 @@ class GatewayService:
         if not isinstance(trigger, dict):
             return
 
-        trigger["decision_applied"] = True
-        trigger["query_view_execution_changed"] = True
         trigger["execution_scope"] = "simulation_shadow_only"
         query_views = self._deterministic_passage_query_views(query)
+        if not execution_enabled:
+            passage_shadow["query_view_shadow"] = {
+                "status": "disabled_explicit_opt_in_required",
+                "decision_applied": False,
+                "execution_trigger_applied": False,
+                "live_injection_enabled": False,
+                "trigger_reason": str(trigger.get("reason") or "not_enabled"),
+                "views": query_views,
+                "candidate_count": 0,
+                "candidates": [],
+            }
+            return
+
+        trigger["decision_applied"] = True
+        trigger["query_view_execution_changed"] = True
         if not trigger.get("would_trigger"):
             passage_shadow["query_view_shadow"] = {
                 "status": "skipped_by_weak_candidate_trigger",

@@ -294,12 +294,29 @@ async def verify_weak_trigger_controls_query_view_execution() -> None:
         }
 
     query_view_service.embedding_engine.calls.clear()
+    disabled_semantic = semantic_payload(0.6088)
+    await query_view_service._apply_passage_weak_candidate_query_view_shadow(
+        long_query,
+        [1.0, 0.0],
+        disabled_semantic,
+        recalled_ids=["scene-live"],
+    )
+    disabled_passage = disabled_semantic["retrieval_budget"][
+        "passage_candidate_shadow"
+    ]
+    assert disabled_passage["query_view_shadow"]["status"] == (
+        "disabled_explicit_opt_in_required"
+    )
+    assert disabled_passage["query_view_shadow"]["execution_trigger_applied"] is False
+    assert query_view_service.embedding_engine.calls == []
+
     weak_semantic = semantic_payload(0.6088)
     await query_view_service._apply_passage_weak_candidate_query_view_shadow(
         long_query,
         [1.0, 0.0],
         weak_semantic,
         recalled_ids=["scene-live"],
+        execution_enabled=True,
     )
     weak_passage = weak_semantic["retrieval_budget"]["passage_candidate_shadow"]
     weak_applied = weak_passage["weak_candidate_trigger_shadow"]
@@ -319,6 +336,7 @@ async def verify_weak_trigger_controls_query_view_execution() -> None:
         [1.0, 0.0],
         single_view_semantic,
         recalled_ids=[],
+        execution_enabled=True,
     )
     single_view_passage = single_view_semantic["retrieval_budget"][
         "passage_candidate_shadow"
@@ -341,6 +359,7 @@ async def verify_weak_trigger_controls_query_view_execution() -> None:
         [1.0, 0.0],
         current_semantic,
         recalled_ids=[],
+        execution_enabled=True,
     )
     current_passage = current_semantic["retrieval_budget"]["passage_candidate_shadow"]
     current_trigger = current_passage["weak_candidate_trigger_shadow"]
@@ -360,6 +379,7 @@ async def verify_weak_trigger_controls_query_view_execution() -> None:
         [1.0, 0.0],
         current_gray_semantic,
         recalled_ids=["scene-live"],
+        execution_enabled=True,
     )
     current_gray_passage = current_gray_semantic["retrieval_budget"][
         "passage_candidate_shadow"
@@ -374,48 +394,13 @@ async def verify_weak_trigger_controls_query_view_execution() -> None:
     )
 
     query_view_service.embedding_engine.calls.clear()
-    context_query = "这种方式是不是不对？那件事后来怎么办"
-    context_semantic = semantic_payload(0.0)
-    await query_view_service._apply_passage_weak_candidate_query_view_shadow(
-        context_query,
-        [1.0, 0.0],
-        context_semantic,
-        recalled_ids=[],
-    )
-    context_passage = context_semantic["retrieval_budget"]["passage_candidate_shadow"]
-    context_trigger = context_passage["weak_candidate_trigger_shadow"]
-    assert context_trigger["would_trigger"] is False
-    assert context_trigger["reason"] == "context_required_query_view_veto"
-    assert query_view_service.embedding_engine.calls == []
-
-    context_with_previous = semantic_payload(0.0)
-    await query_view_service._apply_passage_weak_candidate_query_view_shadow(
-        context_query,
-        [1.0, 0.0],
-        context_with_previous,
-        recalled_ids=[],
-        messages=[
-            {"role": "user", "content": "我们刚才在说旧窗口的交接方式"},
-            {"role": "user", "content": context_query},
-        ],
-    )
-    previous_passage = context_with_previous["retrieval_budget"][
-        "passage_candidate_shadow"
-    ]
-    previous_trigger = previous_passage["weak_candidate_trigger_shadow"]
-    assert previous_trigger["would_trigger"] is True
-    assert previous_trigger["execution_gate"]["has_previous_turn"] is True
-    assert query_view_service.embedding_engine.calls == (
-        query_view_service._deterministic_passage_query_views(context_query)[1:]
-    )
-
-    query_view_service.embedding_engine.calls.clear()
     strong_semantic = semantic_payload(0.71)
     await query_view_service._apply_passage_weak_candidate_query_view_shadow(
         long_query,
         [1.0, 0.0],
         strong_semantic,
         recalled_ids=["scene-strong"],
+        execution_enabled=True,
     )
     strong_passage = strong_semantic["retrieval_budget"]["passage_candidate_shadow"]
     assert strong_passage["query_view_shadow"]["status"] == (
@@ -430,6 +415,7 @@ async def verify_weak_trigger_controls_query_view_execution() -> None:
         [1.0, 0.0],
         exact_semantic,
         recalled_ids=["scene-exact"],
+        execution_enabled=True,
     )
     exact_passage = exact_semantic["retrieval_budget"]["passage_candidate_shadow"]
     assert exact_passage["query_view_shadow"]["status"] == (
@@ -444,6 +430,7 @@ async def verify_weak_trigger_controls_query_view_execution() -> None:
         [1.0, 0.0],
         skip_semantic,
         recalled_ids=[],
+        execution_enabled=True,
     )
     skip_passage = skip_semantic["retrieval_budget"]["passage_candidate_shadow"]
     assert skip_passage["query_view_shadow"]["status"] == (
@@ -461,7 +448,8 @@ async def verify_full_handler_uses_prefetched_query_vector() -> None:
         assert kwargs["semantic_recall_result"][1] == [0.25, 0.75]
         return {}, ["scene-live"], {"semantic_recall_debug": {}}
 
-    async def fake_apply(self, _query, query_embedding, _semantic_debug, **_kwargs):
+    async def fake_apply(self, _query, query_embedding, _semantic_debug, **kwargs):
+        assert kwargs["execution_enabled"] is True
         captured_vectors.append(query_embedding)
 
     handler.prepare_payload = types.MethodType(fake_prepare_payload, handler)
@@ -487,6 +475,7 @@ async def verify_full_handler_uses_prefetched_query_vector() -> None:
         include_debug=True,
         include_recent_context=False,
         semantic_recall_result=({}, [0.25, 0.75]),
+        passage_query_view_shadow_enabled=True,
         record_hook_injection=False,
     )
     assert response.status_code == 200

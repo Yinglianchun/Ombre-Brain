@@ -205,6 +205,7 @@ def evaluate_case(
         "recall_mode": "full",
         "simulation": True,
         "simulation_scope": "full_shadow",
+        "passage_query_view_shadow": True,
         "include_debug": True,
         "include_context": False,
         "include_recent_context": False,
