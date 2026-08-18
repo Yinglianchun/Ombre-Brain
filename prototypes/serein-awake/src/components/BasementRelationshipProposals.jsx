@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowClockwise, Check, LinkSimple, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowCounterClockwise, Check, LinkSimple, Plus, Trash, WarningCircle, X } from "@phosphor-icons/react";
 import { MarkdownProjection } from "./MarkdownProjection.jsx";
 
 const statusLabels = {
@@ -12,6 +12,7 @@ const statusLabels = {
 
 const relationLabels = {
   evidenced_by: "彼此印证",
+  echoes: "彼此回响",
   follows: "后来发生",
   continues: "延续",
   contrasts_with: "形成对照",
@@ -19,23 +20,55 @@ const relationLabels = {
   resolves: "回应 / 化解",
 };
 
+const lifecycleLabels = {
+  active: "正在使用",
+  needs_review: "Scene 改过，待重验",
+  cancelled: "已取消",
+  archived: "随 Scene 归档",
+  replaced: "已被新关系替代",
+};
+
+const emptyDraft = () => ({
+  sourceSceneId: "",
+  targetSceneId: "",
+  relationType: "continues",
+  sourceEvidence: "",
+  targetEvidence: "",
+  reason: "",
+  supersedesEdgeId: "",
+});
+
 export function BasementRelationshipProposals() {
   const [filter, setFilter] = useState("pending");
   const [state, setState] = useState({ status: "loading", payload: null, error: "" });
   const [reviewingId, setReviewingId] = useState("");
   const [scenePreview, setScenePreview] = useState(null);
+  const [edgeActionId, setEdgeActionId] = useState("");
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [draft, setDraft] = useState(emptyDraft);
 
   const load = async (nextFilter = filter) => {
     setState((current) => ({ ...current, status: "loading", error: "" }));
     try {
-      const response = await fetch("/__serein/memory/scene-edge-proposals", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: nextFilter, limit: 50 }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload?.message || payload?.error || "没有读到关系提案");
-      setState({ status: "done", payload, error: "" });
+      const [proposalResponse, edgeResponse] = await Promise.all([
+        fetch("/__serein/memory/scene-edge-proposals", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: nextFilter, limit: 50 }),
+        }),
+        fetch("/__serein/memory/scene-edges", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        }),
+      ]);
+      const [proposalPayload, edgePayload] = await Promise.all([
+        proposalResponse.json(),
+        edgeResponse.json(),
+      ]);
+      if (!proposalResponse.ok) throw new Error(proposalPayload?.message || proposalPayload?.error || "没有读到关系提案");
+      if (!edgeResponse.ok) throw new Error(edgePayload?.message || edgePayload?.error || "没有读到关系边历史");
+      setState({ status: "done", payload: { ...proposalPayload, edges: edgePayload.edges || [] }, error: "" });
     } catch (error) {
       setState({ status: "error", payload: null, error: error instanceof Error ? error.message : "没有读到关系提案" });
     }
@@ -53,6 +86,7 @@ export function BasementRelationshipProposals() {
   }, [scenePreview]);
 
   const proposals = state.payload?.proposals ?? [];
+  const edges = state.payload?.edges ?? [];
   const openScenePreview = async (sceneId, fallback = {}) => {
     if (!sceneId) return;
     setScenePreview({
@@ -112,6 +146,81 @@ export function BasementRelationshipProposals() {
     }
   };
 
+  const submitManualProposal = async (event) => {
+    event.preventDefault();
+    setEdgeActionId(draft.supersedesEdgeId || "manual-proposal");
+    try {
+      const response = await fetch("/__serein/memory/create-scene-edge-proposal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(draft),
+      });
+      const payload = await response.json();
+      if (!response.ok || !["pending", "already_active"].includes(payload.status)) {
+        throw new Error(payload?.message || payload?.reason || payload?.error || "没有创建这条关系提案");
+      }
+      setDraft(emptyDraft());
+      setComposerOpen(false);
+      setFilter("pending");
+      await load("pending");
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "没有创建这条关系提案");
+    } finally {
+      setEdgeActionId("");
+    }
+  };
+
+  const cancelEdge = async (edge) => {
+    if (!window.confirm(`取消「${edge.source_title || edge.source} → ${edge.target_title || edge.target}」？\n\n关系历史会保留，也可以在证据仍有效时恢复。`)) return;
+    setEdgeActionId(edge.edge_id);
+    try {
+      const response = await fetch("/__serein/memory/delete-scene-edge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ edgeId: edge.edge_id, sceneId: edge.source }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.message || payload?.reason || payload?.error || "没有取消这条关系边");
+      await load(filter);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "没有取消这条关系边");
+    } finally {
+      setEdgeActionId("");
+    }
+  };
+
+  const restoreEdge = async (edge) => {
+    setEdgeActionId(edge.edge_id);
+    try {
+      const response = await fetch("/__serein/memory/restore-scene-edge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ edgeId: edge.edge_id }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.message || payload?.reason || payload?.error || "当前证据不足，不能恢复");
+      await load(filter);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "当前证据不足，不能恢复");
+    } finally {
+      setEdgeActionId("");
+    }
+  };
+
+  const beginRelink = (edge) => {
+    setDraft({
+      ...emptyDraft(),
+      sourceSceneId: edge.source,
+      targetSceneId: edge.target,
+      relationType: edge.relation_type,
+      sourceEvidence: edge.source_evidence,
+      targetEvidence: edge.target_evidence,
+      reason: edge.reason,
+      supersedesEdgeId: edge.edge_id,
+    });
+    setComposerOpen(true);
+  };
+
   return (
     <section className="basement-workbench" aria-labelledby="relationship-proposals-title">
       <header className="basement-workbench__header">
@@ -135,12 +244,44 @@ export function BasementRelationshipProposals() {
         <button type="button" onClick={() => load(filter)} disabled={state.status === "loading"}>
           <ArrowClockwise size={15} className={state.status === "loading" ? "is-spinning" : ""} aria-hidden="true" />刷新
         </button>
+        <button type="button" onClick={() => { setDraft(emptyDraft()); setComposerOpen((open) => !open); }}>
+          <Plus size={15} aria-hidden="true" />手动提案
+        </button>
       </div>
 
       <aside className="review-boundary-note">
         <WarningCircle size={17} aria-hidden="true" />
         <p><strong>相似，不等于有关联。</strong>接受前会再验两端 active 状态、内容 hash 与逐字证据；只有通过审核的边，才会出现在记忆卡的“关联 Scene”。</p>
       </aside>
+
+      {composerOpen && (
+        <form className="relationship-manual-form" onSubmit={submitManualProposal}>
+          <header>
+            <div>
+              <strong>{draft.supersedesEdgeId ? "重新连接这段关系" : "手动提出一段关系"}</strong>
+              <p>仍然只生成待审核提案；两段证据都必须逐字存在于当前 Scene 正文。</p>
+            </div>
+            <button type="button" onClick={() => { setComposerOpen(false); setDraft(emptyDraft()); }}><X size={15} />取消</button>
+          </header>
+          <div className="relationship-manual-form__grid">
+            <label>起点 Scene ID<input value={draft.sourceSceneId} onChange={(event) => setDraft((current) => ({ ...current, sourceSceneId: event.target.value }))} required /></label>
+            <label>终点 Scene ID<input value={draft.targetSceneId} onChange={(event) => setDraft((current) => ({ ...current, targetSceneId: event.target.value }))} required /></label>
+            <label>关系
+              <select value={draft.relationType} onChange={(event) => setDraft((current) => ({ ...current, relationType: event.target.value }))}>
+                <option value="continues">延续</option>
+                <option value="echoes">彼此回响</option>
+                <option value="resolves">回应 / 化解</option>
+                <option value="contrasts_with">形成对照</option>
+                <option value="evidenced_by">被另一幕印证</option>
+              </select>
+            </label>
+            <label className="is-wide">为什么成立<input value={draft.reason} onChange={(event) => setDraft((current) => ({ ...current, reason: event.target.value }))} minLength={12} required /></label>
+            <label>起点逐字证据<textarea rows={3} value={draft.sourceEvidence} onChange={(event) => setDraft((current) => ({ ...current, sourceEvidence: event.target.value }))} required /></label>
+            <label>终点逐字证据<textarea rows={3} value={draft.targetEvidence} onChange={(event) => setDraft((current) => ({ ...current, targetEvidence: event.target.value }))} required /></label>
+          </div>
+          <footer><button className="basement-primary-action" type="submit" disabled={Boolean(edgeActionId)}><Check size={15} />放进待审核箱</button></footer>
+        </form>
+      )}
 
       {state.status === "error" && <div className="basement-error" role="alert"><WarningCircle size={19} /><div><strong>没有读到关系提案</strong><p>{state.error}</p></div></div>}
       {state.status !== "error" && state.status !== "loading" && proposals.length === 0 && (
@@ -186,6 +327,8 @@ export function BasementRelationshipProposals() {
                 <summary>展开校验信息</summary>
                 <dl>
                   <div><dt>review state</dt><dd>{proposal.review_state || "—"}</dd></div>
+                  <div><dt>来源</dt><dd>{proposal.proposal_origin || "automatic"}</dd></div>
+                  <div><dt>提出者</dt><dd>{proposal.created_by || "scene_linker"}</dd></div>
                   <div><dt>模型</dt><dd>{proposal.model || "—"}</dd></div>
                   <div><dt>起点 hash</dt><dd>{proposal.anchor_hash || "—"}</dd></div>
                   <div><dt>终点 hash</dt><dd>{proposal.candidate_hash || "—"}</dd></div>
@@ -203,6 +346,34 @@ export function BasementRelationshipProposals() {
           );
         })}
       </div>
+
+      <section className="relationship-history" aria-labelledby="relationship-history-title">
+        <header>
+          <div><span className="basement-kicker">可撤回，也留痕</span><h3 id="relationship-history-title">正式关系与历史</h3></div>
+          <strong>{edges.filter((edge) => edge.active).length} 条正在使用 · {edges.length} 条历史</strong>
+        </header>
+        {edges.length ? (
+          <div className="relationship-history__list">
+            {edges.map((edge) => (
+              <article className={`relationship-history__row${edge.active ? " is-active" : ""}`} key={edge.edge_id}>
+                <div>
+                  <span>{relationLabels[edge.relation_type] || edge.relation_type}</span>
+                  <strong>{edge.source_title || edge.source} → {edge.target_title || edge.target}</strong>
+                  <small>{lifecycleLabels[edge.lifecycle_status] || edge.lifecycle_status || (edge.active ? "正在使用" : "已停用")}{edge.deactivation_reason ? ` · ${edge.deactivation_reason}` : ""}</small>
+                </div>
+                <footer>
+                  <button type="button" onClick={() => beginRelink(edge)} disabled={Boolean(edgeActionId)}>重新连接</button>
+                  {edge.active ? (
+                    <button type="button" onClick={() => cancelEdge(edge)} disabled={edgeActionId === edge.edge_id}><Trash size={14} />取消</button>
+                  ) : edge.lifecycle_status !== "replaced" ? (
+                    <button type="button" onClick={() => restoreEdge(edge)} disabled={edgeActionId === edge.edge_id}><ArrowCounterClockwise size={14} />验证并恢复</button>
+                  ) : null}
+                </footer>
+              </article>
+            ))}
+          </div>
+        ) : <div className="basement-empty-state"><LinkSimple size={22} weight="light" /><span>还没有正式关系历史</span></div>}
+      </section>
 
       {scenePreview && (
         <div className="basement-scene-preview__veil" role="presentation" onMouseDown={(event) => {

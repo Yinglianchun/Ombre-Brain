@@ -4100,7 +4100,12 @@ def _delete_bucket_indexes(bucket_id: str) -> tuple[dict, list[str]]:
         errors.append("edges")
 
     try:
-        cleanup["scene_edges"] = scene_linker.deactivate_scene_edges(bucket_id)
+        cleanup["scene_edges"] = scene_linker.deactivate_scene_edges(
+            bucket_id,
+            reviewer="bucket_delete",
+            reason="scene_deleted",
+            lifecycle_status="cancelled",
+        )
     except Exception as e:
         logger.warning("Failed to deactivate Scene edges / 停用 Scene 边失败: %s: %s", bucket_id, e)
         errors.append("scene_edges")
@@ -8918,6 +8923,46 @@ async def api_scene_edge_proposal_review(request):
     return JSONResponse(result, status_code=status_code)
 
 
+@mcp.custom_route("/api/scene-edge-proposals/manual", methods=["POST"])
+async def api_scene_edge_proposal_manual(request):
+    """Create one manual or relink proposal through the formal evidence validator."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    if str(body.get("confirm") or "") != "CREATE_SCENE_EDGE_PROPOSAL":
+        return JSONResponse(
+            {"error": "confirm must be CREATE_SCENE_EDGE_PROPOSAL"},
+            status_code=400,
+        )
+    source_id = _coerce_memory_id(body.get("source_scene_id"))
+    target_id = _coerce_memory_id(body.get("target_scene_id"))
+    if not source_id or not target_id or source_id == target_id:
+        return JSONResponse({"error": "two distinct Scene ids are required"}, status_code=400)
+    result = await scene_linker.create_manual_proposal(
+        source_scene_id=source_id,
+        target_scene_id=target_id,
+        relation_type=str(body.get("relation_type") or ""),
+        source_evidence=str(body.get("source_evidence") or ""),
+        target_evidence=str(body.get("target_evidence") or ""),
+        reason=str(body.get("reason") or ""),
+        confidence=float(body.get("confidence") or 1.0),
+        supersedes_edge_id=_coerce_memory_id(body.get("supersedes_edge_id")),
+        bucket_mgr=bucket_mgr,
+        created_by=_dashboard_author_name(),
+    )
+    status = str(result.get("status") or "")
+    status_code = 404 if status == "not_found" else 400 if status == "invalid" else 200
+    return JSONResponse(result, status_code=status_code)
+
+
 # =============================================================
 # Admin: legacy memory lifecycle / Scene-bridge review
 # 管理面：旧记忆生命周期 / Scene bridge 审阅
@@ -11422,6 +11467,21 @@ async def _edit_scene_memory(
     passage_shadow_refresh = await _queue_gateway_passage_shadow_refresh(
         scene_ids=[scene_id]
     )
+    edge_lifecycle = {"status": "skipped", "reason": "content_unchanged"}
+    normal_link_required = True
+    if "content" in changed_fields:
+        try:
+            edge_lifecycle = await scene_linker.handle_scene_content_changed(
+                scene_id,
+                bucket_mgr,
+            )
+            normal_link_required = bool(edge_lifecycle.get("normal_relink_required", True))
+        except Exception as exc:
+            logger.warning(
+                "Edited Scene edge lifecycle refresh failed / Scene 修订后关系边生命周期刷新失败: %s",
+                exc,
+            )
+            edge_lifecycle = {"status": "error", "reason": str(exc)[:180]}
 
     return {
         "status": "updated",
@@ -11435,7 +11495,8 @@ async def _edit_scene_memory(
         "embedding_refresh": "queued" if embedding_queued else "skipped",
         "moment_index_refreshed": moment_index_refreshed,
         "entity_edges_refreshed": entity_edges_refreshed,
-        "scene_linking_queued": _queue_scene_linking(scene_id),
+        "scene_edge_lifecycle": edge_lifecycle,
+        "scene_linking_queued": _queue_scene_linking(scene_id) if normal_link_required else False,
         "passage_shadow_refresh": passage_shadow_refresh,
         "scene": _bucket_read_payload(updated_bucket),
     }
@@ -11505,6 +11566,16 @@ def _archive_scene_indexes(scene_id: str) -> tuple[dict, list[str]]:
     except Exception as exc:
         logger.warning("Archived Scene node cleanup failed / 归档 Scene node 清理失败: %s", exc)
         errors.append("node")
+    try:
+        cleanup["scene_edges"] = scene_linker.deactivate_scene_edges(
+            scene_id,
+            reviewer="scene_archive",
+            reason="scene_archived",
+            lifecycle_status="archived",
+        )
+    except Exception as exc:
+        logger.warning("Archived Scene edge cleanup failed / 归档 Scene 关系边停用失败: %s", exc)
+        errors.append("scene_edges")
     return cleanup, errors
 
 
@@ -11632,8 +11703,19 @@ async def _set_scene_status_memory(
 
     if requested_status == "archived":
         index_changes, index_errors = _archive_scene_indexes(scene_id)
+        edge_restore = {"restored_edge_ids": [], "stale_edge_ids": []}
     else:
         index_changes, index_errors = _restore_scene_indexes(updated_bucket)
+        try:
+            edge_restore = await scene_linker.restore_archived_scene_edges(
+                scene_id,
+                bucket_mgr,
+            )
+            index_changes["scene_edges"] = edge_restore
+        except Exception as exc:
+            logger.warning("Restored Scene edge validation failed / 恢复 Scene 关系边校验失败: %s", exc)
+            index_errors.append("scene_edges")
+            edge_restore = {"restored_edge_ids": [], "stale_edge_ids": []}
     passage_shadow_refresh = await _queue_gateway_passage_shadow_refresh(
         scene_ids=[scene_id]
     )
@@ -11662,6 +11744,7 @@ async def _set_scene_status_memory(
         ],
         "index_changes": index_changes,
         "index_errors": index_errors,
+        "scene_edge_restore": edge_restore,
         "passage_shadow_refresh": passage_shadow_refresh,
         "scene": _bucket_read_payload(updated_bucket),
     }
@@ -14461,6 +14544,33 @@ async def api_scene_edge_delete(request):
     return JSONResponse(result)
 
 
+@mcp.custom_route("/api/scene-edges/{edge_id}/restore", methods=["POST"])
+async def api_scene_edge_restore(request):
+    """Restore one soft-disabled edge after current Scene and evidence validation."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    edge_id = str(request.path_params.get("edge_id") or "").strip()
+    if not edge_id or not MEMORY_ID_RE.fullmatch(edge_id):
+        return JSONResponse({"error": "invalid edge_id"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict) or str(body.get("confirm") or "") != "RESTORE_SCENE_EDGE":
+        return JSONResponse({"error": "confirm must be RESTORE_SCENE_EDGE"}, status_code=400)
+    result = await scene_linker.restore_scene_edge(
+        edge_id,
+        bucket_mgr,
+        reviewed_by=_dashboard_author_name(),
+    )
+    status = str(result.get("status") or "")
+    status_code = 404 if status == "not_found" else 409 if status == "stale" else 200
+    return JSONResponse(result, status_code=status_code)
+
+
 @mcp.custom_route("/api/breath-debug", methods=["GET"])
 async def api_breath_debug(request):
     """Debug endpoint: simulate breath scoring and return per-bucket breakdown."""
@@ -16325,7 +16435,27 @@ if __name__ == "__main__":
             async def _start_decay_engine_on_app_startup():
                 await _ensure_decay_engine_started_for_transport(transport)
 
+            async def _reconcile_scene_edges_on_app_startup():
+                try:
+                    result = await scene_linker.reconcile_lifecycle(bucket_mgr)
+                    queued = [
+                        scene_id
+                        for scene_id in result.get("normal_relink_scene_ids", [])
+                        if _queue_scene_linking(scene_id)
+                    ]
+                    if result.get("status") != "skipped" or queued:
+                        logger.info(
+                            "Scene edge lifecycle maintenance complete / Scene 关系边生命周期维护完成: %s",
+                            {**result, "normal_relink_queued": queued},
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Scene edge lifecycle maintenance failed / Scene 关系边生命周期维护失败: %s",
+                        exc,
+                    )
+
             _app.add_event_handler("startup", _start_decay_engine_on_app_startup)
+            _app.add_event_handler("startup", _reconcile_scene_edges_on_app_startup)
         _app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],

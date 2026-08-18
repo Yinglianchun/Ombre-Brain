@@ -1759,6 +1759,73 @@ function sereinMemoryBridge() {
         }
       });
 
+      server.middlewares.use("/__serein/memory/create-scene-edge-proposal", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const safeId = /^[A-Za-z0-9_.:#-]{1,160}$/;
+          const sourceSceneId = String(body.sourceSceneId || "").trim();
+          const targetSceneId = String(body.targetSceneId || "").trim();
+          if (!safeId.test(sourceSceneId) || !safeId.test(targetSceneId) || sourceSceneId === targetSceneId) {
+            response.statusCode = 400;
+            response.end(JSON.stringify({ error: "invalid_scene_edge_target", message: "需要两张不同的 Scene。" }));
+            return;
+          }
+          const upstream = await callOmbreDashboard("/api/scene-edge-proposals/manual", {
+            method: "POST",
+            body: {
+              source_scene_id: sourceSceneId,
+              target_scene_id: targetSceneId,
+              relation_type: String(body.relationType || "").trim(),
+              source_evidence: String(body.sourceEvidence || ""),
+              target_evidence: String(body.targetEvidence || ""),
+              reason: String(body.reason || ""),
+              supersedes_edge_id: String(body.supersedesEdgeId || "").trim(),
+              confidence: 1,
+              confirm: "CREATE_SCENE_EDGE_PROPOSAL",
+            },
+          });
+          response.statusCode = upstream.status;
+          response.end(JSON.stringify(upstream.payload));
+        } catch (error) {
+          const unconfigured = error?.message === "dashboard_bridge_not_configured";
+          response.statusCode = unconfigured ? 503 : error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            error: unconfigured ? "dashboard_bridge_not_configured" : "scene_edge_create_bridge_failed",
+            message: unconfigured ? "本地预览没有安全载入 Dashboard 凭据。" : "没有创建这条关系提案。",
+          }));
+        }
+      });
+
+      server.middlewares.use("/__serein/memory/scene-edges", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const query = new URLSearchParams({ include_inactive: "true" });
+          if (body.sceneId) query.set("scene_id", String(body.sceneId).trim());
+          const upstream = await callOmbreDashboard(`/api/scene-edges?${query}`);
+          response.statusCode = upstream.status;
+          response.end(JSON.stringify(upstream.payload));
+        } catch (error) {
+          const unconfigured = error?.message === "dashboard_bridge_not_configured";
+          response.statusCode = unconfigured ? 503 : error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            error: unconfigured ? "dashboard_bridge_not_configured" : "scene_edge_history_bridge_failed",
+            message: unconfigured ? "本地预览没有安全载入 Dashboard 凭据。" : "没有读到关系边历史。",
+          }));
+        }
+      });
+
       server.middlewares.use("/__serein/memory/delete-scene-edge", async (request, response) => {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
         if (request.method !== "POST") {
@@ -1792,6 +1859,38 @@ function sereinMemoryBridge() {
           response.end(JSON.stringify({
             error: unconfigured ? "dashboard_bridge_not_configured" : "scene_edge_delete_bridge_failed",
             message: unconfigured ? "本地预览没有安全载入 Dashboard 凭据。" : "没有完成这次关系边移除。",
+          }));
+        }
+      });
+
+      server.middlewares.use("/__serein/memory/restore-scene-edge", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const edgeId = String(body.edgeId || "").trim();
+          const safeId = /^[A-Za-z0-9_.:#-]{1,160}$/;
+          if (!safeId.test(edgeId)) {
+            response.statusCode = 400;
+            response.end(JSON.stringify({ error: "invalid_scene_edge_target", message: "关系边 ID 不正确。" }));
+            return;
+          }
+          const upstream = await callOmbreDashboard(`/api/scene-edges/${encodeURIComponent(edgeId)}/restore`, {
+            method: "POST",
+            body: { confirm: "RESTORE_SCENE_EDGE" },
+          });
+          response.statusCode = upstream.status;
+          response.end(JSON.stringify(upstream.payload));
+        } catch (error) {
+          const unconfigured = error?.message === "dashboard_bridge_not_configured";
+          response.statusCode = unconfigured ? 503 : error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            error: unconfigured ? "dashboard_bridge_not_configured" : "scene_edge_restore_bridge_failed",
+            message: unconfigured ? "本地预览没有安全载入 Dashboard 凭据。" : "没有恢复这条关系边。",
           }));
         }
       });

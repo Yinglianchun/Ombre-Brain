@@ -88,8 +88,20 @@ async def main() -> None:
     server._queue_embedding_refresh_if_changed = (
         lambda _bucket_id, before, after: before["content"] != after["content"]
     )
-    server._queue_scene_linking = lambda *_args: True
+    queued_scene_links: list[str] = []
+    server._queue_scene_linking = lambda bucket_id: queued_scene_links.append(bucket_id) or True
     server._refresh_entity_edges_for_bucket = lambda *_args: 1
+
+    async def refresh_scene_edges(scene_id, _bucket_mgr):
+        return {
+            "status": "updated",
+            "scene_id": scene_id,
+            "formal_edges_needing_review": 1,
+            "revalidation_proposal_ids": ["scene_edge_revalidated"],
+            "normal_relink_required": False,
+        }
+
+    server.scene_linker.handle_scene_content_changed = refresh_scene_edges
 
     missing_version = await server._edit_scene_memory(
         "scene_edit_contract",
@@ -153,6 +165,10 @@ async def main() -> None:
     assert len(manager.bucket["metadata"]["scene_revision_history"]) == 3
     assert manager.bucket["metadata"]["scene_revision_history"][1]["title"] == "小雨亲自改的标题"
     assert revised["moment_index_refreshed"] is True
+    assert revised["scene_linking_queued"] is False
+    assert revised["scene_edge_lifecycle"]["revalidation_proposal_ids"] == [
+        "scene_edge_revalidated"
+    ]
     assert moments.ids == ["scene_edit_contract", "scene_edit_contract", "scene_edit_contract"]
     assert moments.buckets[-1]["metadata"]["scene_cues"] == [
         "提到第一人称修订",

@@ -20,6 +20,12 @@ logger = logging.getLogger("ombre_brain.scene_linker")
 SCENE_LINKER_VERSION = "scene-linker-v1"
 SCENE_EDGE_PROPOSAL_ID_RE = re.compile(r"^scene_edge_[0-9a-f]{24}$")
 SCENE_EDGE_PROPOSAL_STATUSES = frozenset({"pending", "accepted", "rejected", "superseded"})
+SCENE_EDGE_LIFECYCLE_STATUSES = frozenset(
+    {"active", "needs_review", "cancelled", "archived", "replaced"}
+)
+SCENE_EDGE_PROPOSAL_ORIGINS = frozenset(
+    {"automatic", "manual", "snapshot_revalidation", "manual_relink"}
+)
 SCENE_EDGE_REVIEW_CONFIRMATIONS = {
     "accept": "ACCEPT_SCENE_EDGE",
     "reject": "REJECT_SCENE_EDGE",
@@ -99,6 +105,11 @@ def _ensure_scene_edge_schema(conn: sqlite3.Connection) -> None:
             deactivated_at TEXT,
             deactivated_by TEXT,
             deactivation_reason TEXT,
+            lifecycle_status TEXT NOT NULL DEFAULT 'active',
+            restored_at TEXT,
+            restored_by TEXT,
+            supersedes_edge_id TEXT,
+            replaced_by_edge_id TEXT,
             updated_at TEXT NOT NULL
         )
         """
@@ -107,9 +118,22 @@ def _ensure_scene_edge_schema(conn: sqlite3.Connection) -> None:
         str(row[1])
         for row in conn.execute("PRAGMA table_info(scene_edges)").fetchall()
     }
-    for name in ("deactivated_at", "deactivated_by", "deactivation_reason"):
+    text_columns = {
+        "deactivated_at",
+        "deactivated_by",
+        "deactivation_reason",
+        "restored_at",
+        "restored_by",
+        "supersedes_edge_id",
+        "replaced_by_edge_id",
+    }
+    for name in text_columns:
         if name not in columns:
             conn.execute(f"ALTER TABLE scene_edges ADD COLUMN {name} TEXT")
+    if "lifecycle_status" not in columns:
+        conn.execute(
+            "ALTER TABLE scene_edges ADD COLUMN lifecycle_status TEXT NOT NULL DEFAULT 'active'"
+        )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_scene_edges_active_source "
         "ON scene_edges(active, source_scene_id)"
@@ -118,6 +142,10 @@ def _ensure_scene_edge_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_scene_edges_active_target "
         "ON scene_edges(active, target_scene_id)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scene_edges_lifecycle "
+        "ON scene_edges(lifecycle_status, updated_at DESC)"
+    )
 
 
 class SceneEdgeStore:
@@ -125,8 +153,9 @@ class SceneEdgeStore:
 
     def __init__(self, config: dict, *, create: bool = True):
         self.db_path = SceneEdgeProposalStore.path_for(config)
-        if create:
-            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        if create or os.path.exists(self.db_path):
+            if create:
+                os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
             conn = self._connect()
             conn.execute("PRAGMA journal_mode=WAL")
             _ensure_scene_edge_schema(conn)
@@ -189,21 +218,45 @@ class SceneEdgeStore:
             if table is None:
                 return {"total": 0, "active": 0, "inactive": 0}
             rows = conn.execute(
-                "SELECT active, COUNT(*) AS count FROM scene_edges GROUP BY active"
+                """
+                SELECT active, lifecycle_status, COUNT(*) AS count
+                  FROM scene_edges
+                 GROUP BY active, lifecycle_status
+                """
             ).fetchall()
         finally:
             conn.close()
-        counts = {int(row["active"]): int(row["count"]) for row in rows}
+        counts: dict[int, int] = {}
+        lifecycle: dict[str, int] = {}
+        for row in rows:
+            counts[int(row["active"])] = counts.get(int(row["active"]), 0) + int(row["count"])
+            state = str(row["lifecycle_status"] or ("active" if row["active"] else "cancelled"))
+            lifecycle[state] = lifecycle.get(state, 0) + int(row["count"])
         return {
             "total": sum(counts.values()),
             "active": counts.get(1, 0),
             "inactive": counts.get(0, 0),
+            "needs_review": lifecycle.get("needs_review", 0),
+            "cancelled": lifecycle.get("cancelled", 0),
+            "archived": lifecycle.get("archived", 0),
+            "replaced": lifecycle.get("replaced", 0),
+            "lifecycle": lifecycle,
         }
 
-    def deactivate_for_scene(self, scene_id: str) -> int:
+    def deactivate_for_scene(
+        self,
+        scene_id: str,
+        *,
+        reviewer: str = "system",
+        reason: str = "scene_deleted",
+        lifecycle_status: str = "cancelled",
+    ) -> int:
         normalized = str(scene_id or "").strip()
         if not normalized or not os.path.exists(self.db_path):
             return 0
+        normalized_status = str(lifecycle_status or "cancelled").strip().lower()
+        if normalized_status not in SCENE_EDGE_LIFECYCLE_STATUSES - {"active"}:
+            raise ValueError("invalid Scene edge lifecycle status")
         conn = self._connect()
         try:
             table = conn.execute(
@@ -214,10 +267,23 @@ class SceneEdgeStore:
             cursor = conn.execute(
                 """
                 UPDATE scene_edges
-                   SET active = 0, updated_at = ?
+                   SET active = 0,
+                       lifecycle_status = ?,
+                       deactivated_at = ?,
+                       deactivated_by = ?,
+                       deactivation_reason = ?,
+                       updated_at = ?
                  WHERE active = 1 AND (source_scene_id = ? OR target_scene_id = ?)
                 """,
-                (_now_utc(), normalized, normalized),
+                (
+                    normalized_status,
+                    _now_utc(),
+                    str(reviewer or "system").strip() or "system",
+                    str(reason or "scene_deleted").strip() or "scene_deleted",
+                    _now_utc(),
+                    normalized,
+                    normalized,
+                ),
             )
             conn.commit()
             return max(0, int(cursor.rowcount or 0))
@@ -231,10 +297,14 @@ class SceneEdgeStore:
         scene_id: str,
         reviewer: str = "",
         reason: str = "manual_remove",
+        lifecycle_status: str = "cancelled",
     ) -> dict:
         """Soft-disable one exact reviewed edge while preserving its audit row."""
         normalized_edge = str(edge_id or "").strip()
         normalized_scene = str(scene_id or "").strip()
+        normalized_status = str(lifecycle_status or "cancelled").strip().lower()
+        if normalized_status not in SCENE_EDGE_LIFECYCLE_STATUSES - {"active"}:
+            raise ValueError("invalid Scene edge lifecycle status")
         if not normalized_edge or not normalized_scene or not os.path.exists(self.db_path):
             return {"status": "not_found", "edge_id": normalized_edge}
         conn = self._connect()
@@ -260,6 +330,7 @@ class SceneEdgeStore:
                 """
                 UPDATE scene_edges
                    SET active = 0,
+                       lifecycle_status = ?,
                        deactivated_at = ?,
                        deactivated_by = ?,
                        deactivation_reason = ?,
@@ -267,6 +338,7 @@ class SceneEdgeStore:
                  WHERE edge_id = ? AND active = 1
                 """,
                 (
+                    normalized_status,
                     now,
                     str(reviewer or "").strip() or None,
                     str(reason or "manual_remove").strip() or "manual_remove",
@@ -288,6 +360,86 @@ class SceneEdgeStore:
             raise
         finally:
             conn.close()
+
+    def restore_edge(
+        self,
+        edge_id: str,
+        scene_map: dict[str, dict],
+        *,
+        reviewer: str = "",
+    ) -> dict:
+        """Restore one inactive edge only when both current Scenes still support it."""
+        normalized = str(edge_id or "").strip()
+        if not normalized or not os.path.exists(self.db_path):
+            return {"status": "not_found", "edge_id": normalized}
+        conn = self._connect()
+        try:
+            _ensure_scene_edge_schema(conn)
+            row = conn.execute(
+                "SELECT * FROM scene_edges WHERE edge_id = ?",
+                (normalized,),
+            ).fetchone()
+            if row is None:
+                return {"status": "not_found", "edge_id": normalized}
+            edge = self._edge_payload(dict(row))
+            if edge["active"]:
+                return {"status": "unchanged", "edge": edge}
+            source = scene_map.get(edge["source"])
+            target = scene_map.get(edge["target"])
+            validation_error = self._current_edge_error(edge, source, target)
+            if validation_error:
+                return {
+                    "status": "stale",
+                    "reason": validation_error,
+                    "edge": edge,
+                }
+            now = _now_utc()
+            conn.execute(
+                """
+                UPDATE scene_edges
+                   SET active = 1,
+                       lifecycle_status = 'active',
+                       restored_at = ?,
+                       restored_by = ?,
+                       deactivated_at = NULL,
+                       deactivated_by = NULL,
+                       deactivation_reason = NULL,
+                       updated_at = ?
+                 WHERE edge_id = ? AND active = 0
+                """,
+                (now, str(reviewer or "").strip() or None, now, normalized),
+            )
+            conn.commit()
+            updated = conn.execute(
+                "SELECT * FROM scene_edges WHERE edge_id = ?",
+                (normalized,),
+            ).fetchone()
+            return {"status": "restored", "edge": self._edge_payload(dict(updated))}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _current_edge_error(edge: dict, source: dict | None, target: dict | None) -> str:
+        if not _is_authored_scene(source):
+            return "source_scene_inactive"
+        if not _is_authored_scene(target):
+            return "target_scene_inactive"
+        if str(edge.get("source_hash") or "") != _scene_hash(source):
+            return "source_scene_changed"
+        if str(edge.get("target_hash") or "") != _scene_hash(target):
+            return "target_scene_changed"
+        source_ok, _ = _evidence_is_verbatim(
+            str((source or {}).get("content") or ""), edge.get("source_evidence")
+        )
+        if not source_ok:
+            return "source_evidence_stale"
+        target_ok, _ = _evidence_is_verbatim(
+            str((target or {}).get("content") or ""), edge.get("target_evidence")
+        )
+        return "" if target_ok else "target_evidence_stale"
 
     @staticmethod
     def _edge_payload(row: dict) -> dict:
@@ -311,6 +463,13 @@ class SceneEdgeStore:
             "deactivated_at": str(row.get("deactivated_at") or ""),
             "deactivated_by": str(row.get("deactivated_by") or ""),
             "deactivation_reason": str(row.get("deactivation_reason") or ""),
+            "lifecycle_status": str(
+                row.get("lifecycle_status") or ("active" if row.get("active") else "cancelled")
+            ),
+            "restored_at": str(row.get("restored_at") or ""),
+            "restored_by": str(row.get("restored_by") or ""),
+            "supersedes_edge_id": str(row.get("supersedes_edge_id") or ""),
+            "replaced_by_edge_id": str(row.get("replaced_by_edge_id") or ""),
             "updated_at": str(row.get("updated_at") or ""),
             "graph_scope": "scene",
         }
@@ -519,6 +678,9 @@ class SceneEdgeProposalStore:
                 model TEXT NOT NULL,
                 linker_version TEXT NOT NULL,
                 canonical_edge_id TEXT NOT NULL DEFAULT '',
+                proposal_origin TEXT NOT NULL DEFAULT 'automatic',
+                created_by TEXT,
+                supersedes_edge_id TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -540,6 +702,14 @@ class SceneEdgeProposalStore:
                 "ALTER TABLE scene_edge_proposals "
                 "ADD COLUMN canonical_edge_id TEXT NOT NULL DEFAULT ''"
             )
+        if "proposal_origin" not in columns:
+            conn.execute(
+                "ALTER TABLE scene_edge_proposals "
+                "ADD COLUMN proposal_origin TEXT NOT NULL DEFAULT 'automatic'"
+            )
+        for name in ("created_by", "supersedes_edge_id"):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE scene_edge_proposals ADD COLUMN {name} TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_scene_edge_proposals_pending "
             "ON scene_edge_proposals(status, updated_at DESC)"
@@ -749,7 +919,16 @@ class SceneEdgeProposalStore:
             ).fetchone()
             if existing is not None:
                 proposal_id = str(existing["proposal_id"])
-                if confidence > float(existing["confidence"] or 0.0):
+                existing_hashes = _scene_edge_snapshot_hashes(
+                    str(existing["source_scene_id"] or ""),
+                    str(existing["target_scene_id"] or ""),
+                    str(existing["relation_type"] or ""),
+                    str(existing["anchor_scene_id"] or ""),
+                    str(existing["anchor_hash"] or ""),
+                    str(existing["candidate_hash"] or ""),
+                )
+                snapshot_is_fresh = existing_hashes == (source_hash, target_hash)
+                if not snapshot_is_fresh or confidence > float(existing["confidence"] or 0.0):
                     conn.execute(
                         """
                         UPDATE scene_edge_proposals
@@ -758,9 +937,11 @@ class SceneEdgeProposalStore:
                                relation_type = ?, directionality = ?,
                                confidence = ?, reason = ?,
                                source_evidence = ?, target_evidence = ?,
-                               anchor_hash = ?, candidate_hash = ?,
-                               model = ?, linker_version = ?,
-                               canonical_edge_id = ?, updated_at = ?
+                                anchor_hash = ?, candidate_hash = ?,
+                                model = ?, linker_version = ?,
+                                canonical_edge_id = ?,
+                                proposal_origin = 'automatic', created_by = 'scene_linker',
+                                supersedes_edge_id = NULL, updated_at = ?
                          WHERE proposal_id = ? AND status = 'pending'
                         """,
                         (
@@ -814,8 +995,9 @@ class SceneEdgeProposalStore:
                     source_scene_id, target_scene_id, relation_type, directionality,
                     confidence, reason, source_evidence, target_evidence,
                     anchor_hash, candidate_hash, model, linker_version,
-                    canonical_edge_id, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                    canonical_edge_id, proposal_origin, created_by,
+                    status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'automatic', 'scene_linker', 'pending', ?, ?)
                 ON CONFLICT(proposal_id) DO UPDATE SET
                     anchor_scene_id = excluded.anchor_scene_id,
                     candidate_scene_id = excluded.candidate_scene_id,
@@ -832,6 +1014,9 @@ class SceneEdgeProposalStore:
                     model = excluded.model,
                     linker_version = excluded.linker_version,
                     canonical_edge_id = excluded.canonical_edge_id,
+                    proposal_origin = excluded.proposal_origin,
+                    created_by = excluded.created_by,
+                    supersedes_edge_id = NULL,
                     status = CASE
                         WHEN scene_edge_proposals.status IN ('accepted', 'rejected')
                         THEN scene_edge_proposals.status
@@ -871,6 +1056,257 @@ class SceneEdgeProposalStore:
                 rows.append(dict(row))
         conn.close()
         return rows
+
+    def create_review_proposal(
+        self,
+        anchor: dict,
+        candidate: dict,
+        edge: dict,
+        *,
+        model: str,
+        proposal_origin: str,
+        created_by: str,
+        supersedes_edge_id: str = "",
+        linker_version: str = SCENE_LINKER_VERSION,
+        nonce: str = "",
+    ) -> dict:
+        """Create one evidence-validated proposal without invoking the model."""
+        origin = str(proposal_origin or "").strip().lower()
+        if origin not in SCENE_EDGE_PROPOSAL_ORIGINS:
+            raise ValueError("invalid Scene edge proposal origin")
+        anchor_id = str(anchor.get("id") or "").strip()
+        candidate_id = str(candidate.get("id") or "").strip()
+        if not anchor_id or not candidate_id or anchor_id == candidate_id:
+            raise ValueError("Scene edge proposal requires two distinct Scenes")
+        source_scene_id = str(edge.get("source_scene_id") or "").strip()
+        target_scene_id = str(edge.get("target_scene_id") or "").strip()
+        relation_type = str(edge.get("relation_type") or "").strip()
+        canonical_edge_id = _scene_edge_id(source_scene_id, target_scene_id, relation_type)
+        anchor_hash = _scene_hash(anchor)
+        candidate_hash = _scene_hash(candidate)
+        source_hash, target_hash = _scene_edge_snapshot_hashes(
+            source_scene_id,
+            target_scene_id,
+            relation_type,
+            anchor_id,
+            anchor_hash,
+            candidate_hash,
+        )
+        now = _now_utc()
+        identity = json.dumps(
+            {
+                "anchor": anchor_id,
+                "candidate": candidate_id,
+                "source": source_scene_id,
+                "target": target_scene_id,
+                "relation": relation_type,
+                "directionality": str(edge.get("directionality") or ""),
+                "anchor_hash": anchor_hash,
+                "candidate_hash": candidate_hash,
+                "origin": origin,
+                "supersedes_edge_id": str(supersedes_edge_id or ""),
+                "nonce": str(nonce or ""),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        proposal_id = "scene_edge_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_scene_edge_schema(conn)
+            formal_edge = conn.execute(
+                "SELECT source_hash, target_hash FROM scene_edges WHERE edge_id = ? AND active = 1",
+                (canonical_edge_id,),
+            ).fetchone()
+            if formal_edge is not None and (
+                str(formal_edge["source_hash"] or ""),
+                str(formal_edge["target_hash"] or ""),
+            ) == (source_hash, target_hash):
+                conn.rollback()
+                return {
+                    "status": "already_active",
+                    "canonical_edge_id": canonical_edge_id,
+                }
+            conn.execute(
+                """
+                UPDATE scene_edge_proposals
+                   SET status = 'superseded', updated_at = ?
+                 WHERE canonical_edge_id = ? AND status = 'pending'
+                """,
+                (now, canonical_edge_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO scene_edge_proposals (
+                    proposal_id, anchor_scene_id, candidate_scene_id,
+                    source_scene_id, target_scene_id, relation_type, directionality,
+                    confidence, reason, source_evidence, target_evidence,
+                    anchor_hash, candidate_hash, model, linker_version,
+                    canonical_edge_id, proposal_origin, created_by, supersedes_edge_id,
+                    status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                ON CONFLICT(proposal_id) DO UPDATE SET
+                    confidence = excluded.confidence,
+                    reason = excluded.reason,
+                    source_evidence = excluded.source_evidence,
+                    target_evidence = excluded.target_evidence,
+                    model = excluded.model,
+                    linker_version = excluded.linker_version,
+                    created_by = excluded.created_by,
+                    supersedes_edge_id = excluded.supersedes_edge_id,
+                    status = CASE
+                        WHEN scene_edge_proposals.status IN ('accepted', 'rejected')
+                        THEN scene_edge_proposals.status
+                        ELSE 'pending'
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    proposal_id,
+                    anchor_id,
+                    candidate_id,
+                    source_scene_id,
+                    target_scene_id,
+                    relation_type,
+                    str(edge.get("directionality") or ""),
+                    float(edge.get("confidence") or 0.0),
+                    str(edge.get("reason") or ""),
+                    str(edge.get("source_evidence") or ""),
+                    str(edge.get("target_evidence") or ""),
+                    anchor_hash,
+                    candidate_hash,
+                    str(model or "").strip(),
+                    str(linker_version or SCENE_LINKER_VERSION).strip(),
+                    canonical_edge_id,
+                    origin,
+                    str(created_by or "").strip() or None,
+                    str(supersedes_edge_id or "").strip() or None,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM scene_edge_proposals WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+            return {"status": str(row["status"]), "proposal": dict(row)}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def refresh_after_scene_content_change(
+        self,
+        scene_id: str,
+        scene_map: dict[str, dict],
+        *,
+        created_by: str = "system",
+    ) -> dict:
+        """Invalidate stale snapshots and create exact-evidence revalidation cards."""
+        normalized = str(scene_id or "").strip()
+        current_scene = scene_map.get(normalized)
+        if not normalized or not isinstance(current_scene, dict):
+            return {"status": "skipped", "reason": "scene_missing"}
+        current_hash = _scene_hash(current_scene)
+        now = _now_utc()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_scene_edge_schema(conn)
+            stale_cursor = conn.execute(
+                """
+                UPDATE scene_edge_proposals
+                   SET status = 'superseded', updated_at = ?
+                 WHERE status = 'pending'
+                   AND ((anchor_scene_id = ? AND anchor_hash <> ?)
+                     OR (candidate_scene_id = ? AND candidate_hash <> ?))
+                """,
+                (now, normalized, current_hash, normalized, current_hash),
+            )
+            rows = conn.execute(
+                """
+                SELECT * FROM scene_edges
+                 WHERE active = 1 AND (source_scene_id = ? OR target_scene_id = ?)
+                """,
+                (normalized, normalized),
+            ).fetchall()
+            affected: list[dict] = []
+            for row in rows:
+                edge = SceneEdgeStore._edge_payload(dict(row))
+                stored_hash = edge["source_hash"] if edge["source"] == normalized else edge["target_hash"]
+                if stored_hash == current_hash:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE scene_edges
+                       SET active = 0,
+                           lifecycle_status = 'needs_review',
+                           deactivated_at = ?,
+                           deactivated_by = ?,
+                           deactivation_reason = 'scene_content_changed',
+                           updated_at = ?
+                     WHERE edge_id = ? AND active = 1
+                    """,
+                    (now, str(created_by or "system"), now, edge["edge_id"]),
+                )
+                affected.append(edge)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        revalidation_ids: list[str] = []
+        relink_required = 0
+        for edge in affected:
+            source = scene_map.get(edge["source"])
+            target = scene_map.get(edge["target"])
+            source_ok, _ = _evidence_is_verbatim(
+                str((source or {}).get("content") or ""), edge["source_evidence"]
+            )
+            target_ok, _ = _evidence_is_verbatim(
+                str((target or {}).get("content") or ""), edge["target_evidence"]
+            )
+            if not (_is_authored_scene(source) and _is_authored_scene(target) and source_ok and target_ok):
+                relink_required += 1
+                continue
+            candidate_id = edge["target"] if edge["source"] == normalized else edge["source"]
+            result = self.create_review_proposal(
+                current_scene,
+                scene_map[candidate_id],
+                {
+                    "source_scene_id": edge["source"],
+                    "target_scene_id": edge["target"],
+                    "relation_type": edge["relation_type"],
+                    "directionality": edge["directionality"],
+                    "confidence": edge["confidence"],
+                    "reason": edge["reason"],
+                    "source_evidence": edge["source_evidence"],
+                    "target_evidence": edge["target_evidence"],
+                },
+                model="deterministic_revalidation",
+                proposal_origin="snapshot_revalidation",
+                created_by=created_by,
+                supersedes_edge_id=edge["edge_id"],
+                linker_version=edge["linker_version"] or SCENE_LINKER_VERSION,
+                nonce=now,
+            )
+            proposal = result.get("proposal") or {}
+            if proposal.get("proposal_id"):
+                revalidation_ids.append(str(proposal["proposal_id"]))
+        return {
+            "status": "updated",
+            "scene_id": normalized,
+            "stale_proposals_superseded": max(0, int(stale_cursor.rowcount or 0)),
+            "formal_edges_needing_review": len(affected),
+            "revalidation_proposal_ids": revalidation_ids,
+            "normal_relink_required": relink_required > 0 or not affected,
+        }
 
     def get(self, proposal_id: str) -> dict | None:
         normalized = str(proposal_id or "").strip()
@@ -920,6 +1356,42 @@ class SceneEdgeProposalStore:
 
     def list_pending(self, *, anchor_scene_id: str = "", limit: int = 100) -> list[dict]:
         return self.list(status="pending", anchor_scene_id=anchor_scene_id, limit=limit)
+
+    def supersede_stale_pending(self, scene_map: dict[str, dict]) -> int:
+        """Close every pending card whose endpoint snapshot is no longer current."""
+        rows = self.list(status="pending", limit=1000)
+        stale_ids: list[str] = []
+        for row in rows:
+            anchor = scene_map.get(str(row.get("anchor_scene_id") or ""))
+            candidate = scene_map.get(str(row.get("candidate_scene_id") or ""))
+            if (
+                not _is_authored_scene(anchor)
+                or not _is_authored_scene(candidate)
+                or _scene_hash(anchor) != str(row.get("anchor_hash") or "")
+                or _scene_hash(candidate) != str(row.get("candidate_hash") or "")
+            ):
+                stale_ids.append(str(row.get("proposal_id") or ""))
+        if not stale_ids:
+            return 0
+        now = _now_utc()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.executemany(
+                """
+                UPDATE scene_edge_proposals
+                   SET status = 'superseded', updated_at = ?
+                 WHERE proposal_id = ? AND status = 'pending'
+                """,
+                [(now, proposal_id) for proposal_id in stale_ids],
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return len(stale_ids)
 
     def set_status(
         self,
@@ -996,6 +1468,7 @@ class SceneEdgeProposalStore:
                 else str(proposal.get("candidate_hash") or "")
             )
             relation_type = str(proposal.get("relation_type") or "")
+            supersedes_edge_id = str(proposal.get("supersedes_edge_id") or "").strip()
             source_evidence = str(proposal.get("source_evidence") or "")
             target_evidence = str(proposal.get("target_evidence") or "")
             if relation_type in SYMMETRIC_SCENE_RELATIONS and target_id < source_id:
@@ -1011,8 +1484,9 @@ class SceneEdgeProposalStore:
                     directionality, confidence, reason,
                     source_evidence, target_evidence, source_hash, target_hash,
                     proposal_id, linker_version, active,
-                    accepted_at, accepted_by, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                    accepted_at, accepted_by, lifecycle_status,
+                    restored_at, restored_by, supersedes_edge_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'active', ?, ?, ?, ?)
                 ON CONFLICT(edge_id) DO UPDATE SET
                     directionality = excluded.directionality,
                     confidence = excluded.confidence,
@@ -1026,6 +1500,14 @@ class SceneEdgeProposalStore:
                     active = 1,
                     accepted_at = excluded.accepted_at,
                     accepted_by = excluded.accepted_by,
+                    lifecycle_status = 'active',
+                    restored_at = excluded.restored_at,
+                    restored_by = excluded.restored_by,
+                    supersedes_edge_id = excluded.supersedes_edge_id,
+                    deactivated_at = NULL,
+                    deactivated_by = NULL,
+                    deactivation_reason = NULL,
+                    replaced_by_edge_id = NULL,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -1044,9 +1526,27 @@ class SceneEdgeProposalStore:
                     str(proposal.get("linker_version") or SCENE_LINKER_VERSION),
                     now,
                     reviewer or None,
+                    now if supersedes_edge_id else None,
+                    (reviewer or None) if supersedes_edge_id else None,
+                    supersedes_edge_id or None,
                     now,
                 ),
             )
+            if supersedes_edge_id and supersedes_edge_id != edge_id:
+                conn.execute(
+                    """
+                    UPDATE scene_edges
+                       SET active = 0,
+                           lifecycle_status = 'replaced',
+                           deactivated_at = COALESCE(deactivated_at, ?),
+                           deactivated_by = COALESCE(deactivated_by, ?),
+                           deactivation_reason = 'relinked',
+                           replaced_by_edge_id = ?,
+                           updated_at = ?
+                     WHERE edge_id = ?
+                    """,
+                    (now, reviewer or None, edge_id, now, supersedes_edge_id),
+                )
             updated = conn.execute(
                 """
                 UPDATE scene_edge_proposals
@@ -1178,8 +1678,20 @@ class SceneLinker:
     def recall_scene_edges(self, scene_map: dict[str, dict]) -> list[dict]:
         return SceneEdgeStore(self.config, create=False).recall_edges(scene_map)
 
-    def deactivate_scene_edges(self, scene_id: str) -> int:
-        return SceneEdgeStore(self.config, create=False).deactivate_for_scene(scene_id)
+    def deactivate_scene_edges(
+        self,
+        scene_id: str,
+        *,
+        reviewer: str = "system",
+        reason: str = "scene_deleted",
+        lifecycle_status: str = "cancelled",
+    ) -> int:
+        return SceneEdgeStore(self.config, create=False).deactivate_for_scene(
+            scene_id,
+            reviewer=reviewer,
+            reason=reason,
+            lifecycle_status=lifecycle_status,
+        )
 
     def deactivate_scene_edge(
         self,
@@ -1195,6 +1707,245 @@ class SceneLinker:
             reviewer=reviewer,
             reason=reason,
         )
+
+    async def handle_scene_content_changed(self, scene_id: str, bucket_mgr) -> dict:
+        store = self.proposal_store(create=False)
+        if store is None:
+            return {
+                "status": "skipped",
+                "reason": "no_scene_edge_store",
+                "normal_relink_required": True,
+            }
+        normalized = str(scene_id or "").strip()
+        current = await bucket_mgr.get(normalized)
+        if not isinstance(current, dict):
+            return {
+                "status": "skipped",
+                "reason": "scene_missing",
+                "normal_relink_required": False,
+            }
+        incident = [
+            edge
+            for edge in SceneEdgeStore(self.config, create=False).list_edges(
+                include_inactive=False
+            )
+            if normalized in {edge["source"], edge["target"]}
+        ]
+        scene_map = {normalized: current}
+        for edge in incident:
+            other_id = edge["target"] if edge["source"] == normalized else edge["source"]
+            if other_id not in scene_map:
+                other = await bucket_mgr.get(other_id)
+                if isinstance(other, dict):
+                    scene_map[other_id] = other
+        return store.refresh_after_scene_content_change(
+            normalized,
+            scene_map,
+            created_by="scene_edit",
+        )
+
+    async def create_manual_proposal(
+        self,
+        *,
+        source_scene_id: str,
+        target_scene_id: str,
+        relation_type: str,
+        source_evidence: str,
+        target_evidence: str,
+        reason: str,
+        bucket_mgr,
+        created_by: str,
+        confidence: float = 1.0,
+        supersedes_edge_id: str = "",
+    ) -> dict:
+        source_id = str(source_scene_id or "").strip()
+        target_id = str(target_scene_id or "").strip()
+        source = await bucket_mgr.get(source_id)
+        target = await bucket_mgr.get(target_id)
+        if not _is_authored_scene(source) or not _is_authored_scene(target):
+            return {"status": "invalid", "reason": "active_authored_scenes_required"}
+        relation = str(relation_type or "").strip()
+        raw = {
+            "candidate_scene_id": target_id,
+            "relation_type": relation,
+            "orientation": "symmetric" if relation in SYMMETRIC_SCENE_RELATIONS else "new_to_candidate",
+            "confidence": confidence,
+            "reason": reason,
+            "new_scene_evidence": source_evidence,
+            "candidate_scene_evidence": target_evidence,
+        }
+        normalized, rejected = self._normalize_edges(source, {target_id: target}, [raw])
+        if not normalized:
+            return {
+                "status": "invalid",
+                "reason": str((rejected[0] if rejected else {}).get("reason") or "invalid_proposal"),
+            }
+        superseded = str(supersedes_edge_id or "").strip()
+        old = None
+        if superseded:
+            old = next(
+                (
+                    edge
+                    for edge in SceneEdgeStore(self.config, create=False).list_edges(
+                        include_inactive=True
+                    )
+                    if edge["edge_id"] == superseded
+                ),
+                None,
+            )
+            if old is None:
+                return {"status": "not_found", "reason": "superseded_edge_not_found"}
+            if source_id not in {old["source"], old["target"]} and target_id not in {
+                old["source"], old["target"]
+            }:
+                return {"status": "invalid", "reason": "relink_must_share_an_endpoint"}
+        result = self._store().create_review_proposal(
+            source,
+            target,
+            normalized[0],
+            model="manual",
+            proposal_origin="manual_relink" if superseded else "manual",
+            created_by=created_by,
+            supersedes_edge_id=superseded,
+            linker_version=self.linker_version,
+        )
+        if old is not None and result.get("status") == "pending":
+            SceneEdgeStore(self.config, create=False).deactivate_edge(
+                superseded,
+                scene_id=old["source"],
+                reviewer=created_by,
+                reason="manual_relink",
+            )
+        return {
+            **result,
+            "canonical_memory_changed": False,
+            "memory_edges_changed": False,
+            "scene_edges_changed": bool(superseded),
+        }
+
+    async def restore_scene_edge(
+        self,
+        edge_id: str,
+        bucket_mgr,
+        *,
+        reviewed_by: str,
+    ) -> dict:
+        store = SceneEdgeStore(self.config, create=False)
+        edge = next(
+            (
+                item
+                for item in store.list_edges(include_inactive=True)
+                if item["edge_id"] == str(edge_id or "").strip()
+            ),
+            None,
+        )
+        if edge is None:
+            return {"status": "not_found", "edge_id": str(edge_id or "").strip()}
+        scene_map = {
+            edge["source"]: await bucket_mgr.get(edge["source"]),
+            edge["target"]: await bucket_mgr.get(edge["target"]),
+        }
+        return store.restore_edge(edge["edge_id"], scene_map, reviewer=reviewed_by)
+
+    async def restore_archived_scene_edges(self, scene_id: str, bucket_mgr) -> dict:
+        normalized = str(scene_id or "").strip()
+        store = SceneEdgeStore(self.config, create=False)
+        candidates = [
+            edge
+            for edge in store.list_edges(include_inactive=True)
+            if edge["lifecycle_status"] == "archived"
+            and normalized in {edge["source"], edge["target"]}
+        ]
+        restored: list[str] = []
+        stale: list[str] = []
+        for edge in candidates:
+            result = await self.restore_scene_edge(
+                edge["edge_id"], bucket_mgr, reviewed_by="scene_restore"
+            )
+            if result.get("status") == "restored":
+                restored.append(edge["edge_id"])
+            else:
+                stale.append(edge["edge_id"])
+        return {"restored_edge_ids": restored, "stale_edge_ids": stale}
+
+    async def reconcile_lifecycle(self, bucket_mgr) -> dict:
+        """Run deterministic startup maintenance without invoking a linker model."""
+        proposal_store = self.proposal_store(create=False)
+        if proposal_store is None:
+            return {"status": "skipped", "reason": "no_scene_edge_store"}
+        buckets = await bucket_mgr.list_all(include_archive=True)
+        scene_map = {
+            str(bucket.get("id") or ""): bucket
+            for bucket in buckets
+            if isinstance(bucket, dict) and str(bucket.get("id") or "")
+        }
+        stale_pending = proposal_store.supersede_stale_pending(scene_map)
+        edge_store = SceneEdgeStore(self.config, create=False)
+        edges = edge_store.list_edges(include_inactive=True)
+        stale_scene_ids: set[str] = set()
+        archive_deactivated = 0
+        missing_deactivated = 0
+        for edge in edges:
+            if not edge["active"]:
+                continue
+            source = scene_map.get(edge["source"])
+            target = scene_map.get(edge["target"])
+            if not _is_authored_scene(source) or not _is_authored_scene(target):
+                missing = source is None or target is None
+                endpoint = edge["source"] if not _is_authored_scene(source) else edge["target"]
+                result = edge_store.deactivate_edge(
+                    edge["edge_id"],
+                    scene_id=endpoint,
+                    reviewer="startup_maintenance",
+                    reason="scene_missing" if missing else "scene_archived",
+                    lifecycle_status="cancelled" if missing else "archived",
+                )
+                if result.get("status") == "deactivated":
+                    if missing:
+                        missing_deactivated += 1
+                    else:
+                        archive_deactivated += 1
+                continue
+            if edge["source_hash"] != _scene_hash(source):
+                stale_scene_ids.add(edge["source"])
+            if edge["target_hash"] != _scene_hash(target):
+                stale_scene_ids.add(edge["target"])
+
+        needs_review = 0
+        revalidation_ids: list[str] = []
+        relink_scene_ids: list[str] = []
+        for scene_id in sorted(stale_scene_ids):
+            result = proposal_store.refresh_after_scene_content_change(
+                scene_id,
+                scene_map,
+                created_by="startup_maintenance",
+            )
+            needs_review += int(result.get("formal_edges_needing_review") or 0)
+            revalidation_ids.extend(result.get("revalidation_proposal_ids") or [])
+            if result.get("normal_relink_required"):
+                relink_scene_ids.append(scene_id)
+
+        restored_archived: list[str] = []
+        for edge in edges:
+            if edge["lifecycle_status"] != "archived":
+                continue
+            result = edge_store.restore_edge(
+                edge["edge_id"],
+                scene_map,
+                reviewer="startup_maintenance",
+            )
+            if result.get("status") == "restored":
+                restored_archived.append(edge["edge_id"])
+        return {
+            "status": "updated",
+            "stale_proposals_superseded": stale_pending,
+            "formal_edges_needing_review": needs_review,
+            "revalidation_proposal_ids": revalidation_ids,
+            "normal_relink_scene_ids": relink_scene_ids,
+            "archive_deactivated": archive_deactivated,
+            "missing_scene_deactivated": missing_deactivated,
+            "restored_archived_edge_ids": restored_archived,
+        }
 
     @staticmethod
     def _load_providers(cfg: dict, clients: dict[str, Any]) -> list[dict]:
