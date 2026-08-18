@@ -16,9 +16,9 @@ shadow 直接切成 live，也不要同时重开 LLM planner、扩大 reranker p
 - 本地分支：`Haven/scene-event-passage-shadow-20260815`
 - 生产目标分支：`origin/Haven/diary-backend-20260724`
 - 德国源目录：`/opt/Ombre-Brain-src`
-- 当前生产 HEAD：`f24e393`
-- 2026-08-18 发布后已核验：生产 repo clean，Ombre Brain / Gateway 容器均为新构建，
-  18001 / 18002 均 HTTP 200，Serein Awake active。
+- 当前 Gateway 运行代码：`ceff1ad`
+- 2026-08-18 发布与批测后已核验：生产 repo clean，Gateway 新容器 healthy，18001 / 18002
+  均 HTTP 200；Ombre Brain 没有重启，canonical 数据没有修改。
 
 当前本地有与这轮实现无关或尚未纳入版本控制的实验资产。不要顺手 add：
 
@@ -32,13 +32,14 @@ shadow 直接切成 live，也不要同时重开 LLM planner、扩大 reranker p
 - `scripts/evaluate_passage_verifier.py`；
 - `scripts/evaluate_passage_verifier_batch.py`。
 
-2026-08-18 本地新增、尚未提交的本轮实现是：
+2026-08-18 已发布的本轮实现是：
 
 - `gateway.py`：baseline retrieval 保持原位；formal recall 完成后，由 weak trigger 决定
   是否执行 clause embedding 和 source-bound query-view expansion；
 - `scripts/verify_passage_candidate_simulation_shadow.py`：验证弱候选会执行，strong
   candidate 与 route skip 不发 clause embedding；
-- 本文件与 evaluation 文档：更新执行态口径。
+- `f78c5ce`：weak-trigger 控制 query-view shadow 执行；
+- `ceff1ad`：把预取的 semantic query vector 正确传入 full-shadow handler，并补运行时回归。
 
 本交接写入前，最近提交为：
 
@@ -47,6 +48,8 @@ shadow 直接切成 live，也不要同时重开 LLM planner、扩大 reranker p
 3. `aed1382 Keep cue-bound passages in clause shadow`
 4. `4941d18 Observe weak candidate clause trigger in shadow`
 5. `f24e393 Refresh passage shadows after memory mutations`
+6. `f78c5ce Gate clause query shadow on weak candidates`
+7. `ceff1ad Pass semantic vector into gated shadow`
 
 ### 已发布的派生索引自动刷新
 
@@ -179,7 +182,7 @@ Cue 命中始终只是 candidate discovery，不能独立准入。Reranker 即�
 - exact anchor=false。
 
 `4941d18` 生产态里，它是在完整 diagnostic retrieval 已经跑完之后才附加，因此当时
-不省任何延迟。2026-08-18 的本地未提交实现已经把执行顺序改为：
+不省任何延迟。`ceff1ad` 已把执行顺序改为：
 
 1. original-query passage baseline 随普通 diagnostic retrieval 运行；
 2. formal recall 完成，拿到最终 recalled IDs；
@@ -190,8 +193,31 @@ Cue 命中始终只是 candidate discovery，不能独立准入。Reranker 即�
 
 此时 `decision_applied=true` 只表示 trigger 已控制 **simulation shadow 的 query-view
 执行**；`query_view_execution_changed=true`，但 `live_execution_changed=false`，formal
-recall、admission 和 injection 完全没变。尚未发布，也还没有新的生产延迟或 gold/live
-pair 统计。
+recall、admission 和 injection 完全没变。
+
+### `ceff1ad` 固定套件结果
+
+德国共完成 70 次 `full_shadow` 请求：2 次 smoke、22 gold、6 个重点样本、40 条 live
+probe/confounder。所有请求均保持 `live_execution_changed=false` 和
+`live_injection_enabled=false`，contract violation 为 0，批后 Gateway health 200、无
+traceback/error。
+
+- 11 个 reviewed false-positive gold：10/11 `would_trigger`，7/11 真执行；误触发的
+  query-view 增量平均 4484.9 ms；
+- 10 个 reviewed correct gold：5/10 `would_trigger`，3/10 真执行，但相对 original-query
+  passage baseline 新增 labeled correct parent 为 0；
+- 聚焦长 query：初遇 Scene 本轮已经在 baseline；扩张新增 0 个正确 parent，同时新增
+  一个明确无关的笔友名册 Scene `scene_mig2_65c79b803ae9143bc480`；
+- 猫狐有/无 previous turn 结果完全相同，均为单 view `not_needed`；
+- 20 probe + 20 confounder：probe 15/20、confounder 18/20 判 trigger，但全是单 view，
+  实际 query-view expansion 为 0/40。
+
+因此当前 gate **不能升 live**。`no_formal_memory_injected` 太宽，且 `would_trigger` 在没有
+额外 clause view 时会高估真正执行。下一轮先只收紧 gate，不改 admission/injection：
+
+1. `len(query_views) > 1` 才允许成为 executable trigger；
+2. expensive branch 前增加 present/current-state/context-required veto；
+3. 原样重跑同一固定套件。
 
 ## 已否掉或暂不上线的方向
 
@@ -254,15 +280,10 @@ Passage 找局部句子；reranker 选 seed；arc 限制故事线；Scene edge �
 
 1. 先读本文件和 `docs/2026-08-16-passage-shadow-evaluation.md`，不要重跑已经否掉的
    planner、critic、pool 12、8B 实验。
-2. 已在本地完成 weak-trigger 控制执行的纯 shadow 版本；不要把它误报成已发布。
-3. 下一步用 Terra 固定 gold suite 和 live probe/confounder pairs 统计：
-   - 应触发而触发；
-   - 不该触发却触发；
-   - 新增正确 parent；
-   - 新增明显无关 parent；
-   - 端到端增量延迟。
-4. 单独盯住聚焦长 query、猫狐纠正、token/byte current-state 反例、present chitchat
-   和带上一轮共指的样本。
+2. `ceff1ad` weak-trigger shadow 和固定套件已完成；不要再重跑本轮 70 请求。
+3. 下一刀只做 multi-view executable 条件与 present/current-state/context-required veto，
+   formal recall/injection 继续不变。
+4. 用同一 gold、live pairs 和六个重点样本复测，比较触发、真实执行、新增 parent 与延迟。
 5. 只有弱触发 gate 稳定后，才另开 graph one-hop shadow；不要同一提交里加 arc cluster。
 6. arc cluster 先离线产 proposal/review artifact，不进入 hot path，不生成新的 canonical
    summary。
@@ -288,12 +309,13 @@ Passage 找局部句子；reranker 选 seed；arc 限制故事线；Scene edge �
 所有 query-view、weak-trigger、passage expansion 和 Scene diffusion 都是 shadow。
 不要把 expanded candidates 或 UI 诊断说成 live injection。
 
-`f24e393` 已发布。若后续再改 tracked 文件，仍走唯一生产链：本地精确改动 -> commit ->
+`ceff1ad` 已发布。若后续再改 tracked 文件，仍走唯一生产链：本地精确改动 -> commit ->
 push 当前生产分支 -> 德国标准部署。不要 SCP/rsync 覆盖 tracked 运行文件。
 
 ## 一句话接手口径
 
-分句 + source-bound passage 已证明能救回整句 embedding 漏掉的初遇 Scene；现在要做的
-不是上线它，而是让它只在“候选真的弱”时才跑，并用固定正反例验证新增候选是否值得。
+分句 + source-bound passage 能扩张候选，但当前 weak gate 在 reviewed negatives 上严重
+过触发，且本轮没有新增 labeled correct parent；下一刀先要求 multi-view，再挡住
+present/current-state/context-required，继续 shadow，不碰 admission/injection。
 图只能从可靠 seed 补一跳，叙事弧只能先做限制图噪声的 derived index，二者都不能替代
 第一跳检索，也不能直接获得注入权。

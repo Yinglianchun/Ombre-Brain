@@ -396,7 +396,7 @@ At `4941d18`, this trigger was observation only. It was attached after the
 diagnostic retrieval had already run, so it saved no latency and changed neither
 query-view execution nor live injection.
 
-A 2026-08-18 local follow-up moves clause expansion behind this trigger in the
+A 2026-08-18 follow-up moves clause expansion behind this trigger in the
 simulation shadow path. The original-query passage baseline still runs with the
 ordinary diagnostic retrieval. After formal recall finishes, the trigger now
 decides whether the additional clause embeddings and source-bound passage lanes
@@ -404,8 +404,39 @@ execute. Route skips, direct exact evidence, and strong candidates record
 `skipped_by_weak_candidate_trigger`; weak candidates alone run query-view
 expansion. `decision_applied=true` refers only to this shadow execution choice;
 `live_execution_changed=false`, and formal admission/injection remain unchanged.
-This follow-up is local and uncommitted, so no production latency or gold/live-pair
-result is claimed yet.
+The Gateway-only release reached Germany at `ceff1ad`; `ombre-brain` was not
+restarted and canonical data was not modified.
+
+### Weak-trigger-gated execution result
+
+Seventy full-shadow requests completed against Germany `ceff1ad`: two smoke
+runs, 22 fixed gold cases, six focused cases, and 40 live probe/confounder
+requests. Every response kept `live_execution_changed=false` and
+`live_injection_enabled=false`; there were no shadow-contract violations or
+Gateway errors.
+
+- Of 11 reviewed false-positive gold cases, 10 recorded `would_trigger=true`
+  and seven actually executed query-view. Those false-positive expansions cost
+  4484.9 ms on average.
+- Of 10 reviewed correct gold cases, five recorded `would_trigger=true` and
+  three executed query-view, but none added a labeled correct parent over the
+  original-query passage baseline.
+- Across all 10 real gold expansions, mean incremental query-view time was
+  4476 ms, median 4458 ms, and maximum 4593 ms.
+- On the focused long initial-story query, the intended Scene was already in
+  the original-query passage baseline. Clause expansion added no new correct
+  parent and did add `scene_mig2_65c79b803ae9143bc480`, a manually reviewed
+  unrelated pen-pal roster Scene.
+- Cat/fox with and without the supplied previous turn produced the same
+  `no_formal_memory_injected` decision and a single-view `not_needed` result.
+- In 20 live probes and 20 confounders, 15 probes and 18 confounders recorded
+  `would_trigger=true`. All 40 were single-view, so none actually expanded.
+
+Do not promote this gate to live execution. Before another shadow run, require
+more than one deterministic query view before treating a trigger as executable,
+and add explicit present/current-state/context-required vetoes before the
+expensive branch. Re-run the same fixed suites without changing admission or
+injection.
 
 ### Updated decision
 
@@ -413,8 +444,8 @@ result is claimed yet.
 2. Keep deterministic clause views and weak-trigger-controlled execution in shadow.
 3. Do not revive the planner LLM, utility critic, larger pool, instruction
    prefix, or 8B reranker based on this example.
-4. Evaluate the weak trigger on the fixed gold and paired live probes before it
-   controls execution.
+4. Keep the weak trigger out of live execution; the fixed gold and live pairs
+   show that the current gate over-triggers reviewed negatives.
 5. Test graph rescue separately, only after a reliable direct seed; graph
    expansion cannot find the first missing seed.
 
