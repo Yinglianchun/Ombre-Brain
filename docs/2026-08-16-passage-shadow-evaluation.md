@@ -471,6 +471,54 @@ Any future splitter experiment must first target cases where the correct parent
 is absent from the original-query baseline and must demonstrate newly added
 correct parents over newly added noise.
 
+### Explicit evaluator-only closeout and Mainland observational control
+
+`1125a70` removed the speculative context-reference veto and stopped automatic
+query-view execution from the default full-shadow path. The splitter and
+source-bound passage machinery remain available only when a full-shadow
+simulation explicitly sends `passage_query_view_shadow=true`.
+
+- Default full-shadow now records
+  `query_view_shadow.status=disabled_explicit_opt_in_required`, with no clause
+  embedding time or expanded candidates.
+- Explicit full-shadow still runs the closed experiment when requested.
+- Sending the explicit flag to `live_mirror` fails with HTTP 400
+  `passage_query_view_shadow_requires_full_shadow_simulation`.
+- Ordinary live recall, formal admission/injection, and canonical data remain
+  unchanged.
+
+The Mainland old line was then used as a read-only observational control:
+
+- Mainland: `/opt/Ombre-Brain`, `main @ 284c9c7`, graph retrieval, 113 buckets,
+  no simulation-scope support;
+- Germany: `/opt/Ombre-Brain-src`, `Haven/diary-backend-20260724 @ 1125a70`,
+  bucket retrieval, 114 buckets, live-mirror and explicit full-shadow support.
+
+On the same 22 gold queries, the visible formal outputs were:
+
+| Environment | Correct target hit | False-positive any recall | Median wall | p95 wall |
+|---|---:|---:|---:|---:|
+| Mainland old full hook | 3/10 | 5/11 | 1254 ms | 2117 ms |
+| Germany live-mirror | 6/10 | 3/11 | 4753 ms | 8940 ms |
+| Germany explicit full-shadow | 7/10 | 3/11 | 7402 ms | 13016 ms |
+
+This is not a strict A/B comparison: branch, canonical/derived data,
+retrieval mode, and reranker configuration differ. Germany live and explicit
+recalled-ID sequences matched exactly on 19/22 queries; Mainland and Germany
+live matched on 8/22. The one apparent extra correct formal output in explicit
+full-shadow cannot be attributed to query-view, because query-view remained
+candidate-only and added zero labeled-correct parents. Six query-view
+executions added 18 parent occurrences (16 unique) at 4706 ms mean incremental
+cost, still with zero measured positive utility.
+
+The control artifact is `state/mainland-control-1125a70-20260818.json`.
+Germany issued 47 controlled requests (three smoke, 22 live-mirror, 22 explicit
+shadow) with no retry. Mainland completed two 22-case runs because the first
+run's structured output was not retained for artifact assembly; metrics use
+only the second run. There were no per-request retries.
+No service or canonical mutation was made on Mainland; Germany was changed only
+through the normal Git/Gateway deployment chain.
+
 ### Updated decision
 
 1. Keep live recall unchanged.

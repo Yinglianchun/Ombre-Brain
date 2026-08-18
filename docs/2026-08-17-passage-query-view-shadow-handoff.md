@@ -16,7 +16,7 @@ shadow 直接切成 live，也不要同时重开 LLM planner、扩大 reranker p
 - 本地分支：`Haven/scene-event-passage-shadow-20260815`
 - 生产目标分支：`origin/Haven/diary-backend-20260724`
 - 德国源目录：`/opt/Ombre-Brain-src`
-- 当前 Gateway 运行代码：`0ca878a`
+- 当前 Gateway 运行代码：`1125a70`
 - 2026-08-18 发布与批测后已核验：生产 repo clean，Gateway 新容器 healthy，18001 / 18002
   均 HTTP 200；Ombre Brain 没有重启，canonical 数据没有修改。
 
@@ -52,6 +52,7 @@ shadow 直接切成 live，也不要同时重开 LLM planner、扩大 reranker p
 7. `ceff1ad Pass semantic vector into gated shadow`
 8. `d5bb65d Tighten query view execution gate`
 9. `0ca878a Preserve gray-zone query view rescue`
+10. `1125a70 Make query view shadow explicit only`
 
 ### 已发布的派生索引自动刷新
 
@@ -244,6 +245,43 @@ traceback/error。
 能新增正确候选”。不要继续为了 trigger precision 调阈值。若未来重开 splitter，gold 必须
 先限定为 target 不在 original-query baseline，并直接比较新增正确与新增噪声。
 
+### 自动分句已撤，保留显式实验工具
+
+`1125a70` 已删除 context-required 指代 veto，并把 query-view expansion 从默认
+full-shadow 链路撤下：
+
+- 默认 full-shadow 只保留 original-query passage baseline 和 trigger telemetry，
+  `query_view_shadow.status=disabled_explicit_opt_in_required`；
+- evaluator 只有显式发送 `passage_query_view_shadow=true` 才能运行分句；
+- 该 flag 只允许 `simulation=true + simulation_scope=full_shadow`；live-mirror 使用会
+  HTTP 400；
+- splitter、source-bound passage 与 runner 保留为关闭的实验资产，不进入 ordinary live。
+
+context-required 两轮命中均为 0，而且“有这种/那件事/它”不等于缺上下文，“messages
+有上一轮”也不保证指代已解析，因此整段判断和测试已删除。
+
+### 大陆旧 main observational control
+
+2026-08-18 只读核验：
+
+- 大陆 `/opt/Ombre-Brain`：`main @ 284c9c7`，`retrieval_mode=graph`，113 buckets，
+  不支持 simulation scope；
+- 德国 `/opt/Ombre-Brain-src`：`Haven/diary-backend-20260724 @ 1125a70`，
+  `retrieval_mode=bucket`，114 buckets。
+
+同一 gold 22 的可见结果：大陆旧 full hook correct target 3/10、false-positive any recall
+5/11；德国 live-mirror 为 6/10、3/11；德国显式 full-shadow 为 7/10、3/11。大陆 median
+1254 ms，德国 live-mirror 4753 ms，德国显式 full-shadow 7402 ms。
+
+这只能作为旧 live 行为基线，不是严格 A/B：两边 branch、数据快照、retrieval mode、
+reranker 配置都不同。德国 explicit 看似多一个 correct formal output，也不能归功于分句；
+query-view 仍 candidate-only，六次执行新增 18 个 occurrence、16 个 unique parent，新增
+labeled correct 仍为 0。
+
+对照 artifact：`state/mainland-control-1125a70-20260818.json`。大陆未改 tracked 文件、
+未重启服务、未写 canonical。德国请求为 3 smoke + 22 live-mirror + 22 explicit，0 retry；
+大陆因首轮结构化输出未保留而完整跑了两轮 22，指标只取第二轮，没有单请求 retry。
+
 ## 已否掉或暂不上线的方向
 
 - DeepSeek query planner：正例不稳定，猫狐重复三次排名 1/4/4，平均 fallback
@@ -305,7 +343,7 @@ Passage 找局部句子；reranker 选 seed；arc 限制故事线；Scene edge �
 
 1. 先读本文件和 `docs/2026-08-16-passage-shadow-evaluation.md`，不要重跑已经否掉的
    planner、critic、pool 12、8B 实验。
-2. `0ca878a` gate 收紧与复测已完成；不要再重跑本轮 70 + 70 + 29 请求。
+2. `1125a70` 已撤下自动分句并删除 context veto；默认 full-shadow 不再支付 clause cost。
 3. 停止继续调 weak-trigger 阈值；当前 splitter 没有新增正确 parent，不能升 live。
 4. 若重开 splitter，先建立“target 明确缺席 baseline”的 fixed gold，再验证 expansion
    utility；不能拿 trigger accuracy 代替召回收益。
@@ -334,13 +372,13 @@ Passage 找局部句子；reranker 选 seed；arc 限制故事线；Scene edge �
 所有 query-view、weak-trigger、passage expansion 和 Scene diffusion 都是 shadow。
 不要把 expanded candidates 或 UI 诊断说成 live injection。
 
-`0ca878a` 已发布。若后续再改 tracked 文件，仍走唯一生产链：本地精确改动 -> commit ->
+`1125a70` 已发布。若后续再改 tracked 文件，仍走唯一生产链：本地精确改动 -> commit ->
 push 当前生产分支 -> 德国标准部署。不要 SCP/rsync 覆盖 tracked 运行文件。
 
 ## 一句话接手口径
 
-gate 已经能减少垃圾执行并保住 2/2 executable rescue，但分句扩张仍新增正确 0、噪声多。
-当前方案保持 shadow，不升 live，也不继续调 gate；未来只有在 target 缺席 baseline 的
-固定 gold 上证明 expansion utility 为正，才值得重开 splitter。
+自动分句已经从默认 full-shadow 撤下，context veto 已删除；实验只允许 evaluator 显式
+开启。大陆旧 main 可作 observational live baseline，但不是严格 A/B。未来只有在 target
+缺席 baseline 的 fixed gold 上证明 expansion utility 为正，才值得重开 splitter。
 图只能从可靠 seed 补一跳，叙事弧只能先做限制图噪声的 derived index，二者都不能替代
 第一跳检索，也不能直接获得注入权。
