@@ -266,6 +266,8 @@ async def verify_weak_trigger_controls_query_view_execution() -> None:
         *,
         action: str = "recall",
         exact_anchor: bool = False,
+        memory_need: str = "",
+        surface_route: str = "",
     ) -> dict:
         candidates = [] if action == "skip" else [{
             "canonical_scene": True,
@@ -274,16 +276,21 @@ async def verify_weak_trigger_controls_query_view_execution() -> None:
             "full_title_recall_match": False,
             "source_bound_raw_quote_match": False,
         }]
+        retrieval_budget = {
+            "cheap_retrieval": {"candidates": candidates},
+            "passage_candidate_shadow": fake_passage_debug(
+                query_view_service,
+                long_query,
+                [1.0, 0.0],
+            ),
+        }
+        if memory_need:
+            retrieval_budget["memory_need"] = memory_need
+        if surface_route:
+            retrieval_budget["surface_route"] = surface_route
         return {
             "applied_action": action,
-            "retrieval_budget": {
-                "cheap_retrieval": {"candidates": candidates},
-                "passage_candidate_shadow": fake_passage_debug(
-                    query_view_service,
-                    long_query,
-                    [1.0, 0.0],
-                ),
-            },
+            "retrieval_budget": retrieval_budget,
         }
 
     query_view_service.embedding_engine.calls.clear()
@@ -304,6 +311,78 @@ async def verify_weak_trigger_controls_query_view_execution() -> None:
     assert weak_passage["query_view_shadow"]["status"] == "ok"
     assert weak_passage["query_view_shadow"]["execution_trigger_applied"] is True
     assert query_view_service.embedding_engine.calls == query_views[1:]
+
+    query_view_service.embedding_engine.calls.clear()
+    single_view_semantic = semantic_payload(0.0)
+    await query_view_service._apply_passage_weak_candidate_query_view_shadow(
+        "又在翻我们的聊天记录，配上bgm更好哭了><",
+        [1.0, 0.0],
+        single_view_semantic,
+        recalled_ids=[],
+    )
+    single_view_passage = single_view_semantic["retrieval_budget"][
+        "passage_candidate_shadow"
+    ]
+    single_view_trigger = single_view_passage["weak_candidate_trigger_shadow"]
+    assert single_view_trigger["would_trigger"] is False
+    assert single_view_trigger["weak_candidate_detected"] is True
+    assert single_view_trigger["weak_candidate_reason"] == "no_formal_memory_injected"
+    assert single_view_trigger["reason"] == "single_query_view_no_expansion"
+    assert query_view_service.embedding_engine.calls == []
+
+    current_query = "现在记忆库有18个工具，感觉太多了。当前配置是不是又变了"
+    current_semantic = semantic_payload(
+        0.0,
+        memory_need="optional",
+        surface_route="present_reality",
+    )
+    await query_view_service._apply_passage_weak_candidate_query_view_shadow(
+        current_query,
+        [1.0, 0.0],
+        current_semantic,
+        recalled_ids=[],
+    )
+    current_passage = current_semantic["retrieval_budget"]["passage_candidate_shadow"]
+    current_trigger = current_passage["weak_candidate_trigger_shadow"]
+    assert current_trigger["would_trigger"] is False
+    assert current_trigger["reason"] == "current_turn_optional_query_view_veto"
+    assert current_trigger["execution_gate"]["current_turn_optional"] is True
+    assert query_view_service.embedding_engine.calls == []
+
+    context_query = "这种方式是不是不对？那件事后来怎么办"
+    context_semantic = semantic_payload(0.0)
+    await query_view_service._apply_passage_weak_candidate_query_view_shadow(
+        context_query,
+        [1.0, 0.0],
+        context_semantic,
+        recalled_ids=[],
+    )
+    context_passage = context_semantic["retrieval_budget"]["passage_candidate_shadow"]
+    context_trigger = context_passage["weak_candidate_trigger_shadow"]
+    assert context_trigger["would_trigger"] is False
+    assert context_trigger["reason"] == "context_required_query_view_veto"
+    assert query_view_service.embedding_engine.calls == []
+
+    context_with_previous = semantic_payload(0.0)
+    await query_view_service._apply_passage_weak_candidate_query_view_shadow(
+        context_query,
+        [1.0, 0.0],
+        context_with_previous,
+        recalled_ids=[],
+        messages=[
+            {"role": "user", "content": "我们刚才在说旧窗口的交接方式"},
+            {"role": "user", "content": context_query},
+        ],
+    )
+    previous_passage = context_with_previous["retrieval_budget"][
+        "passage_candidate_shadow"
+    ]
+    previous_trigger = previous_passage["weak_candidate_trigger_shadow"]
+    assert previous_trigger["would_trigger"] is True
+    assert previous_trigger["execution_gate"]["has_previous_turn"] is True
+    assert query_view_service.embedding_engine.calls == (
+        query_view_service._deterministic_passage_query_views(context_query)[1:]
+    )
 
     query_view_service.embedding_engine.calls.clear()
     strong_semantic = semantic_payload(0.71)

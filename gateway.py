@@ -2405,6 +2405,7 @@ class GatewayService:
                 semantic_query_vector or [],
                 semantic_recall_debug,
                 recalled_ids=[],
+                messages=messages,
             )
             narrative_recall_debug = self._narrative_roll_shadow_debug(
                 query,
@@ -2675,6 +2676,7 @@ class GatewayService:
             semantic_query_vector or [],
             semantic_debug,
             recalled_ids=recalled_ids,
+            messages=messages,
         )
         ablation_observation = (
             semantic_debug.get("live_recall_ablation_observation")
@@ -14186,6 +14188,7 @@ class GatewayService:
         semantic_recall_debug: dict[str, Any] | None,
         *,
         recalled_ids: list[str],
+        messages: list[dict[str, Any]] | None = None,
     ) -> None:
         if not isinstance(semantic_recall_debug, dict):
             return
@@ -14221,26 +14224,61 @@ class GatewayService:
         applied_action = str(semantic_recall_debug.get("applied_action") or "recall")
         recalled_count = len([item for item in recalled_ids or [] if str(item or "").strip()])
 
+        weak_candidate_detected = False
+        weak_candidate_reason = ""
+        if recalled_count == 0:
+            weak_candidate_detected = True
+            weak_candidate_reason = "no_formal_memory_injected"
+        elif top_body_semantic < 0.60:
+            weak_candidate_detected = True
+            weak_candidate_reason = "top_body_semantic_below_060"
+        elif multi_clause and top_body_semantic < 0.64:
+            weak_candidate_detected = True
+            weak_candidate_reason = "multiclause_body_semantic_gray_zone"
+
+        user_turn_count = sum(
+            1
+            for message in messages or []
+            if isinstance(message, dict)
+            and message.get("role") == "user"
+            and self._coerce_message_text(message.get("content")).strip()
+        )
+        has_previous_turn = user_turn_count > 1
+        context_reference_re = re.compile(
+            r"(?:这样|这种|那样|那种|这件事|那件事|刚才|刚刚|"
+            r"(?:^|[，。！？、\s]|然后|所以)(?:她|他|它|他们|她们|它们))"
+        )
+        clause_views = query_views[1:]
+        all_clause_views_require_context = bool(
+            clause_views
+            and all(context_reference_re.search(view) for view in clause_views)
+        )
+        current_turn_optional = optional_shallow_probe_allowed(retrieval_budget)
+
         would_trigger = False
         reason = "strong_candidate"
         if applied_action == "skip":
             reason = "route_skip"
         elif exact_anchor:
             reason = "direct_exact_evidence"
-        elif recalled_count == 0:
+        elif not weak_candidate_detected:
+            reason = "strong_candidate"
+        elif not multi_clause:
+            reason = "single_query_view_no_expansion"
+        elif current_turn_optional:
+            reason = "current_turn_optional_query_view_veto"
+        elif all_clause_views_require_context and not has_previous_turn:
+            reason = "context_required_query_view_veto"
+        else:
             would_trigger = True
-            reason = "no_formal_memory_injected"
-        elif top_body_semantic < 0.60:
-            would_trigger = True
-            reason = "top_body_semantic_below_060"
-        elif multi_clause and top_body_semantic < 0.64:
-            would_trigger = True
-            reason = "multiclause_body_semantic_gray_zone"
+            reason = weak_candidate_reason
 
         passage_shadow["weak_candidate_trigger_shadow"] = {
             "status": "observed",
             "would_trigger": would_trigger,
             "reason": reason,
+            "weak_candidate_detected": weak_candidate_detected,
+            "weak_candidate_reason": weak_candidate_reason,
             "decision_applied": False,
             "live_execution_changed": False,
             "query_view_execution_changed": False,
@@ -14250,6 +14288,14 @@ class GatewayService:
             "canonical_scene_candidate_count": len(candidate_rows),
             "formal_recalled_count": recalled_count,
             "exact_anchor": exact_anchor,
+            "execution_gate": {
+                "eligible": would_trigger,
+                "requires_multiple_views": True,
+                "has_previous_turn": has_previous_turn,
+                "all_clause_views_require_context": all_clause_views_require_context,
+                "current_turn_optional": current_turn_optional,
+                "veto_reason": "" if would_trigger else reason,
+            },
             "thresholds": {
                 "weak_body_semantic": 0.60,
                 "multiclause_gray_ceiling": 0.64,
@@ -14263,11 +14309,13 @@ class GatewayService:
         semantic_recall_debug: dict[str, Any] | None,
         *,
         recalled_ids: list[str],
+        messages: list[dict[str, Any]] | None = None,
     ) -> None:
         self._attach_passage_weak_candidate_trigger_shadow(
             query,
             semantic_recall_debug,
             recalled_ids=recalled_ids,
+            messages=messages,
         )
         if not isinstance(semantic_recall_debug, dict):
             return

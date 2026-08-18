@@ -257,9 +257,17 @@ def evaluate_case(
         str(item) for item in case.get("irrelevant_refs") or [] if str(item)
     }
 
+    query_view_count = int(trigger.get("query_view_count") or 0)
+    query_view_executable = query_view_count > 1
     expected_trigger = case.get("expected_trigger")
+    rescue_needed: bool | None = None
     if expected_trigger == "if_target_not_formally_recalled":
-        expected_trigger = None if not target_ids else not bool(target_ids & recalled_ids)
+        rescue_needed = None if not target_ids else not bool(target_ids & recalled_ids)
+        expected_trigger = (
+            None
+            if rescue_needed is None
+            else bool(rescue_needed and query_view_executable)
+        )
     elif expected_trigger is not None:
         expected_trigger = bool(expected_trigger)
 
@@ -272,11 +280,16 @@ def evaluate_case(
         "query": query,
         "previous_turn": str(case.get("previous_turn") or ""),
         "expected_trigger": expected_trigger,
+        "rescue_needed": rescue_needed,
+        "query_view_executable": query_view_executable,
         "would_trigger": would_trigger,
         "trigger_correct": (
             None if expected_trigger is None else would_trigger == expected_trigger
         ),
         "trigger_reason": trigger.get("reason"),
+        "weak_candidate_detected": trigger.get("weak_candidate_detected"),
+        "weak_candidate_reason": trigger.get("weak_candidate_reason"),
+        "execution_gate": trigger.get("execution_gate") or {},
         "trigger_decision_applied": trigger.get("decision_applied"),
         "query_view_execution_changed": trigger.get("query_view_execution_changed"),
         "live_execution_changed": trigger.get("live_execution_changed"),
@@ -300,7 +313,7 @@ def evaluate_case(
         "query_view_incremental_ms": query_view.get("timing_ms"),
         "top_body_semantic": trigger.get("top_body_semantic"),
         "formal_recalled_count": trigger.get("formal_recalled_count"),
-        "query_view_count": trigger.get("query_view_count"),
+        "query_view_count": query_view_count,
         "request_wall_ms": wall_ms,
         "prepare_timing_debug": debug.get("prepare_timing_debug") or {},
         "passage_status": passage.get("status"),
@@ -314,6 +327,8 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     expected_yes = [row for row in judged if row["expected_trigger"]]
     expected_no = [row for row in judged if not row["expected_trigger"]]
     triggered = [row for row in rows if row["would_trigger"]]
+    rescue_needed = [row for row in rows if row.get("rescue_needed") is True]
+    rescue_executable = [row for row in rescue_needed if row["query_view_executable"]]
     incremental = [
         int(row["query_view_incremental_ms"])
         for row in triggered
@@ -327,6 +342,19 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "expected_trigger_count": len(expected_yes),
         "unexpected_trigger": sum(row["would_trigger"] for row in expected_no),
         "expected_no_trigger_count": len(expected_no),
+        "rescue_needed_count": len(rescue_needed),
+        "rescue_executable_count": len(rescue_executable),
+        "rescue_executable_and_triggered": sum(
+            row["would_trigger"] for row in rescue_executable
+        ),
+        "rescue_single_view_count": sum(
+            not row["query_view_executable"] for row in rescue_needed
+        ),
+        "false_positive_query_view_execution_count": sum(
+            row.get("case_kind") == "false_positive"
+            and row.get("query_view_executed")
+            for row in rows
+        ),
         "trigger_accuracy": (
             round(sum(bool(row["trigger_correct"]) for row in judged) / len(judged), 4)
             if judged
