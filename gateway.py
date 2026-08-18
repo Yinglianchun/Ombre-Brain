@@ -2442,6 +2442,10 @@ class GatewayService:
                 recalled_ids=[],
                 execution_enabled=passage_query_view_shadow_requested,
             )
+            await self._attach_reviewed_scene_onehop_shadow(
+                semantic_recall_debug,
+                recalled_ids=[],
+            )
             narrative_recall_debug = self._narrative_roll_shadow_debug(
                 query,
                 [],
@@ -2714,6 +2718,10 @@ class GatewayService:
             semantic_debug,
             recalled_ids=recalled_ids,
             execution_enabled=passage_query_view_shadow_enabled,
+        )
+        await self._attach_reviewed_scene_onehop_shadow(
+            semantic_debug,
+            recalled_ids=recalled_ids,
         )
         ablation_observation = (
             semantic_debug.get("live_recall_ablation_observation")
@@ -14386,6 +14394,152 @@ class GatewayService:
         if isinstance(query_view_shadow, dict):
             query_view_shadow["execution_trigger_applied"] = True
             query_view_shadow["trigger_reason"] = str(trigger.get("reason") or "triggered")
+
+    async def _attach_reviewed_scene_onehop_shadow(
+        self,
+        semantic_recall_debug: dict[str, Any] | None,
+        *,
+        recalled_ids: list[str],
+    ) -> None:
+        if not isinstance(semantic_recall_debug, dict):
+            return
+        retrieval_budget = semantic_recall_debug.get("retrieval_budget")
+        if not isinstance(retrieval_budget, dict):
+            return
+
+        started_at = time.perf_counter()
+        floor = 0.50
+        policy = {
+            "kind": "reviewed_echoes_onehop_semantic_support_candidate_only",
+            "relation_types": ["echoes"],
+            "body_semantic_floor": floor,
+            "max_candidates": 1,
+            "requires_formal_scene_seed": True,
+            "requires_existing_cheap_candidate": True,
+        }
+        payload: dict[str, Any] = {
+            "status": "pending",
+            "mode": "simulation_shadow",
+            "decision_applied": False,
+            "affects_recall": False,
+            "live_injection_enabled": False,
+            "policy": policy,
+            "formal_seed_ids": [],
+            "valid_edge_count": 0,
+            "candidate_count": 0,
+            "candidates": [],
+        }
+        retrieval_budget["reviewed_scene_onehop_shadow"] = payload
+
+        requested_seed_ids = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in recalled_ids or []
+                if str(value or "").strip()
+            )
+        )
+        if not requested_seed_ids:
+            payload.update(status="no_seed", reason="no_formal_recalled_scene")
+            payload["timing_ms"] = max(
+                0,
+                int((time.perf_counter() - started_at) * 1000),
+            )
+            return
+
+        cheap_retrieval = retrieval_budget.get("cheap_retrieval")
+        cheap_retrieval = cheap_retrieval if isinstance(cheap_retrieval, dict) else {}
+        cheap_scores = {
+            str(row.get("bucket_id") or ""): self._safe_float(
+                row.get("body_semantic_score"),
+                row.get("semantic_score"),
+            )
+            for row in cheap_retrieval.get("candidates") or []
+            if isinstance(row, dict)
+            and row.get("canonical_scene")
+            and str(row.get("bucket_id") or "")
+        }
+
+        all_buckets = await self._list_gateway_buckets(include_archive=False)
+        scene_map = {
+            str(bucket.get("id") or ""): bucket
+            for bucket in all_buckets or []
+            if str(bucket.get("id") or "")
+            and self._is_canonical_scene_bucket(bucket)
+            and can_bucket_be_related_target(bucket, explicit_lookup=False)
+            and self._canonical_scene_domain_policy(bucket)[1] == "normal"
+        }
+        seed_ids = [value for value in requested_seed_ids if value in scene_map]
+        payload["formal_seed_ids"] = seed_ids
+        if not seed_ids:
+            payload.update(status="no_seed", reason="no_formal_canonical_scene_seed")
+            payload["timing_ms"] = max(
+                0,
+                int((time.perf_counter() - started_at) * 1000),
+            )
+            return
+
+        valid_edges = self.scene_edge_store.recall_edges(scene_map)
+        payload["valid_edge_count"] = len(valid_edges)
+        seed_set = set(seed_ids)
+        by_neighbor: dict[str, dict[str, Any]] = {}
+        for edge in valid_edges:
+            if str(edge.get("relation_type") or "") != "echoes":
+                continue
+            source_id = str(edge.get("source") or "")
+            target_id = str(edge.get("target") or "")
+            if source_id in seed_set and target_id not in seed_set:
+                seed_id, neighbor_id = source_id, target_id
+            elif target_id in seed_set and source_id not in seed_set:
+                seed_id, neighbor_id = target_id, source_id
+            else:
+                continue
+            semantic_score = self._safe_float(cheap_scores.get(neighbor_id), 0.0)
+            if semantic_score < floor:
+                continue
+            edge_confidence = self._safe_float(edge.get("confidence"), 0.0)
+            row = {
+                "candidate_only": True,
+                "scene_id": neighbor_id,
+                "seed_scene_id": seed_id,
+                "edge_id": str(edge.get("edge_id") or ""),
+                "relation_type": "echoes",
+                "body_semantic_score": round(semantic_score, 4),
+                "edge_confidence": round(edge_confidence, 4),
+            }
+            current = by_neighbor.get(neighbor_id)
+            if current is None or (
+                semantic_score,
+                edge_confidence,
+                str(edge.get("edge_id") or ""),
+            ) > (
+                self._safe_float(current.get("body_semantic_score"), 0.0),
+                self._safe_float(current.get("edge_confidence"), 0.0),
+                str(current.get("edge_id") or ""),
+            ):
+                by_neighbor[neighbor_id] = row
+
+        candidates = sorted(
+            by_neighbor.values(),
+            key=lambda row: (
+                -self._safe_float(row.get("body_semantic_score"), 0.0),
+                -self._safe_float(row.get("edge_confidence"), 0.0),
+                str(row.get("scene_id") or ""),
+            ),
+        )[:1]
+        payload["candidate_count"] = len(candidates)
+        payload["candidates"] = candidates
+        payload.update(
+            status="expanded" if candidates else "no_candidate",
+            reason=(
+                "reviewed_echoes_neighbor_over_semantic_floor"
+                if candidates
+                else "no_reviewed_echoes_neighbor_over_semantic_floor"
+            ),
+        )
+        payload["timing_ms"] = max(
+            0,
+            int((time.perf_counter() - started_at) * 1000),
+        )
 
     @classmethod
     def _merge_passage_query_view_candidates(
