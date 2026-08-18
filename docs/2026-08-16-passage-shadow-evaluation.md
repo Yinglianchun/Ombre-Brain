@@ -110,8 +110,10 @@ observation-only and does not alter Gateway admission or injection.
   hash-based sync in the Gateway background. The write response waits only for
   queue acknowledgement, not for embeddings or cue binding. Unchanged owners
   remain cached; a newly written day of Events no longer requires a Gateway
-  restart once this follow-up is deployed. This follow-up is local-only at the
-  time of writing and is not part of production `4941d18`.
+  restart. This follow-up was deployed as `f24e393` after the experiment; it
+  changes projection freshness only and does not change live admission or
+  injection. The focused query-view measurements above remain observations
+  from the earlier `4941d18` state.
 - Each accepted mapping must include a verbatim evidence substring. Invalid or
   unavailable evidence fails closed for that cue.
 - The derived vector embeds `cue + minimum sufficient verbatim evidence span`.
@@ -390,16 +392,25 @@ semantic `0.6068`, three query views, and one formal recalled parent. The
 expanded shadow added the initial-story Scene, while formal recall still
 contained only `这一道澜认得小雨`.
 
-This trigger is observation only. It is attached after the diagnostic
-retrieval has already run, so it currently saves no latency and changes neither
-query-view execution nor live injection. A future latency experiment must move
-clause expansion behind this trigger rather than merely enabling the current
-shadow path.
+At `4941d18`, this trigger was observation only. It was attached after the
+diagnostic retrieval had already run, so it saved no latency and changed neither
+query-view execution nor live injection.
+
+A 2026-08-18 local follow-up moves clause expansion behind this trigger in the
+simulation shadow path. The original-query passage baseline still runs with the
+ordinary diagnostic retrieval. After formal recall finishes, the trigger now
+decides whether the additional clause embeddings and source-bound passage lanes
+execute. Route skips, direct exact evidence, and strong candidates record
+`skipped_by_weak_candidate_trigger`; weak candidates alone run query-view
+expansion. `decision_applied=true` refers only to this shadow execution choice;
+`live_execution_changed=false`, and formal admission/injection remain unchanged.
+This follow-up is local and uncommitted, so no production latency or gold/live-pair
+result is claimed yet.
 
 ### Updated decision
 
 1. Keep live recall unchanged.
-2. Keep deterministic clause views and weak-trigger decisions in shadow.
+2. Keep deterministic clause views and weak-trigger-controlled execution in shadow.
 3. Do not revive the planner LLM, utility critic, larger pool, instruction
    prefix, or 8B reranker based on this example.
 4. Evaluate the weak trigger on the fixed gold and paired live probes before it

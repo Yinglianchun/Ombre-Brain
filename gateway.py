@@ -2316,7 +2316,7 @@ class GatewayService:
                 ),
             )
             retrieval_budget["passage_candidate_shadow"] = (
-                await self._passage_candidate_query_view_shadow_debug(
+                self._passage_candidate_shadow_debug(
                     query,
                     semantic_query_vector or [],
                 )
@@ -2400,8 +2400,9 @@ class GatewayService:
             "skip" if semantic_skip else "recall"
         )
         if semantic_skip:
-            self._attach_passage_weak_candidate_trigger_shadow(
+            await self._apply_passage_weak_candidate_query_view_shadow(
                 query,
+                semantic_query_vector or [],
                 semantic_recall_debug,
                 recalled_ids=[],
             )
@@ -2664,8 +2665,9 @@ class GatewayService:
             "prepare_timing_debug": dict(debug_payload.get("prepare_timing_debug") or {}),
         }
         semantic_debug = debug_payload.get("semantic_recall_debug")
-        self._attach_passage_weak_candidate_trigger_shadow(
+        await self._apply_passage_weak_candidate_query_view_shadow(
             query,
+            semantic_query_vector or [],
             semantic_debug,
             recalled_ids=recalled_ids,
         )
@@ -14249,6 +14251,58 @@ class GatewayService:
             },
         }
 
+    async def _apply_passage_weak_candidate_query_view_shadow(
+        self,
+        query: str,
+        query_embedding: list[float],
+        semantic_recall_debug: dict[str, Any] | None,
+        *,
+        recalled_ids: list[str],
+    ) -> None:
+        self._attach_passage_weak_candidate_trigger_shadow(
+            query,
+            semantic_recall_debug,
+            recalled_ids=recalled_ids,
+        )
+        if not isinstance(semantic_recall_debug, dict):
+            return
+        retrieval_budget = semantic_recall_debug.get("retrieval_budget")
+        if not isinstance(retrieval_budget, dict):
+            return
+        passage_shadow = retrieval_budget.get("passage_candidate_shadow")
+        if not isinstance(passage_shadow, dict):
+            return
+        trigger = passage_shadow.get("weak_candidate_trigger_shadow")
+        if not isinstance(trigger, dict):
+            return
+
+        trigger["decision_applied"] = True
+        trigger["query_view_execution_changed"] = True
+        trigger["execution_scope"] = "simulation_shadow_only"
+        query_views = self._deterministic_passage_query_views(query)
+        if not trigger.get("would_trigger"):
+            passage_shadow["query_view_shadow"] = {
+                "status": "skipped_by_weak_candidate_trigger",
+                "decision_applied": False,
+                "execution_trigger_applied": True,
+                "live_injection_enabled": False,
+                "trigger_reason": str(trigger.get("reason") or "not_triggered"),
+                "views": query_views,
+                "candidate_count": 0,
+                "candidates": [],
+            }
+            return
+
+        expanded = await self._passage_candidate_query_view_shadow_debug(
+            query,
+            query_embedding,
+            baseline=passage_shadow,
+        )
+        query_view_shadow = expanded.get("query_view_shadow")
+        if isinstance(query_view_shadow, dict):
+            query_view_shadow["execution_trigger_applied"] = True
+            query_view_shadow["trigger_reason"] = str(trigger.get("reason") or "triggered")
+
     @classmethod
     def _merge_passage_query_view_candidates(
         cls,
@@ -14292,8 +14346,11 @@ class GatewayService:
         self,
         query: str,
         query_embedding: list[float],
+        *,
+        baseline: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        baseline = self._passage_candidate_shadow_debug(query, query_embedding)
+        if baseline is None:
+            baseline = self._passage_candidate_shadow_debug(query, query_embedding)
         if baseline.get("status") != "ok":
             return baseline
         query_views = self._deterministic_passage_query_views(query)

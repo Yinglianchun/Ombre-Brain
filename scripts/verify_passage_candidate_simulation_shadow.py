@@ -120,7 +120,11 @@ assert service._deterministic_passage_query_views("我们的初遇") == ["我们
 
 
 class QueryEmbedding:
-    async def embed_query(self, _query: str):
+    def __init__(self):
+        self.calls: list[str] = []
+
+    async def embed_query(self, query: str):
+        self.calls.append(query)
         return [0.0, 1.0]
 
 
@@ -256,6 +260,95 @@ assert skip_trigger["would_trigger"] is False
 assert skip_trigger["reason"] == "route_skip"
 
 
+async def verify_weak_trigger_controls_query_view_execution() -> None:
+    def semantic_payload(
+        score: float,
+        *,
+        action: str = "recall",
+        exact_anchor: bool = False,
+    ) -> dict:
+        candidates = [] if action == "skip" else [{
+            "canonical_scene": True,
+            "body_semantic_score": score,
+            "exact_anchor_match": exact_anchor,
+            "full_title_recall_match": False,
+            "source_bound_raw_quote_match": False,
+        }]
+        return {
+            "applied_action": action,
+            "retrieval_budget": {
+                "cheap_retrieval": {"candidates": candidates},
+                "passage_candidate_shadow": fake_passage_debug(
+                    query_view_service,
+                    long_query,
+                    [1.0, 0.0],
+                ),
+            },
+        }
+
+    query_view_service.embedding_engine.calls.clear()
+    weak_semantic = semantic_payload(0.6088)
+    await query_view_service._apply_passage_weak_candidate_query_view_shadow(
+        long_query,
+        [1.0, 0.0],
+        weak_semantic,
+        recalled_ids=["scene-live"],
+    )
+    weak_passage = weak_semantic["retrieval_budget"]["passage_candidate_shadow"]
+    weak_applied = weak_passage["weak_candidate_trigger_shadow"]
+    assert weak_applied["would_trigger"] is True
+    assert weak_applied["decision_applied"] is True
+    assert weak_applied["live_execution_changed"] is False
+    assert weak_applied["query_view_execution_changed"] is True
+    assert weak_applied["execution_scope"] == "simulation_shadow_only"
+    assert weak_passage["query_view_shadow"]["status"] == "ok"
+    assert weak_passage["query_view_shadow"]["execution_trigger_applied"] is True
+    assert query_view_service.embedding_engine.calls == query_views[1:]
+
+    query_view_service.embedding_engine.calls.clear()
+    strong_semantic = semantic_payload(0.71)
+    await query_view_service._apply_passage_weak_candidate_query_view_shadow(
+        long_query,
+        [1.0, 0.0],
+        strong_semantic,
+        recalled_ids=["scene-strong"],
+    )
+    strong_passage = strong_semantic["retrieval_budget"]["passage_candidate_shadow"]
+    assert strong_passage["query_view_shadow"]["status"] == (
+        "skipped_by_weak_candidate_trigger"
+    )
+    assert strong_passage["query_view_shadow"]["trigger_reason"] == "strong_candidate"
+    assert query_view_service.embedding_engine.calls == []
+
+    exact_semantic = semantic_payload(0.40, exact_anchor=True)
+    await query_view_service._apply_passage_weak_candidate_query_view_shadow(
+        long_query,
+        [1.0, 0.0],
+        exact_semantic,
+        recalled_ids=["scene-exact"],
+    )
+    exact_passage = exact_semantic["retrieval_budget"]["passage_candidate_shadow"]
+    assert exact_passage["query_view_shadow"]["status"] == (
+        "skipped_by_weak_candidate_trigger"
+    )
+    assert exact_passage["query_view_shadow"]["trigger_reason"] == "direct_exact_evidence"
+    assert query_view_service.embedding_engine.calls == []
+
+    skip_semantic = semantic_payload(0.0, action="skip")
+    await query_view_service._apply_passage_weak_candidate_query_view_shadow(
+        long_query,
+        [1.0, 0.0],
+        skip_semantic,
+        recalled_ids=[],
+    )
+    skip_passage = skip_semantic["retrieval_budget"]["passage_candidate_shadow"]
+    assert skip_passage["query_view_shadow"]["status"] == (
+        "skipped_by_weak_candidate_trigger"
+    )
+    assert skip_passage["query_view_shadow"]["trigger_reason"] == "route_skip"
+    assert query_view_service.embedding_engine.calls == []
+
+
 async def verify_mutation_refresh_queue() -> None:
     refresh_service = GatewayService.__new__(GatewayService)
     refresh_service.passage_candidate_shadow_enabled = True
@@ -301,6 +394,7 @@ async def verify_mutation_refresh_queue() -> None:
     )
 
 
+asyncio.run(verify_weak_trigger_controls_query_view_execution())
 asyncio.run(verify_mutation_refresh_queue())
 
 print("PASSAGE_CANDIDATE_SIMULATION_SHADOW_OK")

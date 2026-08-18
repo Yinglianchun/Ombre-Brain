@@ -1,4 +1,4 @@
-# Passage query-view shadow handoff — 2026-08-17
+# Passage query-view shadow handoff — updated 2026-08-18
 
 ## 接手目标
 
@@ -16,9 +16,9 @@ shadow 直接切成 live，也不要同时重开 LLM planner、扩大 reranker p
 - 本地分支：`Haven/scene-event-passage-shadow-20260815`
 - 生产目标分支：`origin/Haven/diary-backend-20260724`
 - 德国源目录：`/opt/Ombre-Brain-src`
-- 上次已核验生产 HEAD：`4941d18`
-- 上次核验时 Gateway HTTP 200、Serein active，生产 repo clean，运行前端与 repo
-  hash 一致。
+- 当前生产 HEAD：`f24e393`
+- 2026-08-18 发布后已核验：生产 repo clean，Ombre Brain / Gateway 容器均为新构建，
+  18001 / 18002 均 HTTP 200，Serein Awake active。
 
 当前本地有与这轮实现无关或尚未纳入版本控制的实验资产。不要顺手 add：
 
@@ -32,17 +32,25 @@ shadow 直接切成 live，也不要同时重开 LLM planner、扩大 reranker p
 - `scripts/evaluate_passage_verifier.py`；
 - `scripts/evaluate_passage_verifier_batch.py`。
 
+2026-08-18 本地新增、尚未提交的本轮实现是：
+
+- `gateway.py`：baseline retrieval 保持原位；formal recall 完成后，由 weak trigger 决定
+  是否执行 clause embedding 和 source-bound query-view expansion；
+- `scripts/verify_passage_candidate_simulation_shadow.py`：验证弱候选会执行，strong
+  candidate 与 route skip 不发 clause embedding；
+- 本文件与 evaluation 文档：更新执行态口径。
+
 本交接写入前，最近提交为：
 
 1. `ba0ffdb Add deterministic clause query shadow`
 2. `3b8ae9f Optimize clause query shadow to passage-only`
 3. `aed1382 Keep cue-bound passages in clause shadow`
 4. `4941d18 Observe weak candidate clause trigger in shadow`
+5. `f24e393 Refresh passage shadows after memory mutations`
 
-### 交接后追加的本地派生索引刷新（尚未发布）
+### 已发布的派生索引自动刷新
 
-`gateway.py`、`server.py` 和
-`scripts/verify_passage_candidate_simulation_shadow.py` 另有未提交改动：
+`f24e393` 已提交、推送至 `Haven/diary-backend-20260724`，并发布到德国生产：
 
 - canonical server 在 Scene create/edit/status 变化后通知 Gateway；
 - Fact/Event batch/revise/status/delete 后也通知 Gateway；
@@ -58,8 +66,17 @@ shadow 直接切成 live，也不要同时重开 LLM planner、扩大 reranker p
 injection。
 
 已通过：Python compile、passage candidate simulation、Scene edit、Fact/Event canonical、
-Fact/Event semantic shadow、Fact/Event lexical shadow。`verify_scene_status.py` 仍卡在旧的
-`len(tools) == 16` 断言；本次没有新增 MCP tool，不要为这刀改工具总数门禁。
+Fact/Event semantic shadow、Fact/Event lexical shadow、passage shadow、cue-passage shadow、
+semantic recall cutover、`git diff --check`。生产 authenticated refresh route 已实测返回
+HTTP 200 / `status=queued`，随后两个 health endpoint 仍为 200。
+
+`verify_scene_status.py` 仍卡在旧的 `len(tools) == 16` 断言；本次没有新增 MCP tool，
+不要为这刀改工具总数门禁。
+
+发布时自动部署没有主动拉取远端，因此按标准 Git 链在干净的德国 repo 执行
+`git pull --ff-only`，再用 `compose.hk.yml` 重建 `ombre-brain` 与 `ombre-gateway`；没有
+SCP/rsync 覆盖 tracked 文件，也没有修改 canonical 数据。Gateway 首次启动 passage warm
+约 33.9 秒，完成后服务稳定。
 
 ## 为什么开始这轮
 
@@ -161,15 +178,20 @@ Cue 命中始终只是 candidate discovery，不能独立准入。Reranker 即�
 - formal recalled count=1；
 - exact anchor=false。
 
-但它现在是在完整 diagnostic retrieval 已经跑完之后才附加，所以：
+`4941d18` 生产态里，它是在完整 diagnostic retrieval 已经跑完之后才附加，因此当时
+不省任何延迟。2026-08-18 的本地未提交实现已经把执行顺序改为：
 
-- `decision_applied=false`；
-- `live_execution_changed=false`；
-- `query_view_execution_changed=false`；
-- **当前不省任何延迟。**
+1. original-query passage baseline 随普通 diagnostic retrieval 运行；
+2. formal recall 完成，拿到最终 recalled IDs；
+3. weak trigger 决定是否执行额外 clause embeddings；
+4. 只有 `would_trigger=true` 才查 ordinary / cue-bound source passages；
+5. strong candidate、direct exact evidence 和 route skip 记录
+   `skipped_by_weak_candidate_trigger`，不发 clause embedding。
 
-如果下一步要验证“只在候选弱时分句”，必须先把 query-view execution 移到这个
-判断之后。不要只把 shadow flag 改成 live。
+此时 `decision_applied=true` 只表示 trigger 已控制 **simulation shadow 的 query-view
+执行**；`query_view_execution_changed=true`，但 `live_execution_changed=false`，formal
+recall、admission 和 injection 完全没变。尚未发布，也还没有新的生产延迟或 gold/live
+pair 统计。
 
 ## 已否掉或暂不上线的方向
 
@@ -232,9 +254,8 @@ Passage 找局部句子；reranker 选 seed；arc 限制故事线；Scene edge �
 
 1. 先读本文件和 `docs/2026-08-16-passage-shadow-evaluation.md`，不要重跑已经否掉的
    planner、critic、pool 12、8B 实验。
-2. 将 weak-trigger 判定前移，做一个“触发才执行 query-view”的纯 shadow 版本；
-   live formal recall/injection 保持不变。
-3. 用 Terra 固定 gold suite 和 live probe/confounder pairs 统计：
+2. 已在本地完成 weak-trigger 控制执行的纯 shadow 版本；不要把它误报成已发布。
+3. 下一步用 Terra 固定 gold suite 和 live probe/confounder pairs 统计：
    - 应触发而触发；
    - 不该触发却触发；
    - 新增正确 parent；
@@ -252,6 +273,13 @@ Passage 找局部句子；reranker 选 seed；arc 限制故事线；Scene edge �
 
 - `C:\Python313\python.exe -m py_compile gateway.py`
 - `C:\Python313\python.exe scripts\verify_passage_candidate_simulation_shadow.py`
+- `C:\Python313\python.exe scripts\verify_scene_edit.py`
+- `C:\Python313\python.exe scripts\verify_passage_shadow.py`
+- `C:\Python313\python.exe scripts\verify_cue_passage_shadow.py`
+- `C:\Python313\python.exe scripts\verify_fact_events.py`
+- `C:\Python313\python.exe scripts\verify_fact_event_semantic_shadow.py`
+- `C:\Python313\python.exe scripts\verify_fact_event_lexical_shadow.py`
+- `C:\Python313\python.exe scripts\verify_semantic_recall_cutover.py`
 - Serein `npm run build`
 - Serein `npm run test:recall-simulation`
 - Serein `npm run test:sites`（4/4）
@@ -260,8 +288,8 @@ Passage 找局部句子；reranker 选 seed；arc 限制故事线；Scene edge �
 所有 query-view、weak-trigger、passage expansion 和 Scene diffusion 都是 shadow。
 不要把 expanded candidates 或 UI 诊断说成 live injection。
 
-若后续获准发布 tracked 文件，仍走唯一生产链：本地精确改动 -> commit -> push 当前
-生产分支 -> 德国标准部署。不要 SCP/rsync 覆盖 tracked 运行文件。
+`f24e393` 已发布。若后续再改 tracked 文件，仍走唯一生产链：本地精确改动 -> commit ->
+push 当前生产分支 -> 德国标准部署。不要 SCP/rsync 覆盖 tracked 运行文件。
 
 ## 一句话接手口径
 
