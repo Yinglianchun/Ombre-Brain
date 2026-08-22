@@ -85,10 +85,9 @@ function pointMaterial(sizeScale = 1, depthInfluence = 0.45) {
       varying float vAlpha;
       void main() {
         float d = length(gl_PointCoord - vec2(0.5));
-        if (d > 0.5) discard;
-        float core = smoothstep(0.22, 0.0, d);
-        float halo = smoothstep(0.5, 0.08, d);
-        gl_FragColor = vec4(vColor * (0.7 + core * 1.8), halo * vAlpha);
+        float alpha = pow(smoothstep(0.5, 0.0, d), 1.6) * vAlpha;
+        if (alpha < 0.01) discard;
+        gl_FragColor = vec4(vColor, alpha);
       }
     `,
     transparent: true,
@@ -97,7 +96,7 @@ function pointMaterial(sizeScale = 1, depthInfluence = 0.45) {
   });
 }
 
-function buildParticleCloud(count, radius, seed, dust = false) {
+function buildGalaxyDisk(count, radius, seed) {
   const random = seededRandom(seed);
   const positions = new Float32Array(count * 3);
   const colors = new Float32Array(count * 3);
@@ -108,27 +107,30 @@ function buildParticleCloud(count, radius, seed, dust = false) {
   const outer = new THREE.Color("#86a8ff");
 
   for (let index = 0; index < count; index += 1) {
-    const radial = dust
-      ? Math.pow(random(), 1.08) * radius * 1.75 + 0.45
-      : Math.pow(random(), 1.7) * radius;
+    const radial = Math.pow(random(), 1.7) * radius;
     const branch = (index % branchCount) / branchCount * Math.PI * 2;
-    const scatter = dust ? 0.9 : 0.55;
-    const angle = branch + radial * spin + (random() - 0.5) * scatter * (radial + 0.4);
-    positions[index * 3] = Math.cos(angle) * radial;
-    positions[index * 3 + 1] = (random() - 0.5) * scatter * (dust ? 1.55 : 0.34) * (radial + 0.3);
-    positions[index * 3 + 2] = Math.sin(angle) * radial;
-
+    const scatter = 0.55;
+    const angle = branch + radial * spin;
+    const signedScatter = (power, amount) => (
+      Math.pow(random(), power) * (random() < 0.5 ? -1 : 1) * amount
+    );
     const progress = Math.min(1, radial / radius);
+    positions[index * 3] = Math.cos(angle) * radial
+      + signedScatter(2.6, scatter * (radial + 0.4));
+    positions[index * 3 + 1] = signedScatter(3, scatter * 0.34 * (radial + 0.3));
+    positions[index * 3 + 2] = Math.sin(angle) * radial
+      + signedScatter(2.6, scatter * (radial + 0.4));
+
     const color = progress < 0.5
       ? inner.clone().lerp(middle, progress * 2)
       : middle.clone().lerp(outer, (progress - 0.5) * 2);
-    const edgeQuieting = dust ? 1 - progress * 0.22 : 1 - progress * 0.38;
-    const softness = (dust ? 0.5 + random() * 0.45 : 0.7 + random() * 0.5) * edgeQuieting;
+    const edgeQuieting = 1 - progress * 0.32;
+    const softness = (0.72 + random() * 0.48) * edgeQuieting;
     colors[index * 3] = color.r * softness;
     colors[index * 3 + 1] = color.g * softness;
     colors[index * 3 + 2] = color.b * softness;
-    const radialScale = dust ? 1 - progress * 0.42 : 1.24 - progress * 0.9;
-    sizes[index] = (dust ? 0.45 + random() * 1.2 : 0.5 + random() * 1.8) * radialScale;
+    const radialScale = 1.16 - progress * 0.42;
+    sizes[index] = (0.55 + random() * 1.75) * radialScale;
     phases[index] = random() * Math.PI * 2;
   }
 
@@ -137,7 +139,73 @@ function buildParticleCloud(count, radius, seed, dust = false) {
   geometry.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
   geometry.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
   geometry.setAttribute("aPhase", new THREE.BufferAttribute(phases, 1));
-  return new THREE.Points(geometry, pointMaterial(dust ? 0.82 : 1, 0));
+  return new THREE.Points(geometry, pointMaterial(1, 0));
+}
+
+function buildDustCloud(count, radius, seed) {
+  const random = seededRandom(seed);
+  const positions = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  const sizes = new Float32Array(count);
+  const phases = new Float32Array(count);
+  const palette = ["#e8b8ff", "#9fb8ff", "#ffd0ec", "#c8a0f0", "#ffe0b0"]
+    .map((color) => new THREE.Color(color));
+
+  for (let index = 0; index < count; index += 1) {
+    const radial = Math.pow(random(), 1.1) * radius * 1.7 + 0.5;
+    const angle = random() * Math.PI * 2;
+    positions[index * 3] = Math.cos(angle) * radial;
+    positions[index * 3 + 1] = (random() - 0.5) * radius * 1.1;
+    positions[index * 3 + 2] = Math.sin(angle) * radial;
+    const color = palette[Math.floor(random() * palette.length)];
+    const brightness = 0.38 + random() * 0.54;
+    colors.set([color.r * brightness, color.g * brightness, color.b * brightness], index * 3);
+    sizes[index] = 0.42 + random() * 1.18;
+    phases[index] = random() * Math.PI * 2;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
+  geometry.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
+  geometry.setAttribute("aPhase", new THREE.BufferAttribute(phases, 1));
+  return new THREE.Points(geometry, pointMaterial(0.9, 0.45));
+}
+
+function buildHaloCloud(count, radius, seed) {
+  const random = seededRandom(seed);
+  const positions = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  const sizes = new Float32Array(count);
+  const phases = new Float32Array(count);
+  const violet = new THREE.Color("#c59cf2");
+  const rose = new THREE.Color("#f0a6d6");
+  const warm = new THREE.Color("#f3d39a");
+
+  for (let index = 0; index < count; index += 1) {
+    const distance = radius * (0.72 + Math.pow(random(), 0.62) * 1.42);
+    const yDirection = random() * 2 - 1;
+    const horizontal = Math.sqrt(1 - yDirection * yDirection);
+    const angle = random() * Math.PI * 2;
+    positions[index * 3] = Math.cos(angle) * horizontal * distance;
+    positions[index * 3 + 1] = yDirection * distance * 0.72;
+    positions[index * 3 + 2] = Math.sin(angle) * horizontal * distance;
+
+    const tintRoll = random();
+    const color = tintRoll > 0.965 ? warm : violet.clone().lerp(rose, random() * 0.42);
+    const brightness = 0.38 + random() * 0.72;
+    colors.set([color.r * brightness, color.g * brightness, color.b * brightness], index * 3);
+    const flare = random();
+    sizes[index] = flare > 0.986 ? 2.4 + random() * 2.5 : 0.42 + random() * 1.05;
+    phases[index] = random() * Math.PI * 2;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
+  geometry.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
+  geometry.setAttribute("aPhase", new THREE.BufferAttribute(phases, 1));
+  return new THREE.Points(geometry, pointMaterial(1.08, 0.62));
 }
 
 function buildMemoryPoints(scenes) {
@@ -156,7 +224,7 @@ function buildMemoryPoints(scenes) {
       + (random() - 0.5) * 0.72 * (radius + 0.4);
     const position = new THREE.Vector3(
       Math.cos(angle) * radius + (random() - 0.5) * 0.42,
-      (random() - 0.5) * (0.18 + radius * 0.045),
+      (random() + random() - 1) * (0.035 + radius * 0.012),
       Math.sin(angle) * radius + (random() - 0.5) * 0.42,
     );
     const color = new THREE.Color(colorForScene(scene));
@@ -184,16 +252,16 @@ function buildMemoryPoints(scenes) {
 
 function makeCoreGlow() {
   const canvas = document.createElement("canvas");
-  canvas.width = 192;
-  canvas.height = 192;
+  canvas.width = 128;
+  canvas.height = 128;
   const context = canvas.getContext("2d");
-  const glow = context.createRadialGradient(96, 96, 0, 96, 96, 96);
-  glow.addColorStop(0, "rgba(255,234,250,.76)");
-  glow.addColorStop(0.25, "rgba(226,176,244,.28)");
-  glow.addColorStop(0.62, "rgba(174,132,234,.07)");
-  glow.addColorStop(1, "rgba(130,98,210,0)");
+  const glow = context.createRadialGradient(64, 64, 0, 64, 64, 64);
+  glow.addColorStop(0, "rgba(255,226,246,.32)");
+  glow.addColorStop(0.28, "rgba(234,178,242,.14)");
+  glow.addColorStop(0.62, "rgba(186,142,236,.045)");
+  glow.addColorStop(1, "rgba(162,126,226,0)");
   context.fillStyle = glow;
-  context.fillRect(0, 0, 192, 192);
+  context.fillRect(0, 0, 128, 128);
   const material = new THREE.SpriteMaterial({
     map: new THREE.CanvasTexture(canvas),
     blending: THREE.AdditiveBlending,
@@ -202,7 +270,7 @@ function makeCoreGlow() {
     opacity: 0.44,
   });
   const sprite = new THREE.Sprite(material);
-  sprite.scale.set(1.9, 1.9, 1);
+  sprite.scale.set(1.8, 1.8, 1);
   return sprite;
 }
 
@@ -261,7 +329,7 @@ export function UniversePage() {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(stage.clientWidth, stage.clientHeight, false);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.08;
+    renderer.toneMappingExposure = 1.05;
 
     const controls = new OrbitControls(camera, canvas);
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -270,16 +338,20 @@ export function UniversePage() {
     controls.enablePan = false;
     controls.minDistance = 2.3;
     controls.maxDistance = 13;
+    controls.minPolarAngle = 0.08;
+    controls.maxPolarAngle = Math.PI - 0.08;
     controls.autoRotate = !reduceMotion;
     controls.autoRotateSpeed = 0.28;
     controls.target.set(0, 0, 0);
 
-    const galaxy = buildParticleCloud(12000, galaxyRadius, 8226);
-    const dust = buildParticleCloud(5200, galaxyRadius, 1024, true);
+    const galaxy = buildGalaxyDisk(14200, galaxyRadius, 8226);
+    const dust = buildDustCloud(6400, galaxyRadius, 1024);
+    const halo = buildHaloCloud(2800, galaxyRadius, 7319);
     const memory = buildMemoryPoints(scenes);
     const coreGlow = makeCoreGlow();
-    scene.add(galaxy, dust, memory.object, coreGlow);
+    scene.add(halo, galaxy, dust, memory.object, coreGlow);
 
+    const ringMaterials = [];
     [1.3, 2.4, 3.6, 4.7].forEach((radius) => {
       const geometry = new THREE.RingGeometry(radius - 0.007, radius + 0.007, 160);
       const material = new THREE.MeshBasicMaterial({
@@ -292,6 +364,7 @@ export function UniversePage() {
       });
       const ring = new THREE.Mesh(geometry, material);
       ring.rotation.x = -Math.PI / 2;
+      ringMaterials.push(material);
       scene.add(ring);
     });
 
@@ -299,7 +372,7 @@ export function UniversePage() {
     composer.addPass(new RenderPass(scene, camera));
     composer.addPass(new UnrealBloomPass(
       new THREE.Vector2(stage.clientWidth, stage.clientHeight),
-      0.72,
+      0.6,
       0.62,
       0.12,
     ));
@@ -409,6 +482,7 @@ export function UniversePage() {
       elapsed += delta;
       galaxy.material.uniforms.uTime.value = elapsed;
       dust.material.uniforms.uTime.value = elapsed;
+      halo.material.uniforms.uTime.value = elapsed;
       memory.object.material.uniforms.uTime.value = elapsed;
       const colorAttribute = memory.object.geometry.attributes.aColor;
       const sizeAttribute = memory.object.geometry.attributes.aSize;
@@ -437,10 +511,14 @@ export function UniversePage() {
         colorAttribute.needsUpdate = true;
         sizeAttribute.needsUpdate = true;
       }
-      const pulse = 1 + Math.sin(elapsed * 0.82) * 0.07;
-      coreGlow.scale.set(1.9 * pulse, 1.9 * pulse, 1);
-      coreGlow.material.opacity = 0.4 + Math.sin(elapsed * 0.82) * 0.05;
       controls.update();
+      const elevation = Math.abs(camera.position.y - controls.target.y)
+        / Math.max(0.001, camera.position.distanceTo(controls.target));
+      const pulse = 1 + Math.sin(elapsed * 0.82) * 0.07;
+      coreGlow.scale.setScalar(2.15 * pulse);
+      coreGlow.material.opacity = 0.3 + Math.sin(elapsed * 0.82) * 0.045;
+      const ringOpacity = 0.004 + Math.pow(elevation, 0.82) * 0.072;
+      ringMaterials.forEach((material) => { material.opacity = ringOpacity; });
       composer.render();
     };
     animate();
