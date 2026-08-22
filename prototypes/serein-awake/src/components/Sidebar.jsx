@@ -16,7 +16,7 @@ const navItems = [
   { label: "地下室", icon: SlidersHorizontal },
 ];
 
-export function Sidebar({ activeArea, onNavigate, onUnavailable, onOpenSettings }) {
+export function Sidebar({ activeArea, onNavigate, onOpenSettings }) {
   return (
     <aside className="sidebar" aria-label="主要导航">
       <div className="sidebar__brand" aria-hidden="true">s</div>
@@ -38,8 +38,13 @@ export function Sidebar({ activeArea, onNavigate, onUnavailable, onOpenSettings 
         })}
       </nav>
       <div className="sidebar__footer">
-        <button className="nav-item sidebar__universe" type="button" onClick={() => onUnavailable("宇宙")}>
-          <Planet size={20} weight="light" aria-hidden="true" />
+        <button
+          className={`nav-item sidebar__universe${activeArea === "宇宙" ? " is-active" : ""}`}
+          type="button"
+          aria-current={activeArea === "宇宙" ? "page" : undefined}
+          onClick={() => activeArea !== "宇宙" && onNavigate("宇宙")}
+        >
+          <Planet size={20} weight={activeArea === "宇宙" ? "fill" : "light"} aria-hidden="true" />
           <span>宇宙</span>
         </button>
         <button className="nav-item" type="button" onClick={onOpenSettings}>
