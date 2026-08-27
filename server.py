@@ -14172,6 +14172,46 @@ async def api_write_fact_events(request):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@mcp.custom_route("/api/fact-events/replacements", methods=["POST"])
+async def api_replace_fact_events(request):
+    """Atomically write reviewed replacements and supersede all old leaves."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    try:
+        result = fact_event_store.replace_many(body.get("items"))
+        result["scene_coverage"] = await _reconcile_scene_covered_events()
+        inserted_ids = [
+            str(item.get("item_id") or "")
+            for item in result.get("items") or []
+            if isinstance(item, dict)
+            and str(item.get("item_id") or "")
+        ]
+        predecessor_ids = [
+            str(item_id)
+            for item in result.get("items") or []
+            if isinstance(item, dict)
+            for item_id in item.get("superseded_item_ids") or []
+        ]
+        result["passage_shadow_refresh"] = await _queue_gateway_passage_shadow_refresh(
+            fact_event_ids=[*inserted_ids, *predecessor_ids]
+        )
+        return JSONResponse(result)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Fact/Event replacement failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @mcp.custom_route("/api/fact-events", methods=["GET"])
 async def api_list_fact_events(request):
     """List canonical Facts or Events by exact source-derived local date."""

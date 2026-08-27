@@ -296,6 +296,45 @@ def main() -> None:
             assert "fact_event_embeddings" not in tables
             assert "fact_event_edges" not in tables
 
+    with tempfile.TemporaryDirectory(prefix="fact-event-replacements-") as temp_dir:
+        store = FactEventStore({"state_dir": temp_dir}, create=True)
+        old_one = {
+            "type": "event",
+            "title": "第一条旧事件",
+            "body": "小雨说明自己紫外线过敏。",
+            "importance": 1,
+            "origin_id": "bridge-old-event-1",
+            "source_refs": [source_a],
+        }
+        old_two = {
+            "type": "event",
+            "title": "第二条旧事件",
+            "body": "我记住出门时要提醒小雨遮阳。",
+            "importance": 1,
+            "origin_id": "bridge-old-event-2",
+            "source_refs": [{**source_b, "evidence_kind": "primary"}],
+        }
+        old_result = store.write_many([old_one, old_two])
+        old_ids = [item["item_id"] for item in old_result["items"]]
+        replacement = {
+            "type": "event",
+            "title": "两条旧事件合成一条",
+            "body": "小雨说明自己紫外线过敏，我记住出门时要提醒她遮阳。",
+            "importance": 3,
+            "origin_id": "bridge-reviewed-event-replacement-1",
+            "source_refs": [source_a, source_b],
+            "supersedes_item_ids": old_ids,
+        }
+        replacement_result = store.replace_many([replacement])
+        replacement_id = replacement_result["items"][0]["item_id"]
+        assert replacement_result["inserted"] == 1
+        assert all(store.read(item_id)["status"] == "superseded" for item_id in old_ids)
+        assert store.read(replacement_id)["status"] == "active"
+        assert store.read(replacement_id)["supersedes_item_id"] == old_ids[0]
+        repeated_replacement = store.replace_many([replacement])
+        assert repeated_replacement["inserted"] == 0
+        assert repeated_replacement["idempotent"] == 1
+
     print("FACT_EVENTS_OK")
 
 

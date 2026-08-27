@@ -208,6 +208,155 @@ class FactEventStore:
             "items": results,
         }
 
+    def replace_many(self, raw_items: Any) -> dict[str, Any]:
+        """Atomically write reviewed replacements and supersede every predecessor."""
+
+        if not isinstance(raw_items, list) or not raw_items:
+            raise ValueError("items must be a non-empty list")
+        if len(raw_items) > 500:
+            raise ValueError("at most 500 items may be written in one batch")
+
+        prepared: list[tuple[int, dict[str, Any], list[str]]] = []
+        predecessor_ids: set[str] = set()
+        origin_ids: set[str] = set()
+        fingerprints: set[str] = set()
+        for index, raw in enumerate(raw_items):
+            if not isinstance(raw, dict):
+                raise ValueError("each item must be an object")
+            raw_predecessors = raw.get("supersedes_item_ids")
+            if not isinstance(raw_predecessors, list) or not raw_predecessors:
+                raise ValueError("supersedes_item_ids must be a non-empty list")
+            if len(raw_predecessors) > 100:
+                raise ValueError("at most 100 predecessor items may be superseded")
+            predecessors = [
+                _required_identifier(value, "supersedes_item_ids", 128)
+                for value in raw_predecessors
+            ]
+            if len(set(predecessors)) != len(predecessors):
+                raise ValueError("duplicate supersedes_item_ids are not allowed")
+            if predecessor_ids.intersection(predecessors):
+                raise ValueError("a predecessor may appear in only one replacement")
+            predecessor_ids.update(predecessors)
+
+            explicit_primary = str(raw.get("supersedes_item_id") or "").strip()
+            if explicit_primary and explicit_primary != predecessors[0]:
+                raise ValueError("supersedes_item_id must equal the first supersedes_item_ids entry")
+            normalized = _normalize_item(
+                {**raw, "supersedes_item_id": predecessors[0]}
+            )
+            origin_id = str(normalized["origin_id"] or "")
+            if origin_id and origin_id in origin_ids:
+                raise ValueError("duplicate origin_id values are not allowed")
+            if normalized["fingerprint"] in fingerprints:
+                raise ValueError("duplicate replacement fingerprints are not allowed")
+            if origin_id:
+                origin_ids.add(origin_id)
+            fingerprints.add(normalized["fingerprint"])
+            prepared.append((index, normalized, predecessors))
+
+        self._init_db()
+        now = _now()
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing_items: list[sqlite3.Row | None] = []
+                for _, item, _ in prepared:
+                    existing = None
+                    if item["origin_id"]:
+                        existing = conn.execute(
+                            "SELECT item_id, fingerprint FROM fact_events WHERE origin_id=?",
+                            (item["origin_id"],),
+                        ).fetchone()
+                        if existing is not None and str(existing["fingerprint"]) != item["fingerprint"]:
+                            raise ValueError("origin_id already exists with different content")
+                    if existing is None:
+                        existing = conn.execute(
+                            "SELECT item_id, fingerprint FROM fact_events WHERE fingerprint=?",
+                            (item["fingerprint"],),
+                        ).fetchone()
+                    existing_items.append(existing)
+
+                existing_count = sum(item is not None for item in existing_items)
+                if existing_count:
+                    if existing_count != len(prepared):
+                        raise ValueError("replacement batch is only partially present")
+                    for _, _, predecessors in prepared:
+                        placeholders = ",".join("?" for _ in predecessors)
+                        rows = conn.execute(
+                            f"SELECT item_id, status FROM fact_events WHERE item_id IN ({placeholders})",
+                            predecessors,
+                        ).fetchall()
+                        statuses = {str(row["item_id"]): str(row["status"]) for row in rows}
+                        if any(statuses.get(item_id) != "superseded" for item_id in predecessors):
+                            raise ValueError("idempotent replacement has non-superseded predecessors")
+                    conn.rollback()
+                    return {
+                        "ok": True,
+                        "inserted": 0,
+                        "idempotent": len(prepared),
+                        "rejected": 0,
+                        "items": [
+                            {
+                                "index": index,
+                                "status": "idempotent",
+                                "item_id": str(existing_items[position]["item_id"]),
+                                "origin_id": item["origin_id"],
+                                "superseded_item_ids": predecessors,
+                            }
+                            for position, (index, item, predecessors) in enumerate(prepared)
+                        ],
+                    }
+
+                for _, item, predecessors in prepared:
+                    placeholders = ",".join("?" for _ in predecessors)
+                    rows = conn.execute(
+                        f"SELECT item_id, item_type, status FROM fact_events WHERE item_id IN ({placeholders})",
+                        predecessors,
+                    ).fetchall()
+                    previous = {str(row["item_id"]): row for row in rows}
+                    if len(previous) != len(predecessors):
+                        raise ValueError("supersedes item not found")
+                    if any(str(previous[item_id]["item_type"]) != item["item_type"] for item_id in predecessors):
+                        raise ValueError("supersedes item type mismatch")
+                    if any(str(previous[item_id]["status"]) != "active" for item_id in predecessors):
+                        raise ValueError("all superseded items must be active")
+
+                results: list[dict[str, Any]] = []
+                for index, item, predecessors in prepared:
+                    written = self._write_one(conn, item, now=now)
+                    if written.get("status") != "inserted":
+                        raise ValueError(written.get("error") or "replacement was not inserted")
+                    for predecessor_id in predecessors[1:]:
+                        changed = conn.execute(
+                            """
+                            UPDATE fact_events
+                            SET status='superseded', updated_at=?
+                            WHERE item_id=? AND status='active'
+                            """,
+                            (now, predecessor_id),
+                        )
+                        if changed.rowcount != 1:
+                            raise ValueError("predecessor status changed during replacement")
+                    results.append(
+                        {
+                            "index": index,
+                            **written,
+                            "superseded_item_ids": predecessors,
+                        }
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+        return {
+            "ok": True,
+            "inserted": len(prepared),
+            "idempotent": 0,
+            "rejected": 0,
+            "items": results,
+        }
+
     def _write_one(
         self,
         conn: sqlite3.Connection,
