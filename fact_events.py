@@ -165,7 +165,7 @@ class FactEventStore:
                 )
 
     def write_many(self, raw_items: Any) -> dict[str, Any]:
-        """Write a batch with per-item rejection and idempotent origin checks."""
+        """Write an idempotent batch atomically; one rejection rolls back every new item."""
 
         if not isinstance(raw_items, list) or not raw_items:
             raise ValueError("items must be a non-empty list")
@@ -179,25 +179,73 @@ class FactEventStore:
                 prepared.append((index, _normalize_item(raw)))
             except ValueError as exc:
                 results.append({"index": index, "status": "rejected", "error": str(exc)})
+        if results:
+            invalid = {int(item["index"]): str(item["error"]) for item in results}
+            results = [
+                {
+                    "index": index,
+                    "status": "rejected",
+                    "error": invalid.get(index, "batch rolled back because another item is invalid"),
+                }
+                for index in range(len(raw_items))
+            ]
+            return {
+                "ok": False,
+                "inserted": 0,
+                "idempotent": 0,
+                "rejected": len(results),
+                "items": results,
+            }
 
         self._init_db()
         now = _now()
         inserted = 0
         idempotent = 0
+        rejected_index: int | None = None
+        rejected_error = ""
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 for index, item in prepared:
                     result = self._write_one(conn, item, now=now)
+                    if result["status"] == "rejected":
+                        rejected_index = index
+                        rejected_error = str(result.get("error") or "rejected")
+                        raise ValueError(rejected_error)
                     results.append({"index": index, **result})
                     if result["status"] == "inserted":
                         inserted += 1
                     elif result["status"] == "idempotent":
                         idempotent += 1
                 conn.commit()
+            except ValueError:
+                conn.rollback()
+                if rejected_index is None:
+                    raise
             except Exception:
                 conn.rollback()
                 raise
+
+        if rejected_index is not None:
+            results = [
+                {
+                    "index": index,
+                    "status": "rejected",
+                    "error": (
+                        rejected_error
+                        if index == rejected_index
+                        else "batch rolled back because another item was rejected"
+                    ),
+                }
+                for index in range(len(raw_items))
+            ]
+            return {
+                "ok": False,
+                "inserted": 0,
+                "idempotent": 0,
+                "rejected": len(results),
+                "items": results,
+            }
 
         results.sort(key=lambda item: int(item["index"]))
         return {

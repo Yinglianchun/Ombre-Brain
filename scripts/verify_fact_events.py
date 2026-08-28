@@ -78,6 +78,19 @@ def main() -> None:
         conflict = store.write_many([{**fact, "body": "同一来源候选被悄悄改写。"}])
         assert conflict["rejected"] == 1
         assert "origin_id" in conflict["items"][0]["error"]
+        atomic = store.write_many(
+            [
+                {
+                    **event,
+                    "title": "这一条必须随整批回滚",
+                    "body": "只要同批另一项冲突，这条也不能写入。",
+                    "origin_id": "bridge-candidate-event-atomic-rollback",
+                },
+                {**fact, "body": "同一 origin 的冲突内容。"},
+            ]
+        )
+        assert atomic["inserted"] == 0 and atomic["rejected"] == 2, atomic
+        assert store.list(item_type="event", query="必须随整批回滚")["count"] == 0
 
         fact_row = store.read(fact_id)
         assert fact_row and fact_row["local_date"] == "2026-08-08"
