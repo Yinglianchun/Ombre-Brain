@@ -1091,15 +1091,14 @@ class FactEventStore:
         issues: set[str] = set()
         outgoing: dict[str, set[str]] = {}
         neighbors: dict[str, set[str]] = {}
+        invalid_edge_pairs: set[tuple[str, str]] = set()
         for predecessor_id, successor_id in edge_pairs:
             if predecessor_id not in by_id or successor_id not in by_id:
-                issues.add("missing_family_member")
+                invalid_edge_pairs.add((predecessor_id, successor_id))
                 continue
             outgoing.setdefault(predecessor_id, set()).add(successor_id)
             neighbors.setdefault(predecessor_id, set()).add(successor_id)
             neighbors.setdefault(successor_id, set()).add(predecessor_id)
-        if any(len(successors) > 1 for successors in outgoing.values()):
-            issues.add("forked_successor_family")
 
         family = {item_id}
         pending = [item_id]
@@ -1109,6 +1108,14 @@ class FactEventStore:
                 if neighbor not in family:
                     family.add(neighbor)
                     pending.append(neighbor)
+
+        if any(
+            predecessor_id in family or successor_id in family
+            for predecessor_id, successor_id in invalid_edge_pairs
+        ):
+            issues.add("missing_family_member")
+        if any(len(outgoing.get(family_id, set())) > 1 for family_id in family):
+            issues.add("forked_successor_family")
 
         visiting: set[str] = set()
         visited: set[str] = set()

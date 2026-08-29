@@ -326,6 +326,84 @@ def verify_dynamic_read_blockers() -> None:
         assert [item["item_id"] for item in blocked_scene["resolved_items"]] == [event_id]
 
 
+def verify_unrelated_fork_is_local() -> None:
+    with tempfile.TemporaryDirectory(prefix="fact-event-local-fork-") as temp_dir:
+        store = FactEventStore({"state_dir": temp_dir}, create=True)
+        inserted = store.write_many(
+            [
+                {
+                    "type": "event",
+                    "title": "独立待修订事件",
+                    "body": "它与历史分叉没有任何前后继关系。",
+                    "origin_id": "haven_bridge:unrelated-singleton",
+                    "source_refs": [ref(9240, "user", "独立事件。", "primary")],
+                },
+                {
+                    "type": "event",
+                    "title": "迁移遗留分叉根",
+                    "body": "仅用于模拟另一条 revision family。",
+                    "origin_id": "haven_bridge:legacy-fork-root",
+                    "source_refs": [ref(9241, "user", "分叉根。", "primary")],
+                },
+                {
+                    "type": "event",
+                    "title": "迁移遗留分叉一",
+                    "body": "第一条遗留叶子。",
+                    "origin_id": "haven_bridge:legacy-fork-a",
+                    "source_refs": [ref(9242, "assistant", "分叉一。", "primary")],
+                },
+                {
+                    "type": "event",
+                    "title": "迁移遗留分叉二",
+                    "body": "第二条遗留叶子。",
+                    "origin_id": "haven_bridge:legacy-fork-b",
+                    "source_refs": [ref(9243, "assistant", "分叉二。", "primary")],
+                },
+            ]
+        )
+        singleton, fork_root, fork_a, fork_b = [
+            store.read(item["item_id"], include_sources=True)
+            for item in inserted["items"]
+        ]
+        with closing(sqlite3.connect(store.db_path)) as conn:
+            conn.executemany(
+                "UPDATE fact_events SET supersedes_item_id=? WHERE item_id=?",
+                [
+                    (fork_root["item_id"], fork_a["item_id"]),
+                    (fork_root["item_id"], fork_b["item_id"]),
+                ],
+            )
+            conn.execute(
+                "UPDATE fact_events SET status='superseded' WHERE item_id=?",
+                (fork_root["item_id"],),
+            )
+            conn.commit()
+
+        legacy_fork = store.replacement_family(fork_root["item_id"])
+        assert not legacy_fork["ok"] and legacy_fork["forked"], legacy_fork
+        assert "forked_successor_family" in legacy_fork["issues"]
+        singleton_family = store.replacement_family(singleton["item_id"])
+        assert singleton_family["ok"] and singleton_family["is_exact_active_leaf"], (
+            singleton_family
+        )
+        assert not singleton_family["forked"]
+        replacement = store.settle(
+            "op-singleton-beside-unrelated-fork",
+            [
+                {
+                    "type": "event",
+                    "title": "独立事件精简重写",
+                    "body": "无关 family 的旧分叉不得阻止这次修订。",
+                    "origin_id": "haven_bridge:unrelated-singleton-rewrite",
+                    "source_refs": singleton["source_refs"],
+                    "supersedes_item_ids": [singleton["item_id"]],
+                    "expected_predecessors": [expected(singleton)],
+                }
+            ],
+        )
+        assert replacement["inserted"] == 1, replacement
+
+
 def main() -> None:
     verify_exact_source_key_lookup()
 
@@ -642,6 +720,7 @@ def main() -> None:
     assert '"kind": "active_narrative"' in server_text
     assert '"kind": "active_scene"' in server_text
     verify_dynamic_read_blockers()
+    verify_unrelated_fork_is_local()
     print("FACT_EVENT_SETTLEMENT_OK")
 
 
