@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
+import inspect
+import json
 import sqlite3
 import sys
 import tempfile
@@ -51,6 +54,126 @@ def expected(item: dict) -> dict:
         "fingerprint": item["fingerprint"],
         "source_keys": source_keys(item),
     }
+
+
+def exact_key(value: dict) -> dict[str, str]:
+    return {
+        "source_system": str(value["source_system"]),
+        "session_id": str(value["session_id"]),
+        "message_id": str(value["message_id"]),
+    }
+
+
+def verify_exact_source_key_lookup() -> None:
+    with tempfile.TemporaryDirectory(prefix="fact-event-source-lookup-") as temp_dir:
+        store = FactEventStore({"state_dir": temp_dir}, create=True)
+        shared = ref(9180, "user", "精确共享来源。", "primary")
+        older = store.write_many(
+            [
+                {
+                    "type": "event",
+                    "title": "较早 active Event",
+                    "body": "命中同一 source key 的较早 Event。",
+                    "origin_id": "haven_bridge:source-lookup-older",
+                    "source_refs": [shared, ref(9181, "assistant", "较早落点。")],
+                },
+                {
+                    "type": "event",
+                    "title": "较新 active Event",
+                    "body": "命中同一 source key 的较新 Event。",
+                    "origin_id": "haven_bridge:source-lookup-newer",
+                    "source_refs": [shared, ref(9182, "assistant", "较新落点。")],
+                },
+                {
+                    "type": "fact",
+                    "body": "Fact 即使命中也不能返回。",
+                    "fact_type": "activity",
+                    "atomic_question": "是否排除 Fact？",
+                    "origin_id": "haven_bridge:source-lookup-fact",
+                    "source_refs": [shared],
+                },
+                {
+                    "type": "event",
+                    "title": "inactive Event",
+                    "body": "归档后不得出现在 active lookup。",
+                    "origin_id": "haven_bridge:source-lookup-inactive",
+                    "source_refs": [shared, ref(9183, "assistant", "归档。")],
+                },
+            ]
+        )
+        inactive_id = older["items"][3]["item_id"]
+        with closing(sqlite3.connect(store.db_path)) as conn:
+            conn.execute(
+                "UPDATE fact_events SET status='archived' WHERE item_id=?",
+                (inactive_id,),
+            )
+            conn.commit()
+        key = exact_key(shared)
+        result = store.find_active_events_by_source_keys([key])
+        assert result["ok"] and not result["blocked"] and not result["truncated"]
+        assert [item["title"] for item in result["items"]] == [
+            "较新 active Event",
+            "较早 active Event",
+        ]
+        assert all(
+            item["status"] == "active"
+            and item["fingerprint"]
+            and item["origin_id"].startswith("haven_bridge:")
+            and item["source_refs"]
+            for item in result["items"]
+        )
+        assert result["query_receipt"]["source_keys"] == [key]
+        assert result["query_receipt"]["source_key_count"] == 1
+        assert result["query_receipt"]["exact_cover"] is True
+        assert result["query_receipt"]["source_keys_sha256"] == hashlib.sha256(
+            json.dumps(
+                [key],
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        assert result["writes_performed"] == []
+
+        invalid_values = [
+            {"source_keys": [key]},
+            [{**key, "title": "不得按标题查"}],
+            [key, key],
+            [key] * 4001,
+        ]
+        for invalid in invalid_values:
+            try:
+                store.find_active_events_by_source_keys(invalid)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("non-exact or unbounded source-key lookup was accepted")
+
+        method_source = inspect.getsource(FactEventStore.find_active_events_by_source_keys)
+        assert "JOIN fact_event_sources" in method_source
+        assert "event.item_type='event' AND event.status='active'" in method_source
+        assert "title" not in method_source and "body" not in method_source
+
+    with tempfile.TemporaryDirectory(prefix="fact-event-source-cap-") as temp_dir:
+        store = FactEventStore({"state_dir": temp_dir}, create=True)
+        shared = ref(9170, "user", "超过返回上限的共享来源。", "primary")
+        store.write_many(
+            [
+                {
+                    "type": "event",
+                    "title": f"上限 Event {ordinal:02d}",
+                    "body": f"用于验证 hard cap 的第 {ordinal:02d} 条 Event。",
+                    "origin_id": f"haven_bridge:source-cap-{ordinal:02d}",
+                    "source_refs": [shared],
+                }
+                for ordinal in range(21)
+            ]
+        )
+        capped = store.find_active_events_by_source_keys([exact_key(shared)])
+        assert not capped["ok"] and capped["blocked"] and capped["truncated"]
+        assert capped["result_limit"] == 20 and len(capped["items"]) == 20
+        assert capped["matched_event_count_lower_bound"] == 21
+        assert capped["writes_performed"] == []
 
 
 def verify_dynamic_read_blockers() -> None:
@@ -204,6 +327,8 @@ def verify_dynamic_read_blockers() -> None:
 
 
 def main() -> None:
+    verify_exact_source_key_lookup()
+
     source_a = ref(9201, "user", "回答上一段，也开启下一段。", "primary")
     source_b = ref(9202, "assistant", "接住第一段。")
     source_c = ref(9203, "user", "转入新的完整问题。", "primary")
@@ -510,6 +635,9 @@ def main() -> None:
     server_text = (ROOT / "server.py").read_text(encoding="utf-8")
     assert '@mcp.custom_route("/api/fact-events/settlement"' in server_text
     assert '@mcp.custom_route("/api/fact-events/read-many"' in server_text
+    assert '@mcp.custom_route("/api/fact-events/find-by-source-keys"' in server_text
+    assert 'set(body) != {"source_keys"}' in server_text
+    assert 'status_code=409 if result["blocked"] else 200' in server_text
     assert '"writes_performed": []' in server_text
     assert '"kind": "active_narrative"' in server_text
     assert '"kind": "active_scene"' in server_text

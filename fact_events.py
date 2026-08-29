@@ -29,6 +29,9 @@ FACT_RELATIONS = frozenset({"duplicate", "reinforces", "updates", "contradicts",
 FACT_RELATION_STATUSES = frozenset({"pending", "accepted", "rejected", "superseded"})
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:@/-]+$")
+SOURCE_KEY_LOOKUP_MAX_KEYS = 4000
+SOURCE_KEY_LOOKUP_RESULT_LIMIT = 20
+SOURCE_KEY_LOOKUP_SQL_CHUNK = 300
 MAX_SOURCE_REFS_PER_ITEM = 4000
 
 
@@ -637,6 +640,100 @@ class FactEventStore:
                     if item_id in resolved_rows
                 ],
             }
+
+    def find_active_events_by_source_keys(self, raw_source_keys: Any) -> dict[str, Any]:
+        """Find active Events by bounded exact source-key overlap only."""
+
+        source_keys = _normalize_lookup_source_keys(raw_source_keys)
+        receipt_source_keys = [
+            {
+                "source_system": source_system,
+                "session_id": session_id,
+                "message_id": message_id,
+            }
+            for source_system, session_id, message_id in source_keys
+        ]
+        receipt = {
+            "source_keys": receipt_source_keys,
+            "source_key_count": len(source_keys),
+            "source_keys_sha256": hashlib.sha256(
+                json.dumps(
+                    receipt_source_keys,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+            "exact_cover": True,
+        }
+        if not os.path.exists(self.db_path):
+            return {
+                "ok": True,
+                "blocked": False,
+                "truncated": False,
+                "items": [],
+                "result_limit": SOURCE_KEY_LOOKUP_RESULT_LIMIT,
+                "matched_event_count_lower_bound": 0,
+                "query_receipt": receipt,
+                "writes_performed": [],
+            }
+        self._init_db()
+        candidate_ids: set[str] = set()
+        with closing(self._connect()) as conn:
+            for offset in range(0, len(source_keys), SOURCE_KEY_LOOKUP_SQL_CHUNK):
+                chunk = source_keys[offset : offset + SOURCE_KEY_LOOKUP_SQL_CHUNK]
+                values_sql = ",".join("(?,?,?)" for _ in chunk)
+                params = [value for source_key in chunk for value in source_key]
+                rows = conn.execute(
+                    f"""
+                    WITH query_keys(source_system, session_id, message_id) AS (
+                      VALUES {values_sql}
+                    )
+                    SELECT DISTINCT event.item_id, event.source_ended_at,
+                                    event.created_at
+                    FROM query_keys AS query_key
+                    JOIN fact_event_sources AS source
+                      ON source.source_system=query_key.source_system
+                     AND source.session_id=query_key.session_id
+                     AND source.message_id=query_key.message_id
+                    JOIN fact_events AS event ON event.item_id=source.item_id
+                    WHERE event.item_type='event' AND event.status='active'
+                    ORDER BY event.source_ended_at DESC,
+                             event.created_at DESC,
+                             event.item_id DESC
+                    LIMIT ?
+                    """,
+                    [*params, SOURCE_KEY_LOOKUP_RESULT_LIMIT + 1],
+                ).fetchall()
+                candidate_ids.update(str(row["item_id"]) for row in rows)
+            ordered_rows = (
+                conn.execute(
+                    f"""
+                    SELECT * FROM fact_events
+                    WHERE item_id IN ({','.join('?' for _ in candidate_ids)})
+                    ORDER BY source_ended_at DESC, created_at DESC, item_id DESC
+                    """,
+                    sorted(candidate_ids),
+                ).fetchall()
+                if candidate_ids
+                else []
+            )
+            truncated = len(ordered_rows) > SOURCE_KEY_LOOKUP_RESULT_LIMIT
+            selected_rows = ordered_rows[:SOURCE_KEY_LOOKUP_RESULT_LIMIT]
+            items = [
+                self._row_payload(conn, row, include_sources=True)
+                for row in selected_rows
+            ]
+        return {
+            "ok": not truncated,
+            "blocked": truncated,
+            "truncated": truncated,
+            "items": items,
+            "result_limit": SOURCE_KEY_LOOKUP_RESULT_LIMIT,
+            "matched_event_count_lower_bound": len(ordered_rows),
+            "query_receipt": receipt,
+            "writes_performed": [],
+        }
 
     def replace_many(self, raw_items: Any) -> dict[str, Any]:
         """Atomically write reviewed replacements and supersede every predecessor."""
@@ -1845,6 +1942,36 @@ def _normalize_ids(raw: Any, field: str, *, limit: int) -> list[str]:
         item_id = _required_identifier(value, field, 128)
         if item_id not in result:
             result.append(item_id)
+    return result
+
+
+def _normalize_lookup_source_keys(raw: Any) -> list[tuple[str, str, str]]:
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("source_keys must be a non-empty list")
+    if len(raw) > SOURCE_KEY_LOOKUP_MAX_KEYS:
+        raise ValueError(f"source_keys may contain at most {SOURCE_KEY_LOOKUP_MAX_KEYS} entries")
+    result: list[tuple[str, str, str]] = []
+    for value in raw:
+        if not isinstance(value, dict) or set(value) != {
+            "source_system",
+            "session_id",
+            "message_id",
+        }:
+            raise ValueError("each source key must contain only exact source fields")
+        source_key = (
+            str(value.get("source_system") or "").strip(),
+            str(value.get("session_id") or "").strip(),
+            str(value.get("message_id") or "").strip(),
+        )
+        if (
+            any(not item for item in source_key)
+            or len(source_key[0]) > 160
+            or len(source_key[1]) > 240
+            or len(source_key[2]) > 240
+            or source_key in result
+        ):
+            raise ValueError("source_keys contain an empty, duplicate, or oversized exact key")
+        result.append(source_key)
     return result
 
 

@@ -14645,6 +14645,35 @@ async def api_read_fact_events_many(request):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@mcp.custom_route("/api/fact-events/find-by-source-keys", methods=["POST"])
+async def api_find_fact_events_by_source_keys(request):
+    """Read active Events overlapping bounded exact source keys without search."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict) or set(body) != {"source_keys"}:
+        return JSONResponse(
+            {"error": "request body must contain only source_keys"},
+            status_code=400,
+        )
+    try:
+        result = fact_event_store.find_active_events_by_source_keys(
+            body.get("source_keys")
+        )
+        return JSONResponse(result, status_code=409 if result["blocked"] else 200)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Fact/Event exact source-key lookup failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @mcp.custom_route("/api/fact-events/active-leaf", methods=["GET"])
 async def api_read_fact_event_active_leaf(request):
     """Resolve one exact ID to its unique current active replacement leaf."""
