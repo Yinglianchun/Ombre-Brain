@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any, Awaitable, Callable
 
@@ -106,6 +107,109 @@ async def verify_narrative_scene_sources(
                 "title": str(metadata.get("name") or scene_id),
                 "date": str(metadata.get("date") or ""),
                 "content_sha256": content_hash,
+            }
+        )
+    return resolved, errors
+
+
+def diary_comments_sha256(comments: Any) -> str:
+    """Hash the stable, readable comment snapshot returned with a Diary."""
+
+    normalized = [
+        {
+            "id": int(comment.get("id") or 0),
+            "author": str(comment.get("author") or ""),
+            "created_at": str(comment.get("created_at") or ""),
+            "content": str(comment.get("content") or ""),
+        }
+        for comment in comments or []
+        if isinstance(comment, dict)
+    ]
+    normalized.sort(
+        key=lambda comment: (
+            comment["id"],
+            comment["author"],
+            comment["created_at"],
+            comment["content"],
+        )
+    )
+    stable_json = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(stable_json.encode("utf-8")).hexdigest()
+
+
+def diary_source_marker(
+    *,
+    diary_id: int,
+    revision: int,
+    content_sha256: str,
+    comments_sha256: str,
+) -> str:
+    """Return the exact source marker required in a Narrative publication document."""
+
+    return (
+        f"diary:{int(diary_id)} revision:{int(revision)} "
+        f"content_sha256:{content_sha256} comments_sha256:{comments_sha256}"
+    )
+
+
+def verify_narrative_diary_sources(
+    *,
+    exact_document: str,
+    diary_ids: list[int],
+    get_diary: Callable[[int], dict[str, Any] | None],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Verify active Diary bindings without copying Diary content into Narrative state."""
+
+    resolved: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for diary_id in diary_ids:
+        diary = get_diary(diary_id)
+        if not diary:
+            errors.append({"diary_id": diary_id, "reason": "diary_not_found"})
+            continue
+        if str(diary.get("entry_type") or "") != "diary":
+            errors.append({"diary_id": diary_id, "reason": "not_ordinary_diary"})
+            continue
+        if str(diary.get("visibility") or "") != "active":
+            errors.append({"diary_id": diary_id, "reason": "not_active_diary"})
+            continue
+        try:
+            revision = int(diary.get("revision") or 0)
+        except (TypeError, ValueError):
+            revision = 0
+        if revision <= 0 or not bool(diary.get("body_available")):
+            errors.append({"diary_id": diary_id, "reason": "diary_content_unavailable"})
+            continue
+        content_sha256 = hashlib.sha256(
+            str(diary.get("content") or "").encode("utf-8")
+        ).hexdigest()
+        comments_sha256 = diary_comments_sha256(diary.get("comments"))
+        marker = diary_source_marker(
+            diary_id=diary_id,
+            revision=revision,
+            content_sha256=content_sha256,
+            comments_sha256=comments_sha256,
+        )
+        if marker not in exact_document:
+            errors.append(
+                {
+                    "diary_id": diary_id,
+                    "reason": "diary_snapshot_marker_missing_from_document",
+                    "revision": revision,
+                    "content_sha256": content_sha256,
+                    "comments_sha256": comments_sha256,
+                }
+            )
+            continue
+        resolved.append(
+            {
+                "source_type": "diary",
+                "diary_id": diary_id,
+                "title": str(diary.get("title") or f"Diary {diary_id}"),
+                "date": str(diary.get("date") or ""),
+                "revision": revision,
+                "content_sha256": content_sha256,
+                "comments_sha256": comments_sha256,
             }
         )
     return resolved, errors

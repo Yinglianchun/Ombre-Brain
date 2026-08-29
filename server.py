@@ -165,7 +165,10 @@ from reflection_engine import ReflectionEngine
 from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
 from narrative_arc_rank import NarrativeArcMemberRanker, normalize_arc_rank_request
-from narrative_source_verification import verify_narrative_scene_sources
+from narrative_source_verification import (
+    verify_narrative_diary_sources,
+    verify_narrative_scene_sources,
+)
 from reranker_engine import RerankerEngine
 from scene_linker import SceneLinker
 from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_bucket, is_self_anchor_metadata
@@ -12410,6 +12413,7 @@ async def publish_narrative(
     parent_narrative_id: str = "",
     source_scene_ids: list[str] | None = None,
     source_event_ids: list[str] | None = None,
+    source_diary_ids: list[int] | None = None,
     title_aliases: list[str] | None = None,
     primary_entities: list[str] | None = None,
     supporting_entities: list[str] | None = None,
@@ -12421,10 +12425,11 @@ async def publish_narrative(
     publication_status: str = "reviewed",
     lifecycle: str = "active",
 ) -> dict:
-    """发布或修订 Narrative Roll。collecting Arc 必须填写唯一稳定 arc_key；parent_narrative_id 可冻结一条已有 active Narrative 父关系，但不扩展来源 ownership 或召回。"""
+    """发布或修订 Narrative Roll。Diary 来源须绑定 active 普通日记的精确 revision 和内容哈希；collecting Arc 必须填写唯一稳定 arc_key。"""
     exact_document = str(document or "")
     linked_ids = narrative_roll_store.source_scene_ids(exact_document, source_scene_ids)
     linked_event_ids = narrative_roll_store.source_event_ids(exact_document, source_event_ids)
+    linked_diary_ids = narrative_roll_store.source_diary_ids(exact_document, source_diary_ids)
     current_roll = narrative_roll_store.read(str(narrative_id or "").strip())
 
     def _active_narrative_source_scene(scene: dict) -> bool:
@@ -12476,6 +12481,19 @@ async def publish_narrative(
                 "fingerprint": fingerprint,
             }
         )
+    def _get_diary(diary_id: int) -> dict | None:
+        result = diary_store.read(diary_id=diary_id, limit=1, include_archived=True)
+        if result.get("count") != 1 or int(result.get("id") or 0) != diary_id:
+            return None
+        return result
+
+    resolved_diaries, diary_errors = verify_narrative_diary_sources(
+        exact_document=exact_document,
+        diary_ids=linked_diary_ids,
+        get_diary=_get_diary,
+    )
+    resolved_sources.extend(resolved_diaries)
+    errors.extend(diary_errors)
     if errors:
         return {
             "status": "invalid",
@@ -12493,6 +12511,7 @@ async def publish_narrative(
         parent_narrative_id=parent_narrative_id,
         source_scene_ids=linked_ids,
         source_event_ids=linked_event_ids,
+        source_diary_ids=linked_diary_ids,
         title_aliases=title_aliases,
         primary_entities=primary_entities,
         supporting_entities=supporting_entities,
