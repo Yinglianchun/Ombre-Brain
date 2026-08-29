@@ -12,7 +12,9 @@ from identity import identity_names
 
 
 _SCENE_ID_RE = re.compile(r"\bscene_mig2_[A-Za-z0-9]+\b")
+_EVENT_ID_RE = re.compile(r"\bevent_[0-9a-f]{24}\b")
 _NARRATIVE_ID_RE = re.compile(r"^narrative_[A-Za-z0-9_.:-]{1,96}$")
+_ARC_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}:[^\s\x00-\x1f\x7f]{1,127}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _BODY_HEADING_RE = re.compile(r"(?m)^## 第一人称叙事\s*$")
 _NEXT_HEADING_RE = re.compile(r"(?m)^##\s+")
@@ -64,6 +66,11 @@ def _extract_body(document: str) -> str:
 def _query_requests_exact_evidence(query: str) -> bool:
     compact_query = _compact(query)
     return any(_compact(marker) in compact_query for marker in _EXACT_EVIDENCE_MARKERS)
+
+
+def normalize_arc_key(value: Any) -> str:
+    key = str(value or "").strip()
+    return key if _ARC_KEY_RE.fullmatch(key) else ""
 
 
 class NarrativeRollStore:
@@ -162,6 +169,15 @@ class NarrativeRollStore:
                 "body": "",
                 "full_document": "",
                 "linked_scene_ids": [],
+                "linked_event_ids": [],
+                "arc_key": normalize_arc_key(entry.get("arc_key")),
+                "parent_narrative_id": (
+                    str(entry.get("parent_narrative_id") or "").strip()
+                    if _NARRATIVE_ID_RE.fullmatch(
+                        str(entry.get("parent_narrative_id") or "").strip()
+                    )
+                    else ""
+                ),
             }
             try:
                 document = source_path.read_text(encoding="utf-8")
@@ -171,6 +187,7 @@ class NarrativeRollStore:
             actual_hash = _sha256_text(document)
             expected_hash = str(entry.get("document_sha256") or "").strip().lower()
             body = _extract_body(document)
+            publication_status = str(entry.get("publication_status") or "reviewed").strip().lower()
             excluded_ids = {
                 str(value or "").strip()
                 for value in entry.get("excluded_scene_ids", []) or []
@@ -187,9 +204,25 @@ class NarrativeRollStore:
                     if scene_id not in excluded_ids
                 )
             )
+            excluded_event_ids = {
+                str(value or "").strip()
+                for value in entry.get("excluded_event_ids", []) or []
+                if str(value or "").strip()
+            }
+            linked_event_ids = list(
+                dict.fromkeys(
+                    str(event_id or "").strip()
+                    for event_id in [
+                        *(entry.get("linked_event_ids", []) or []),
+                        *_EVENT_ID_RE.findall(document),
+                    ]
+                    if str(event_id or "").strip()
+                    if event_id not in excluded_event_ids
+                )
+            )
             if expected_hash and actual_hash != expected_hash:
                 integrity_status = "hash_mismatch"
-            elif not body:
+            elif not body and publication_status != "collecting":
                 integrity_status = "missing_first_person_body"
             else:
                 integrity_status = "ok"
@@ -203,6 +236,8 @@ class NarrativeRollStore:
                     "full_document": document if integrity_status == "ok" else "",
                     "linked_scene_ids": linked_scene_ids,
                     "linked_scene_count": len(linked_scene_ids),
+                    "linked_event_ids": linked_event_ids,
+                    "linked_event_count": len(linked_event_ids),
                 }
             )
             items.append(item)
@@ -216,6 +251,8 @@ class NarrativeRollStore:
             key: item.get(key)
             for key in (
                 "narrative_id",
+                "arc_key",
+                "parent_narrative_id",
                 "revision",
                 "title",
                 "scope",
@@ -234,6 +271,7 @@ class NarrativeRollStore:
                 "body_sha256",
                 "body_chars",
                 "linked_scene_count",
+                "linked_event_count",
                 "integrity_status",
             )
         }
@@ -338,13 +376,35 @@ class NarrativeRollStore:
             "mode": "narrative_roll_full_read",
             **self._light(item),
             "linked_scene_ids": list(item.get("linked_scene_ids") or []),
+            "linked_event_ids": list(item.get("linked_event_ids") or []),
             "body": str(item.get("body") or ""),
             "full_document": str(item.get("full_document") or ""),
             "reading_boundary": (
-                "Narrative Roll is a sourced first-person projection, not original evidence. "
-                "For exact dates or wording, read its linked Scene/raw sources."
+                "This collecting Arc is a source index, not authored narrative or original evidence. "
+                "Read its linked Scene/Event/raw sources selectively."
+                if str(item.get("publication_status") or "") == "collecting"
+                else "Narrative Roll is a sourced first-person projection, not original evidence. "
+                "For exact dates or wording, read its linked Scene/Event/raw sources."
             ),
         }
+
+    def read_by_arc_key(self, arc_key: str) -> dict[str, Any]:
+        """Resolve one active, intact Arc from its persisted stable key."""
+
+        safe_key = normalize_arc_key(arc_key)
+        if not safe_key:
+            return {"status": "invalid", "reason": "invalid_arc_key", "arc_key": str(arc_key or "").strip()}
+        matches = [
+            item
+            for item in self._load()
+            if str(item.get("arc_key") or "") == safe_key
+            and str(item.get("lifecycle") or "active") == "active"
+        ]
+        if not matches:
+            return {"status": "not_found", "arc_key": safe_key}
+        if len(matches) != 1:
+            return {"status": "invalid", "reason": "duplicate_arc_key", "arc_key": safe_key}
+        return self.read(str(matches[0].get("narrative_id") or ""))
 
     @staticmethod
     def source_scene_ids(document: str, explicit_ids: list[str] | None = None) -> list[str]:
@@ -352,6 +412,16 @@ class NarrativeRollStore:
             dict.fromkeys(
                 str(value or "").strip()
                 for value in [*(explicit_ids or []), *_SCENE_ID_RE.findall(str(document or ""))]
+                if str(value or "").strip()
+            )
+        )
+
+    @staticmethod
+    def source_event_ids(document: str, explicit_ids: list[str] | None = None) -> list[str]:
+        return list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in [*(explicit_ids or []), *_EVENT_ID_RE.findall(str(document or ""))]
                 if str(value or "").strip()
             )
         )
@@ -379,7 +449,10 @@ class NarrativeRollStore:
         document: str,
         expected_revision: int,
         title: str,
-        source_scene_ids: list[str],
+        arc_key: str = "",
+        parent_narrative_id: str = "",
+        source_scene_ids: list[str] | None = None,
+        source_event_ids: list[str] | None = None,
         title_aliases: list[str] | None = None,
         primary_entities: list[str] | None = None,
         supporting_entities: list[str] | None = None,
@@ -402,7 +475,15 @@ class NarrativeRollStore:
             return {"status": "invalid", "reason": "title_required", "narrative_id": safe_id}
         if not exact_document.strip():
             return {"status": "invalid", "reason": "document_required", "narrative_id": safe_id}
-        if not _extract_body(exact_document):
+
+        publication_status = str(publication_status or "reviewed").strip().lower()
+        if publication_status not in {"collecting", "reviewed", "published"}:
+            return {
+                "status": "invalid",
+                "reason": "publication_status_must_be_collecting_reviewed_or_published",
+                "narrative_id": safe_id,
+            }
+        if publication_status != "collecting" and not _extract_body(exact_document):
             return {
                 "status": "invalid",
                 "reason": "missing_first_person_body",
@@ -410,10 +491,38 @@ class NarrativeRollStore:
             }
 
         linked_scene_ids = self.source_scene_ids(exact_document, source_scene_ids)
-        if len(linked_scene_ids) < 2:
+        linked_event_ids = self.source_event_ids(exact_document, source_event_ids)
+        if len(linked_scene_ids) + len(linked_event_ids) < 2:
             return {
                 "status": "invalid",
-                "reason": "at_least_two_source_scenes_required",
+                "reason": (
+                    "at_least_two_source_scenes_required"
+                    if not linked_event_ids
+                    else "at_least_two_sources_required"
+                ),
+                "narrative_id": safe_id,
+            }
+
+        requested_arc_key = str(arc_key or "").strip()
+        if requested_arc_key and not normalize_arc_key(requested_arc_key):
+            return {
+                "status": "invalid",
+                "reason": "invalid_arc_key",
+                "narrative_id": safe_id,
+                "arc_key": requested_arc_key,
+            }
+        requested_parent_id = str(parent_narrative_id or "").strip()
+        if requested_parent_id and not _NARRATIVE_ID_RE.fullmatch(requested_parent_id):
+            return {
+                "status": "invalid",
+                "reason": "invalid_parent_narrative_id",
+                "narrative_id": safe_id,
+                "parent_narrative_id": requested_parent_id,
+            }
+        if requested_parent_id == safe_id:
+            return {
+                "status": "invalid",
+                "reason": "parent_narrative_cannot_be_self",
                 "narrative_id": safe_id,
             }
         missing_in_document = [scene_id for scene_id in linked_scene_ids if scene_id not in exact_document]
@@ -424,14 +533,17 @@ class NarrativeRollStore:
                 "narrative_id": safe_id,
                 "scene_ids": missing_in_document,
             }
-
-        publication_status = str(publication_status or "reviewed").strip().lower()
-        if publication_status not in {"reviewed", "published"}:
+        missing_events_in_document = [
+            event_id for event_id in linked_event_ids if event_id not in exact_document
+        ]
+        if missing_events_in_document:
             return {
                 "status": "invalid",
-                "reason": "publication_status_must_be_reviewed_or_published",
+                "reason": "source_event_id_missing_from_document",
                 "narrative_id": safe_id,
+                "event_ids": missing_events_in_document,
             }
+
         lifecycle = str(lifecycle or "active").strip().lower()
         if lifecycle not in {"active", "closed", "retired"}:
             return {
@@ -485,6 +597,74 @@ class NarrativeRollStore:
                 "current_revision": current_revision,
             }
 
+
+        current_arc_key = normalize_arc_key((current or {}).get("arc_key"))
+        safe_arc_key = normalize_arc_key(requested_arc_key) or current_arc_key
+        if publication_status == "collecting" and not safe_arc_key:
+            return {
+                "status": "invalid",
+                "reason": "arc_key_required_for_collecting",
+                "narrative_id": safe_id,
+            }
+        if current_arc_key and requested_arc_key and safe_arc_key != current_arc_key:
+            return {
+                "status": "conflict",
+                "reason": "arc_key_is_stable",
+                "narrative_id": safe_id,
+                "arc_key": current_arc_key,
+            }
+        duplicate = next(
+            (
+                entry
+                for entry in entries
+                if isinstance(entry, dict)
+                and str(entry.get("narrative_id") or "") != safe_id
+                and normalize_arc_key(entry.get("arc_key")) == safe_arc_key
+            ),
+            None,
+        ) if safe_arc_key else None
+        if duplicate is not None:
+            return {
+                "status": "conflict",
+                "reason": "arc_key_already_exists",
+                "narrative_id": safe_id,
+                "arc_key": safe_arc_key,
+            }
+
+        current_parent_id = str((current or {}).get("parent_narrative_id") or "").strip()
+        if current is not None and requested_parent_id and requested_parent_id != current_parent_id:
+            return {
+                "status": "conflict",
+                "reason": "parent_narrative_id_is_stable",
+                "narrative_id": safe_id,
+                "parent_narrative_id": current_parent_id,
+            }
+        safe_parent_id = current_parent_id or requested_parent_id
+        if safe_parent_id:
+            parent_entry = next(
+                (
+                    entry
+                    for entry in entries
+                    if isinstance(entry, dict)
+                    and str(entry.get("narrative_id") or "").strip() == safe_parent_id
+                ),
+                None,
+            )
+            if parent_entry is None:
+                return {
+                    "status": "invalid",
+                    "reason": "parent_narrative_not_found",
+                    "narrative_id": safe_id,
+                    "parent_narrative_id": safe_parent_id,
+                }
+            if str(parent_entry.get("lifecycle") or "active").strip().lower() != "active":
+                return {
+                    "status": "invalid",
+                    "reason": "parent_narrative_not_active",
+                    "narrative_id": safe_id,
+                    "parent_narrative_id": safe_parent_id,
+                }
+
         revision = current_revision + 1
         document_hash = _sha256_text(exact_document)
         published_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -507,12 +687,18 @@ class NarrativeRollStore:
                         "source_file",
                         "document_sha256",
                         "published_at",
+                        "linked_scene_ids",
+                        "linked_event_ids",
+                        "arc_key",
+                        "parent_narrative_id",
                     )
                 }
             )
 
         entry = {
             "narrative_id": safe_id,
+            "arc_key": safe_arc_key,
+            "parent_narrative_id": safe_parent_id,
             "revision": revision,
             "scope": "arc",
             "title": safe_title,
@@ -529,6 +715,7 @@ class NarrativeRollStore:
             "source_file": source_file,
             "document_sha256": document_hash,
             "linked_scene_ids": linked_scene_ids,
+            "linked_event_ids": linked_event_ids,
             "published_at": published_at,
             "published_by": f"{self.identity['ai_name']}_manual",
             "history": history,
@@ -574,6 +761,7 @@ class NarrativeRollStore:
                 "status": "created" if current is None else "updated",
                 "expected_revision": expected,
                 "source_scene_ids": linked_scene_ids,
+                "source_event_ids": linked_event_ids,
                 "canonical_scene_changed": False,
                 "model_called": False,
             }

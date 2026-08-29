@@ -105,6 +105,8 @@ from memory_edges import (
 )
 from entity_edges import EntityEdgeStore, extract_entity_edges_from_bucket
 from memory_moments import MemoryMomentStore, parse_bucket_moments
+from memory_recall.fact_event_semantic import FactEventSemanticIndex
+from memory_recall.passage_shadow import PassageShadowIndex
 from memory_relevance import (
     active_facets,
     emotional_recall_plan,
@@ -162,6 +164,7 @@ from raw_events import RawEventStore
 from reflection_engine import ReflectionEngine
 from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
+from narrative_arc_rank import NarrativeArcMemberRanker, normalize_arc_rank_request
 from reranker_engine import RerankerEngine
 from scene_linker import SceneLinker
 from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_bucket, is_self_anchor_metadata
@@ -256,6 +259,14 @@ narrative_roll_store = NarrativeRollStore(config)          # Reviewed sourced Na
 narrative_revision_inbox_store = NarrativeRevisionInbox(config) # Derived source-to-roll review queue / 派生叙事修订箱
 scene_evidence_store = SceneEvidenceStore(config)           # Independent Scene/source evidence sidecar / Scene 原文证据旁路索引
 fact_event_store = FactEventStore(config)                    # Canonical raw-source Fact/Event store / 原文绑定事实与事件主存储
+fact_event_semantic_index = FactEventSemanticIndex(config, embedding_engine)
+passage_shadow_index = PassageShadowIndex(config, embedding_engine)
+narrative_arc_member_ranker = NarrativeArcMemberRanker(
+    narrative_roll_store,
+    embedding_engine,
+    fact_event_semantic_index,
+    passage_shadow_index,
+)
 legacy_memory_review_store = LegacyMemoryReviewStore(config) # Admin-only legacy lifecycle / bridge review cards
 legacy_memory_lifecycle_publisher = LegacyMemoryLifecyclePublisher(
     config,
@@ -8675,12 +8686,12 @@ async def list_buckets_light(
 # 工具 1.56：叙事卷只读索引与全文读取
 # =============================================================
 async def narrative_rolls(query: str = "", limit: int = 20) -> dict:
-    """只读搜索叙事卷索引；返回标题、时间范围、状态、实体与 narrative_id，不返回正文。按卷名或实体找卷；精确日期/原话仍应读 Scene 或 raw。"""
+    """只读搜索叙事卷索引；返回标题、时间范围、状态、实体与 narrative_id，不返回正文。按卷名或实体找卷；精确日期/原话仍应读 Scene、Event 或 raw。"""
     return narrative_roll_store.list(query=query, limit=limit)
 
 
 async def _read_narrative_memory(narrative_id: str) -> dict:
-    """按 narrative_id 只读完整叙事卷：正文、当前状态、来源账、准确性边界、revision 与 linked_scene_ids 一起返回。Narrative Roll 是有来源的第一人称派生叙事，不是原始证据；精确日期和逐字原话继续下钻 Scene/raw。"""
+    """按 narrative_id 只读完整叙事卷：正文、当前状态、来源账、准确性边界、revision 与 linked_scene_ids/linked_event_ids 一起返回。Narrative Roll 是有来源的第一人称派生叙事，不是原始证据；精确日期和逐字原话继续下钻 Scene/Event/raw。"""
     narrative_id = _coerce_memory_id(narrative_id)
     if not narrative_id or not MEMORY_ID_RE.fullmatch(narrative_id):
         return {"status": "invalid", "error": "invalid narrative_id"}
@@ -8711,6 +8722,38 @@ async def api_narrative_rolls(request):
         if result.get("status") == "not_found"
         else 400
         if result.get("status") == "invalid"
+        else 200
+    )
+    return JSONResponse(result, status_code=status_code)
+
+
+@mcp.custom_route("/api/narrative-arcs/rank-members", methods=["POST"])
+async def api_rank_narrative_arc_members(request):
+    """Read-only semantic rank over one Arc's frozen direct registry members."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"status": "invalid", "reason": "invalid_json_body"}, status_code=400)
+    normalized = normalize_arc_rank_request(body)
+    if normalized.get("status") != "ok":
+        return JSONResponse(normalized, status_code=400)
+    result = await narrative_arc_member_ranker.rank(
+        arc_key=normalized["arc_key"],
+        query=normalized["query"],
+        top_k=normalized["top_k"],
+    )
+    status_code = (
+        404
+        if result.get("status") == "not_found"
+        else 400
+        if result.get("status") == "invalid"
+        else 503
+        if result.get("status") == "unavailable"
         else 200
     )
     return JSONResponse(result, status_code=status_code)
@@ -12362,7 +12405,10 @@ async def publish_narrative(
     document: str,
     expected_revision: int,
     title: str,
-    source_scene_ids: list[str],
+    arc_key: str = "",
+    parent_narrative_id: str = "",
+    source_scene_ids: list[str] | None = None,
+    source_event_ids: list[str] | None = None,
     title_aliases: list[str] | None = None,
     primary_entities: list[str] | None = None,
     supporting_entities: list[str] | None = None,
@@ -12374,9 +12420,10 @@ async def publish_narrative(
     publication_status: str = "reviewed",
     lifecycle: str = "active",
 ) -> dict:
-    """发布或修订 Narrative Roll。narrative_id/title/document 填卷信息；source_scene_ids 填来源 Scene；expected_revision 创建时填 0、修订时填当前 revision；其余参数填写别名、实体、cues、时间范围和状态。"""
+    """发布或修订 Narrative Roll。collecting Arc 必须填写唯一稳定 arc_key；parent_narrative_id 可冻结一条已有 active Narrative 父关系，但不扩展来源 ownership 或召回。"""
     exact_document = str(document or "")
     linked_ids = narrative_roll_store.source_scene_ids(exact_document, source_scene_ids)
+    linked_event_ids = narrative_roll_store.source_event_ids(exact_document, source_event_ids)
     resolved_sources: list[dict] = []
     errors: list[dict] = []
     for scene_id in linked_ids:
@@ -12409,10 +12456,41 @@ async def publish_narrative(
             continue
         resolved_sources.append(
             {
+                "source_type": "scene",
                 "scene_id": scene_id,
                 "title": str(metadata.get("name") or scene_id),
                 "date": str(metadata.get("date") or ""),
                 "content_sha256": content_hash,
+            }
+        )
+    for event_id in linked_event_ids:
+        if not re.fullmatch(r"event_[0-9a-f]{24}", event_id):
+            errors.append({"event_id": event_id, "reason": "invalid_event_id"})
+            continue
+        event = fact_event_store.read(event_id, include_sources=True)
+        if not event:
+            errors.append({"event_id": event_id, "reason": "event_not_found"})
+            continue
+        if str(event.get("item_type") or "") != "event" or str(event.get("status") or "") != "active":
+            errors.append({"event_id": event_id, "reason": "not_active_canonical_event"})
+            continue
+        fingerprint = str(event.get("fingerprint") or "").strip().lower()
+        if not fingerprint or fingerprint not in exact_document:
+            errors.append(
+                {
+                    "event_id": event_id,
+                    "reason": "event_fingerprint_missing_from_document",
+                    "fingerprint": fingerprint,
+                }
+            )
+            continue
+        resolved_sources.append(
+            {
+                "source_type": "event",
+                "event_id": event_id,
+                "title": str(event.get("title") or event_id),
+                "date": str(event.get("local_date") or ""),
+                "fingerprint": fingerprint,
             }
         )
     if errors:
@@ -12428,7 +12506,10 @@ async def publish_narrative(
         document=exact_document,
         expected_revision=expected_revision,
         title=title,
+        arc_key=arc_key,
+        parent_narrative_id=parent_narrative_id,
         source_scene_ids=linked_ids,
+        source_event_ids=linked_event_ids,
         title_aliases=title_aliases,
         primary_entities=primary_entities,
         supporting_entities=supporting_entities,

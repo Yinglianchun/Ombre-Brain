@@ -10,6 +10,7 @@ import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable
 
 
@@ -249,6 +250,21 @@ class PassageShadowIndex:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def _connect_readonly(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(f"{Path(self.db_path).resolve().as_uri()}?mode=ro", uri=True, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def read_availability(self) -> dict[str, Any]:
+        if not os.path.exists(self.db_path):
+            return {"status": "unavailable", "reason": "index_missing"}
+        try:
+            with closing(self._connect_readonly()) as conn:
+                conn.execute("SELECT 1 FROM memory_passage_embeddings LIMIT 1").fetchone()
+        except sqlite3.Error as exc:
+            return {"status": "unavailable", "reason": "index_unreadable", "error": str(exc)}
+        return {"status": "ok"}
+
     def _init_db(self) -> None:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         with closing(self._connect()) as conn:
@@ -449,15 +465,16 @@ class PassageShadowIndex:
     ) -> dict[str, Any]:
         if not query_embedding:
             return {"status": "unavailable", "reason": "query_embedding_empty", "matches": []}
-        if not os.path.exists(self.db_path):
-            return {"status": "unavailable", "reason": "index_missing", "matches": []}
+        availability = self.read_availability()
+        if availability.get("status") != "ok":
+            return {**availability, "matches": []}
         kinds = {str(kind).strip().lower() for kind in owner_kinds}
         kinds &= {"scene", "event"}
         if not kinds:
             return {"status": "ok", "candidate_count": 0, "matches": []}
 
         model = str(getattr(self.embedding_engine, "model", "") or "")
-        with closing(self._connect()) as conn:
+        with closing(self._connect_readonly()) as conn:
             rows = conn.execute("SELECT * FROM memory_passage_embeddings").fetchall()
         by_owner: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for row in rows:
@@ -501,6 +518,10 @@ class PassageShadowIndex:
         return {
             "status": "ok",
             "candidate_count": len(matches),
+            "indexed_owner_ids": [
+                {"owner_kind": kind, "owner_id": owner_id}
+                for kind, owner_id in sorted(by_owner)
+            ],
             "matches": matches[: max(1, min(100, int(top_k or 10)))],
         }
 

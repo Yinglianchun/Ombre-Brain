@@ -110,6 +110,13 @@ async def main() -> None:
         event_probe = index.search_by_embedding([0.0, 1.0, 0.0], top_k=2)
         assert event_probe["matches"][0]["memory_id"] == event_id
         assert event_probe["matches"][0]["memory_kind"] == "event"
+        scoped_probe = index.search_by_embedding(
+            [1.0, 0.0, 0.0],
+            top_k=8,
+            allowed_memory_ids=[event_id],
+        )
+        assert scoped_probe["indexed_memory_ids"] == [event_id], scoped_probe
+        assert [row["memory_id"] for row in scoped_probe["matches"]] == [event_id], scoped_probe
 
         store.revise(fact_id, importance=5)
         reused = await index.sync(store)

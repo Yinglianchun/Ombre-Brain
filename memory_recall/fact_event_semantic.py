@@ -7,6 +7,7 @@ import os
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable
 
 from fact_events import FactEventStore
@@ -74,6 +75,23 @@ class FactEventSemanticIndex:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _connect_readonly(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(f"{Path(self.db_path).resolve().as_uri()}?mode=ro", uri=True, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def read_availability(self) -> dict[str, Any]:
+        if not self.enabled:
+            return {"status": "unavailable", "reason": "index_disabled"}
+        if not os.path.exists(self.db_path):
+            return {"status": "unavailable", "reason": "index_missing"}
+        try:
+            with closing(self._connect_readonly()) as conn:
+                conn.execute("SELECT 1 FROM fact_event_embeddings LIMIT 1").fetchone()
+        except sqlite3.Error as exc:
+            return {"status": "unavailable", "reason": "index_unreadable", "error": str(exc)}
+        return {"status": "ok"}
 
     def _init_db(self) -> None:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
@@ -224,20 +242,51 @@ class FactEventSemanticIndex:
         top_k: int = 8,
         memory_kinds: Iterable[str] = ("fact", "event"),
         min_importance: int = 1,
+        allowed_memory_ids: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
             return {"status": "disabled", "matches": []}
         if not query_embedding:
             return {"status": "unavailable", "reason": "query_embedding_empty", "matches": []}
-        if not os.path.exists(self.db_path):
-            return {"status": "unavailable", "reason": "index_missing", "matches": []}
+        availability = self.read_availability()
+        if availability.get("status") != "ok":
+            return {**availability, "matches": []}
         kinds = {str(value).strip().lower() for value in memory_kinds}
         kinds &= {"fact", "event"}
         if not kinds:
             return {"status": "ok", "matches": []}
+        allowed_ids = (
+            {
+                str(value or "").strip()
+                for value in allowed_memory_ids
+                if str(value or "").strip()
+            }
+            if allowed_memory_ids is not None
+            else None
+        )
+        if allowed_ids is not None and not allowed_ids:
+            return {
+                "status": "ok",
+                "candidate_count": 0,
+                "indexed_memory_ids": [],
+                "matches": [],
+            }
         model = str(getattr(self.embedding_engine, "model", "") or "")
-        with closing(self._connect()) as conn:
-            rows = conn.execute("SELECT * FROM fact_event_embeddings").fetchall()
+        with closing(self._connect_readonly()) as conn:
+            if allowed_ids is None:
+                rows = conn.execute("SELECT * FROM fact_event_embeddings").fetchall()
+            else:
+                rows = []
+                ordered_ids = sorted(allowed_ids)
+                for offset in range(0, len(ordered_ids), 900):
+                    chunk = ordered_ids[offset : offset + 900]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows.extend(
+                        conn.execute(
+                            f"SELECT * FROM fact_event_embeddings WHERE item_id IN ({placeholders})",
+                            chunk,
+                        ).fetchall()
+                    )
         matches: list[dict[str, Any]] = []
         for row in rows:
             if str(row["item_type"]) not in kinds or str(row["model"]) != model:
@@ -265,6 +314,7 @@ class FactEventSemanticIndex:
         return {
             "status": "ok",
             "candidate_count": len(matches),
+            "indexed_memory_ids": sorted(str(item["memory_id"]) for item in matches),
             "min_importance": max(1, int(min_importance or 1)),
             "matches": matches[: max(1, min(30, int(top_k or 8)))],
         }
