@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import {
   ArrowLeft,
@@ -21,7 +21,30 @@ const transitionTo = (update) => {
 
 const formatRange = (roll) => `${roll.timeStart} — ${roll.timeEnd}`;
 
+const turnShelfWithWheel = (event) => {
+  const shelf = event.currentTarget;
+  if (shelf.scrollWidth <= shelf.clientWidth) return;
+
+  const wheelDelta = Math.abs(event.deltaY) >= Math.abs(event.deltaX)
+    ? event.deltaY
+    : event.deltaX;
+  const distance = event.deltaMode === 1
+    ? wheelDelta * 40
+    : event.deltaMode === 2
+      ? wheelDelta * shelf.clientWidth
+      : wheelDelta;
+  const nextScrollLeft = Math.max(
+    0,
+    Math.min(shelf.scrollWidth - shelf.clientWidth, shelf.scrollLeft + distance),
+  );
+
+  if (nextScrollLeft === shelf.scrollLeft) return;
+  event.preventDefault();
+  shelf.scrollLeft = nextScrollLeft;
+};
+
 export function NarrativePage() {
+  const shelfRef = useRef(null);
   const [narrativeRolls, setNarrativeRolls] = useState(readFallbackNarrativeRolls);
   const [selectedRollId, setSelectedRollId] = useState(null);
   const selectedRoll = useMemo(
@@ -50,6 +73,13 @@ export function NarrativePage() {
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [selectedRoll]);
 
+  useEffect(() => {
+    const shelf = shelfRef.current;
+    if (!shelf) return undefined;
+    shelf.addEventListener("wheel", turnShelfWithWheel, { passive: false });
+    return () => shelf.removeEventListener("wheel", turnShelfWithWheel);
+  }, [selectedRoll]);
+
   const openRoll = (rollId) => {
     transitionTo(() => setSelectedRollId(rollId));
   };
@@ -75,7 +105,12 @@ export function NarrativePage() {
           </header>
 
           <div className="narrative-shelf-shell">
-            <div className="narrative-shelf" role="list" aria-label="叙事卷书架">
+            <div
+              className="narrative-shelf"
+              role="list"
+              aria-label="叙事卷书架"
+              ref={shelfRef}
+            >
               {narrativeRolls.map((roll, index) => (
                 <button
                   className={`narrative-book narrative-book--${roll.tone}`}
@@ -111,7 +146,7 @@ export function NarrativePage() {
               </div>
             </div>
             <div className="narrative-shelf__line" aria-hidden="true" />
-            <p className="narrative-shelf__hint">悬停翻开一点 · 点击阅读</p>
+            <p className="narrative-shelf__hint">滚轮向后翻 · 悬停翻开一点 · 点击阅读</p>
           </div>
         </section>
       ) : (

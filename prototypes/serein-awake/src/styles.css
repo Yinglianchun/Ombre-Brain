@@ -2580,10 +2580,14 @@ label:has(input:focus-visible) {
   min-height: min(55vh, 520px);
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: clamp(13px, 1.4vw, 18px);
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
   padding: 22px clamp(10px, 2vw, 28px);
 }
+.narrative-shelf::-webkit-scrollbar { display: none; }
 .narrative-spine {
   position: relative;
   flex: 0 0 auto;
