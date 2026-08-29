@@ -165,6 +165,7 @@ from reflection_engine import ReflectionEngine
 from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
 from narrative_arc_rank import NarrativeArcMemberRanker, normalize_arc_rank_request
+from narrative_source_verification import verify_narrative_scene_sources
 from reranker_engine import RerankerEngine
 from scene_linker import SceneLinker
 from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_bucket, is_self_anchor_metadata
@@ -12424,45 +12425,27 @@ async def publish_narrative(
     exact_document = str(document or "")
     linked_ids = narrative_roll_store.source_scene_ids(exact_document, source_scene_ids)
     linked_event_ids = narrative_roll_store.source_event_ids(exact_document, source_event_ids)
-    resolved_sources: list[dict] = []
-    errors: list[dict] = []
-    for scene_id in linked_ids:
-        if not MEMORY_ID_RE.fullmatch(scene_id):
-            errors.append({"scene_id": scene_id, "reason": "invalid_scene_id"})
-            continue
-        scene = await bucket_mgr.get(scene_id)
-        if not scene:
-            errors.append({"scene_id": scene_id, "reason": "scene_not_found"})
-            continue
+    current_roll = narrative_roll_store.read(str(narrative_id or "").strip())
+
+    def _active_narrative_source_scene(scene: dict) -> bool:
         metadata = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
-        if (
+        return not (
             not _is_canonical_scene_bucket(scene)
             or metadata.get("active") is False
             or metadata.get("deprecated")
             or metadata.get("resolved")
             or metadata.get("digested")
-        ):
-            errors.append({"scene_id": scene_id, "reason": "not_active_canonical_scene"})
-            continue
-        content_hash = hashlib.sha256(str(scene.get("content") or "").encode("utf-8")).hexdigest()
-        if content_hash not in exact_document:
-            errors.append(
-                {
-                    "scene_id": scene_id,
-                    "reason": "scene_content_hash_missing_from_document",
-                    "content_sha256": content_hash,
-                }
-            )
-            continue
-        resolved_sources.append(
-            {
-                "source_type": "scene",
-                "scene_id": scene_id,
-                "title": str(metadata.get("name") or scene_id),
-                "date": str(metadata.get("date") or ""),
-                "content_sha256": content_hash,
-            }
         )
+
+    resolved_sources, errors = await verify_narrative_scene_sources(
+        narrative_id=str(narrative_id or "").strip(),
+        expected_revision=expected_revision,
+        exact_document=exact_document,
+        scene_ids=linked_ids,
+        current_roll=current_roll,
+        get_scene=bucket_mgr.get,
+        is_active_canonical_scene=_active_narrative_source_scene,
+    )
     for event_id in linked_event_ids:
         if not re.fullmatch(r"event_[0-9a-f]{24}", event_id):
             errors.append({"event_id": event_id, "reason": "invalid_event_id"})
