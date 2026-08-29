@@ -81,7 +81,7 @@ from diary_sources import DiarySourceImporter
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
 from favorite_tags import has_favorite_memory_tag, has_favorite_policy_tag
-from fact_events import FactEventStore
+from fact_events import FactEventSettlementBlockedError, FactEventStore
 from gateway_state import GatewayStateStore
 from identity import identity_names
 from identity_semantics import IdentitySemanticStore
@@ -14274,6 +14274,396 @@ async def api_replace_fact_events(request):
     except Exception as exc:
         logger.warning("Fact/Event replacement failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+async def _materialize_fact_event_read_blockers(
+    raw_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach current Narrative/Scene blockers to exact active-leaf reads."""
+
+    result = dict(raw_result)
+    resolved_items = [
+        dict(item) for item in result.get("resolved_items") or [] if isinstance(item, dict)
+    ]
+    resolutions = [
+        dict(item) for item in result.get("resolutions") or [] if isinstance(item, dict)
+    ]
+    result["resolved_items"] = resolved_items
+    result["resolutions"] = resolutions
+    leaves_by_id = {
+        str(item.get("item_id") or ""): item
+        for item in resolved_items
+        if str(item.get("item_id") or "")
+    }
+    family_ids_by_requested = {
+        str(family.get("item_id") or ""): {
+            str(value or "") for value in family.get("family_ids") or [] if str(value or "")
+        }
+        for family in result.get("families") or []
+        if isinstance(family, dict) and str(family.get("item_id") or "")
+    }
+
+    active_narrative_event_ids: set[str] = set()
+    for roll in narrative_roll_store._load():
+        if str(roll.get("lifecycle") or "active") != "active":
+            continue
+        active_narrative_event_ids.update(
+            str(value or "")
+            for value in roll.get("linked_event_ids") or []
+            if str(value or "")
+        )
+
+    scene_leaf_ids: set[str] = set()
+    leaf_source_keys = {
+        leaf_id: {
+            (
+                str(ref.get("source_system") or ""),
+                str(ref.get("session_id") or ""),
+                str(ref.get("message_id") or ""),
+            )
+            for ref in leaf.get("source_refs") or []
+            if isinstance(ref, dict)
+        }
+        for leaf_id, leaf in leaves_by_id.items()
+    }
+    for scene_id, refs in scene_evidence_store.list_active_scene_groups().items():
+        scene_keys = {
+            (
+                str(ref.get("source_system") or ""),
+                str(ref.get("session_id") or ""),
+                str(ref.get("message_id") or ""),
+            )
+            for ref in refs
+            if isinstance(ref, dict)
+        }
+        matched_leaf_ids = {
+            leaf_id
+            for leaf_id, source_keys in leaf_source_keys.items()
+            if source_keys.intersection(scene_keys)
+        }
+        if not matched_leaf_ids:
+            continue
+        _safe_scene_id, reason = await _validate_scene_evidence_target(scene_id)
+        if not reason:
+            scene_leaf_ids.update(matched_leaf_ids)
+
+    narrative_leaf_ids: set[str] = set()
+    for resolution in resolutions:
+        requested_id = str(resolution.get("requested_item_id") or "")
+        if family_ids_by_requested.get(requested_id, {requested_id}).intersection(
+            active_narrative_event_ids
+        ):
+            narrative_leaf_ids.update(
+                str(value or "")
+                for value in resolution.get("family_active_leaves") or []
+                if str(value or "")
+            )
+
+    manual_leaf_ids = {
+        leaf_id
+        for leaf_id, leaf in leaves_by_id.items()
+        if not str(leaf.get("origin_id") or "").startswith("haven_bridge:")
+    }
+    for leaf_id, leaf in leaves_by_id.items():
+        leaf["manual"] = leaf_id in manual_leaf_ids
+        leaf["narrative_ref"] = leaf_id in narrative_leaf_ids
+        leaf["scene_ref"] = leaf_id in scene_leaf_ids
+
+    for resolution in resolutions:
+        leaf_ids = {
+            str(value or "")
+            for value in resolution.get("family_active_leaves") or []
+            if str(value or "")
+        }
+        reasons = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in resolution.get("blocking_reasons") or []
+                if str(value or "").strip()
+            )
+        )
+        for condition, reason in (
+            (bool(resolution.get("forked")), "forked_successor_family"),
+            (bool(leaf_ids.intersection(manual_leaf_ids)), "manual_successor"),
+            (bool(leaf_ids.intersection(narrative_leaf_ids)), "active_narrative_reference"),
+            (bool(leaf_ids.intersection(scene_leaf_ids)), "active_scene_dependency"),
+        ):
+            if condition and reason not in reasons:
+                reasons.append(reason)
+        resolution["blocking_reasons"] = reasons
+        resolution["blocked"] = bool(resolution.get("blocked")) or bool(reasons)
+    return result
+
+
+async def _fact_event_settlement_blockers(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Find references that the current store cannot migrate atomically."""
+
+    predecessor_ids = list(
+        dict.fromkeys(
+            str(item_id or "").strip()
+            for item in raw_items
+            if isinstance(item, dict)
+            for item_id in item.get("supersedes_item_ids") or []
+            if str(item_id or "").strip()
+        )
+    )
+    if not predecessor_ids:
+        return []
+
+    blockers: list[dict[str, Any]] = []
+    family_ids: set[str] = set()
+    predecessor_source_keys: set[tuple[str, str, str]] = set()
+    exact = fact_event_store.read_many(predecessor_ids, include_sources=True)
+    by_id = {str(item.get("item_id") or ""): item for item in exact.get("items") or []}
+    for missing_id in exact.get("missing_item_ids") or []:
+        blockers.append(
+            {"kind": "predecessor", "item_id": missing_id, "reason": "item_not_found"}
+        )
+    for family in exact.get("families") or []:
+        item_id = str(family.get("item_id") or "")
+        family_ids.update(str(value or "") for value in family.get("family_ids") or [])
+        if not family.get("ok"):
+            blockers.append(
+                {
+                    "kind": "replacement_family",
+                    "item_id": item_id,
+                    "reason": "invalid_family",
+                    "issues": list(family.get("issues") or []),
+                }
+            )
+        elif not family.get("is_exact_active_leaf"):
+            blockers.append(
+                {
+                    "kind": "replacement_family",
+                    "item_id": item_id,
+                    "reason": "not_exact_active_leaf",
+                    "active_leaf_id": str(family.get("active_leaf_id") or ""),
+                }
+            )
+    for predecessor_id in predecessor_ids:
+        item = by_id.get(predecessor_id) or {}
+        for ref in item.get("source_refs") or []:
+            predecessor_source_keys.add(
+                (
+                    str(ref.get("source_system") or ""),
+                    str(ref.get("session_id") or ""),
+                    str(ref.get("message_id") or ""),
+                )
+            )
+
+    checked_scene_ids: set[str] = set()
+    for scene_id, refs in scene_evidence_store.list_active_scene_groups().items():
+        scene_keys = {
+            (
+                str(ref.get("source_system") or ""),
+                str(ref.get("session_id") or ""),
+                str(ref.get("message_id") or ""),
+            )
+            for ref in refs
+        }
+        matched_keys = sorted(predecessor_source_keys.intersection(scene_keys))
+        if not matched_keys:
+            continue
+        checked_scene_ids.add(str(scene_id or ""))
+        safe_scene_id, reason = await _validate_scene_evidence_target(scene_id)
+        if reason:
+            continue
+        blockers.append(
+            {
+                "kind": "active_scene",
+                "scene_id": safe_scene_id,
+                "reason": "source_dependency_requires_migration",
+                "source_keys": [
+                    {
+                        "source_system": source_system,
+                        "session_id": session_id,
+                        "message_id": message_id,
+                    }
+                    for source_system, session_id, message_id in matched_keys
+                ],
+            }
+        )
+
+    for scene_id, refs in scene_evidence_store.list_active_scene_groups().items():
+        scene_keys = {
+            (
+                str(ref.get("source_system") or ""),
+                str(ref.get("session_id") or ""),
+                str(ref.get("message_id") or ""),
+            )
+            for ref in refs
+        }
+        if (
+            predecessor_source_keys.intersection(scene_keys)
+            and scene_id not in checked_scene_ids
+        ):
+            blockers.append(
+                {
+                    "kind": "active_scene",
+                    "scene_id": str(scene_id or ""),
+                    "reason": "scene_dependency_snapshot_drift",
+                }
+            )
+
+    # This is intentionally the final check before the synchronous SQLite
+    # transaction, so a Narrative published during Scene validation cannot slip through.
+    for roll in narrative_roll_store._load():
+        if str(roll.get("lifecycle") or "active") != "active":
+            continue
+        matched = sorted(
+            family_ids.intersection(
+                str(value or "") for value in roll.get("linked_event_ids") or []
+            )
+        )
+        if matched:
+            blockers.append(
+                {
+                    "kind": "active_narrative",
+                    "narrative_id": str(roll.get("narrative_id") or ""),
+                    "event_ids": matched,
+                    "reason": "linked_event_reference_requires_migration",
+                }
+            )
+    return blockers
+
+
+@mcp.custom_route("/api/fact-events/settlement", methods=["POST"])
+async def api_settle_fact_events(request):
+    """Atomically settle a mixed create/replace batch or fail closed on references."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    operation_id = body.get("operation_id")
+    items = body.get("items")
+    try:
+        replay = fact_event_store.settlement_receipt(operation_id, items)
+        if replay is not None:
+            return JSONResponse(replay)
+        if not isinstance(items, list) or not items:
+            raise ValueError("items must be a non-empty list")
+        blockers = await _fact_event_settlement_blockers(items)
+        if blockers:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "status": "blocked",
+                    "operation_id": str(operation_id or ""),
+                    "reason": "reference_migration_required",
+                    "blockers": blockers,
+                    "writes_performed": [],
+                },
+                status_code=409,
+            )
+        result = fact_event_store.settle(operation_id, items)
+        inserted_ids = [
+            str(item.get("item_id") or "")
+            for item in result.get("items") or []
+            if str(item.get("item_id") or "")
+        ]
+        predecessor_ids = [
+            str(item_id or "")
+            for item in result.get("items") or []
+            if isinstance(item, dict)
+            for item_id in item.get("superseded_item_ids") or []
+            if str(item_id or "")
+        ]
+        result["passage_shadow_refresh"] = await _queue_gateway_passage_shadow_refresh(
+            fact_event_ids=[*inserted_ids, *predecessor_ids]
+        )
+        return JSONResponse(result)
+    except FactEventSettlementBlockedError as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "status": "blocked",
+                "operation_id": str(operation_id or ""),
+                "reason": str(exc),
+                "writes_performed": [],
+            },
+            status_code=409,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "status": "invalid",
+                "operation_id": str(operation_id or ""),
+                "reason": str(exc),
+                "writes_performed": [],
+            },
+            status_code=400,
+        )
+    except Exception as exc:
+        logger.warning("Fact/Event settlement failed: %s", exc)
+        return JSONResponse(
+            {
+                "ok": False,
+                "status": "error",
+                "operation_id": str(operation_id or ""),
+                "reason": str(exc),
+                "writes_performed": [],
+            },
+            status_code=500,
+        )
+
+
+@mcp.custom_route("/api/fact-events/read-many", methods=["POST"])
+async def api_read_fact_events_many(request):
+    """Read exact canonical IDs and their successor-family state without search."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    try:
+        result = fact_event_store.read_many(
+            body.get("item_ids"),
+            include_sources=bool(body.get("include_sources", True)),
+            resolve_active_successors=bool(body.get("resolve_active_successors", False)),
+        )
+        if bool(body.get("resolve_active_successors", False)):
+            result = await _materialize_fact_event_read_blockers(result)
+        return JSONResponse(result)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Fact/Event exact read-many failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/fact-events/active-leaf", methods=["GET"])
+async def api_read_fact_event_active_leaf(request):
+    """Resolve one exact ID to its unique current active replacement leaf."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        result = fact_event_store.replacement_family(
+            str(request.query_params.get("item_id") or "")
+        )
+        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Fact/Event active-leaf read failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
 
 
 @mcp.custom_route("/api/fact-events", methods=["GET"])

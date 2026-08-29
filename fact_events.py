@@ -29,6 +29,11 @@ FACT_RELATIONS = frozenset({"duplicate", "reinforces", "updates", "contradicts",
 FACT_RELATION_STATUSES = frozenset({"pending", "accepted", "rejected", "superseded"})
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:@/-]+$")
+MAX_SOURCE_REFS_PER_ITEM = 4000
+
+
+class FactEventSettlementBlockedError(ValueError):
+    """A settlement precondition drifted; callers must perform zero writes."""
 
 
 def _normalized_search_text(value: Any) -> str:
@@ -117,6 +122,24 @@ class FactEventStore:
                 CREATE INDEX IF NOT EXISTS idx_fact_event_sources_message
                 ON fact_event_sources(source_system, session_id, message_id);
 
+                CREATE TABLE IF NOT EXISTS fact_event_replacement_edges (
+                    predecessor_id TEXT PRIMARY KEY,
+                    successor_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(predecessor_id) REFERENCES fact_events(item_id) ON DELETE RESTRICT,
+                    FOREIGN KEY(successor_id) REFERENCES fact_events(item_id) ON DELETE RESTRICT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_fact_event_replacement_edges_successor
+                ON fact_event_replacement_edges(successor_id, predecessor_id);
+
+                CREATE TABLE IF NOT EXISTS fact_event_settlement_operations (
+                    operation_id TEXT PRIMARY KEY,
+                    request_sha256 TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS fact_relation_proposals (
                     proposal_id TEXT PRIMARY KEY,
                     new_fact_id TEXT NOT NULL,
@@ -163,6 +186,24 @@ class FactEventStore:
                 conn.execute(
                     "ALTER TABLE fact_relation_proposals ADD COLUMN explicit_correction INTEGER NOT NULL DEFAULT 0"
                 )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO fact_event_replacement_edges (
+                    predecessor_id, successor_id, created_at
+                )
+                SELECT child.supersedes_item_id, child.item_id, child.created_at
+                FROM fact_events AS child
+                JOIN fact_events AS predecessor
+                  ON predecessor.item_id=child.supersedes_item_id
+                WHERE child.supersedes_item_id<>''
+                  AND (
+                      SELECT COUNT(*)
+                      FROM fact_events AS sibling
+                      WHERE sibling.supersedes_item_id=child.supersedes_item_id
+                  )=1
+                """
+            )
+            conn.commit()
 
     def write_many(self, raw_items: Any) -> dict[str, Any]:
         """Write a batch with per-item rejection and idempotent origin checks."""
@@ -207,6 +248,395 @@ class FactEventStore:
             "rejected": sum(1 for item in results if item["status"] == "rejected"),
             "items": results,
         }
+
+    def settle(self, operation_id: Any, raw_items: Any) -> dict[str, Any]:
+        """Atomically create and replace a mixed batch with exact predecessor receipts."""
+
+        safe_operation_id = _required_identifier(operation_id, "operation_id", 200)
+        if not isinstance(raw_items, list) or not raw_items:
+            raise ValueError("items must be a non-empty list")
+        if len(raw_items) > 500:
+            raise ValueError("at most 500 items may be settled in one batch")
+
+        request_sha256 = self._settlement_request_sha256(raw_items)
+        prepared: list[tuple[int, dict[str, Any], list[str], dict[str, dict[str, Any]]]] = []
+        predecessor_ids: set[str] = set()
+        origin_ids: set[str] = set()
+        fingerprints: set[str] = set()
+        for index, raw in enumerate(raw_items):
+            if not isinstance(raw, dict):
+                raise ValueError("each item must be an object")
+            raw_predecessors = raw.get("supersedes_item_ids")
+            predecessors = (
+                _normalize_ids(raw_predecessors, "supersedes_item_ids", limit=100)
+                if raw_predecessors is not None
+                else []
+            )
+            if raw_predecessors is not None and not predecessors:
+                raise ValueError("supersedes_item_ids must be non-empty when present")
+            if predecessor_ids.intersection(predecessors):
+                raise ValueError("a predecessor may appear in only one settlement item")
+            predecessor_ids.update(predecessors)
+
+            raw_expected = raw.get("expected_predecessors")
+            if predecessors:
+                expected = _normalize_expected_predecessors(raw_expected)
+                if set(expected) != set(predecessors):
+                    raise ValueError(
+                        "expected_predecessors must exactly match supersedes_item_ids"
+                    )
+            elif raw_expected not in (None, []):
+                raise ValueError("create items must not carry expected_predecessors")
+            else:
+                expected = {}
+
+            normalized = _normalize_item(
+                {
+                    **raw,
+                    "supersedes_item_id": predecessors[0] if predecessors else "",
+                }
+            )
+            origin_id = str(normalized["origin_id"] or "")
+            if origin_id and origin_id in origin_ids:
+                raise ValueError("duplicate origin_id values are not allowed")
+            if normalized["fingerprint"] in fingerprints:
+                raise ValueError("duplicate settlement fingerprints are not allowed")
+            if origin_id:
+                origin_ids.add(origin_id)
+            fingerprints.add(normalized["fingerprint"])
+            prepared.append((index, normalized, predecessors, expected))
+
+        self._init_db()
+        now = _now()
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                previous_operation = conn.execute(
+                    """
+                    SELECT request_sha256, result_json
+                    FROM fact_event_settlement_operations WHERE operation_id=?
+                    """,
+                    (safe_operation_id,),
+                ).fetchone()
+                if previous_operation is not None:
+                    if str(previous_operation["request_sha256"]) != request_sha256:
+                        raise FactEventSettlementBlockedError(
+                            "operation_id already exists with a different request"
+                        )
+                    stored = json.loads(str(previous_operation["result_json"]))
+                    stored = self._settlement_replay(stored)
+                    conn.rollback()
+                    return stored
+
+                for _, item, predecessors, expected in prepared:
+                    existing = None
+                    if item["origin_id"]:
+                        existing = conn.execute(
+                            "SELECT item_id, fingerprint FROM fact_events WHERE origin_id=?",
+                            (item["origin_id"],),
+                        ).fetchone()
+                    if existing is None:
+                        existing = conn.execute(
+                            "SELECT item_id, fingerprint FROM fact_events WHERE fingerprint=?",
+                            (item["fingerprint"],),
+                        ).fetchone()
+                    if existing is not None:
+                        raise FactEventSettlementBlockedError(
+                            "settlement item already exists outside this operation"
+                        )
+
+                    replacement_source_keys = {
+                        _source_key(ref) for ref in item["source_refs"]
+                    }
+                    for predecessor_id in predecessors:
+                        family = self._replacement_family_payload(conn, predecessor_id)
+                        if not family["ok"]:
+                            raise FactEventSettlementBlockedError(
+                                "replacement family is invalid for "
+                                f"{predecessor_id}: " + ",".join(family["issues"])
+                            )
+                        if not family["is_exact_active_leaf"]:
+                            raise FactEventSettlementBlockedError(
+                                f"predecessor is not its exact active leaf: {predecessor_id}"
+                            )
+                        family_ids = list(family.get("family_ids") or [])
+                        family_rows = conn.execute(
+                            f"""
+                            SELECT item_id, origin_id
+                            FROM fact_events
+                            WHERE item_id IN ({','.join('?' for _ in family_ids)})
+                            """,
+                            family_ids,
+                        ).fetchall()
+                        untrusted_family_ids = sorted(
+                            str(row["item_id"])
+                            for row in family_rows
+                            if not str(row["origin_id"] or "").startswith("haven_bridge:")
+                        )
+                        if untrusted_family_ids:
+                            raise FactEventSettlementBlockedError(
+                                "manual_or_untrusted_provenance: "
+                                + ",".join(untrusted_family_ids)
+                            )
+                        predecessor = conn.execute(
+                            """
+                            SELECT item_type, status, fingerprint
+                            FROM fact_events WHERE item_id=?
+                            """,
+                            (predecessor_id,),
+                        ).fetchone()
+                        if predecessor is None:
+                            raise FactEventSettlementBlockedError(
+                                f"predecessor not found: {predecessor_id}"
+                            )
+                        if str(predecessor["item_type"]) != item["item_type"]:
+                            raise FactEventSettlementBlockedError(
+                                "predecessor item type mismatch"
+                            )
+                        receipt = expected[predecessor_id]
+                        if str(predecessor["fingerprint"]) != receipt["fingerprint"]:
+                            raise FactEventSettlementBlockedError(
+                                f"predecessor fingerprint drifted: {predecessor_id}"
+                            )
+                        source_rows = conn.execute(
+                            """
+                            SELECT source_system, session_id, message_id
+                            FROM fact_event_sources WHERE item_id=?
+                            """,
+                            (predecessor_id,),
+                        ).fetchall()
+                        actual_source_keys = {
+                            (
+                                str(row["source_system"]),
+                                str(row["session_id"]),
+                                str(row["message_id"]),
+                            )
+                            for row in source_rows
+                        }
+                        if actual_source_keys != receipt["source_keys"]:
+                            raise FactEventSettlementBlockedError(
+                                f"predecessor source keys drifted: {predecessor_id}"
+                            )
+                        if not actual_source_keys.issubset(replacement_source_keys):
+                            raise FactEventSettlementBlockedError(
+                                f"replacement drops predecessor sources: {predecessor_id}"
+                            )
+
+                results: list[dict[str, Any]] = []
+                for index, item, predecessors, _ in prepared:
+                    written = self._write_one(conn, item, now=now)
+                    if written.get("status") != "inserted":
+                        raise ValueError(written.get("error") or "settlement item was not inserted")
+                    item_id = str(written["item_id"])
+                    for predecessor_id in predecessors:
+                        conn.execute(
+                            """
+                            INSERT INTO fact_event_replacement_edges (
+                                predecessor_id, successor_id, created_at
+                            ) VALUES (?, ?, ?)
+                            """,
+                            (predecessor_id, item_id, now),
+                        )
+                    for predecessor_id in predecessors[1:]:
+                        changed = conn.execute(
+                            """
+                            UPDATE fact_events SET status='superseded', updated_at=?
+                            WHERE item_id=? AND status='active'
+                            """,
+                            (now, predecessor_id),
+                        )
+                        if changed.rowcount != 1:
+                            raise FactEventSettlementBlockedError(
+                                "predecessor status changed during settlement"
+                            )
+                    results.append(
+                        {
+                            "index": index,
+                            "status": "inserted",
+                            "item_id": item_id,
+                            "origin_id": item["origin_id"],
+                            "fingerprint": item["fingerprint"],
+                            "superseded_item_ids": predecessors,
+                            "source_refs": item["source_refs"],
+                        }
+                    )
+
+                result = {
+                    "ok": True,
+                    "operation_id": safe_operation_id,
+                    "replayed": False,
+                    "inserted": len(results),
+                    "idempotent": 0,
+                    "items": results,
+                }
+                conn.execute(
+                    """
+                    INSERT INTO fact_event_settlement_operations (
+                        operation_id, request_sha256, result_json, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        safe_operation_id,
+                        request_sha256,
+                        json.dumps(
+                            result,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        now,
+                    ),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return result
+
+    def settlement_receipt(self, operation_id: Any, raw_items: Any) -> dict[str, Any] | None:
+        """Return an exact committed operation replay without touching canonical rows."""
+
+        safe_operation_id = _required_identifier(operation_id, "operation_id", 200)
+        if not isinstance(raw_items, list) or not raw_items:
+            raise ValueError("items must be a non-empty list")
+        if not os.path.exists(self.db_path):
+            return None
+        request_sha256 = self._settlement_request_sha256(raw_items)
+        self._init_db()
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT request_sha256, result_json
+                FROM fact_event_settlement_operations WHERE operation_id=?
+                """,
+                (safe_operation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        if str(row["request_sha256"]) != request_sha256:
+            raise FactEventSettlementBlockedError(
+                "operation_id already exists with a different request"
+            )
+        result = json.loads(str(row["result_json"]))
+        return self._settlement_replay(result)
+
+    @staticmethod
+    def _settlement_request_sha256(raw_items: list[Any]) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                raw_items,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _settlement_replay(stored: dict[str, Any]) -> dict[str, Any]:
+        result = dict(stored)
+        replay_items = [
+            {**item, "status": "idempotent"}
+            for item in result.get("items") or []
+            if isinstance(item, dict)
+        ]
+        result["items"] = replay_items
+        result["inserted"] = 0
+        result["idempotent"] = len(replay_items)
+        result["replayed"] = True
+        return result
+
+    def read_many(
+        self,
+        item_ids: Any,
+        *,
+        include_sources: bool = True,
+        resolve_active_successors: bool = False,
+    ) -> dict[str, Any]:
+        """Read exact canonical IDs without search or successor substitution."""
+
+        ids = _normalize_ids(item_ids, "item_ids", limit=500)
+        if not ids or not os.path.exists(self.db_path):
+            return {
+                "ok": True,
+                "items": [],
+                "missing_item_ids": ids,
+                "families": [],
+                "resolutions": [],
+                "resolved_items": [],
+            }
+        self._init_db()
+        with closing(self._connect()) as conn:
+            rows = {
+                str(row["item_id"]): row
+                for row in conn.execute(
+                    f"SELECT * FROM fact_events WHERE item_id IN ({','.join('?' for _ in ids)})",
+                    ids,
+                ).fetchall()
+            }
+            found_ids = [item_id for item_id in ids if item_id in rows]
+            families = [
+                self._replacement_family_payload(conn, item_id)
+                for item_id in found_ids
+            ]
+            resolved_ids = list(
+                dict.fromkeys(
+                    str(family.get("active_leaf_id") or "")
+                    for family in families
+                    if resolve_active_successors
+                    and family.get("ok")
+                    and str(family.get("active_leaf_id") or "")
+                )
+            )
+            resolved_rows = {
+                str(row["item_id"]): row
+                for row in (
+                    conn.execute(
+                        f"SELECT * FROM fact_events WHERE item_id IN ({','.join('?' for _ in resolved_ids)})",
+                        resolved_ids,
+                    ).fetchall()
+                    if resolved_ids
+                    else []
+                )
+            }
+            return {
+                "ok": True,
+                "items": [
+                    self._row_payload(conn, rows[item_id], include_sources=include_sources)
+                    for item_id in found_ids
+                ],
+                "missing_item_ids": [item_id for item_id in ids if item_id not in rows],
+                "families": families,
+                "resolutions": [
+                    {
+                        "requested_item_id": str(family.get("item_id") or ""),
+                        "resolved_item_id": (
+                            str(family.get("active_leaf_id") or "")
+                            if family.get("ok")
+                            else ""
+                        ),
+                        "family_active_leaves": list(
+                            family.get("family_active_leaves") or []
+                        ),
+                        "predecessor_event_ids": list(
+                            family.get("predecessor_event_ids") or []
+                        ),
+                        "lineage": list(family.get("edges") or []),
+                        "forked": bool(family.get("forked")),
+                        "blocked": not bool(family.get("ok")),
+                        "issues": list(family.get("issues") or []),
+                    }
+                    for family in families
+                ],
+                "resolved_items": [
+                    self._row_payload(
+                        conn,
+                        resolved_rows[item_id],
+                        include_sources=include_sources,
+                    )
+                    for item_id in resolved_ids
+                    if item_id in resolved_rows
+                ],
+            }
 
     def replace_many(self, raw_items: Any) -> dict[str, Any]:
         """Atomically write reviewed replacements and supersede every predecessor."""
@@ -320,12 +750,33 @@ class FactEventStore:
                         raise ValueError("supersedes item type mismatch")
                     if any(str(previous[item_id]["status"]) != "active" for item_id in predecessors):
                         raise ValueError("all superseded items must be active")
+                    for predecessor_id in predecessors:
+                        family = self._replacement_family_payload(conn, predecessor_id)
+                        if not family["ok"]:
+                            raise ValueError(
+                                "replacement family is invalid: "
+                                + ",".join(family["issues"])
+                            )
+                        if not family["is_exact_active_leaf"]:
+                            raise ValueError(
+                                f"supersedes item is not its exact active leaf: {predecessor_id}"
+                            )
 
                 results: list[dict[str, Any]] = []
                 for index, item, predecessors in prepared:
                     written = self._write_one(conn, item, now=now)
                     if written.get("status") != "inserted":
                         raise ValueError(written.get("error") or "replacement was not inserted")
+                    successor_id = str(written["item_id"])
+                    for predecessor_id in predecessors:
+                        conn.execute(
+                            """
+                            INSERT INTO fact_event_replacement_edges (
+                                predecessor_id, successor_id, created_at
+                            ) VALUES (?, ?, ?)
+                            """,
+                            (predecessor_id, successor_id, now),
+                        )
                     for predecessor_id in predecessors[1:]:
                         changed = conn.execute(
                             """
@@ -484,6 +935,141 @@ class FactEventStore:
         with closing(self._connect()) as conn:
             row = conn.execute("SELECT * FROM fact_events WHERE item_id=?", (safe_id,)).fetchone()
             return self._row_payload(conn, row, include_sources=include_sources) if row else None
+
+    def replacement_family(self, item_id: str) -> dict[str, Any]:
+        """Resolve one complete replacement family and its unique exact active leaf."""
+
+        safe_id = _required_identifier(item_id, "item_id", 128)
+        if not os.path.exists(self.db_path):
+            return {
+                "ok": False,
+                "item_id": safe_id,
+                "family_ids": [],
+                "active_leaf_id": "",
+                "is_exact_active_leaf": False,
+                "family_active_leaves": [],
+                "predecessor_event_ids": [],
+                "forked": False,
+                "issues": ["item_not_found"],
+            }
+        self._init_db()
+        with closing(self._connect()) as conn:
+            return self._replacement_family_payload(conn, safe_id)
+
+    @staticmethod
+    def _replacement_family_payload(
+        conn: sqlite3.Connection,
+        item_id: str,
+    ) -> dict[str, Any]:
+        rows = conn.execute(
+            "SELECT item_id, status, supersedes_item_id FROM fact_events"
+        ).fetchall()
+        by_id = {str(row["item_id"]): row for row in rows}
+        if item_id not in by_id:
+            return {
+                "ok": False,
+                "item_id": item_id,
+                "family_ids": [],
+                "active_leaf_id": "",
+                "is_exact_active_leaf": False,
+                "family_active_leaves": [],
+                "predecessor_event_ids": [],
+                "forked": False,
+                "issues": ["item_not_found"],
+            }
+
+        edge_rows = conn.execute(
+            "SELECT predecessor_id, successor_id FROM fact_event_replacement_edges"
+        ).fetchall()
+        edge_pairs = {
+            (str(row["predecessor_id"]), str(row["successor_id"]))
+            for row in edge_rows
+        }
+        edge_pairs.update(
+            (str(row["supersedes_item_id"]), str(row["item_id"]))
+            for row in rows
+            if str(row["supersedes_item_id"] or "")
+        )
+
+        issues: set[str] = set()
+        outgoing: dict[str, set[str]] = {}
+        neighbors: dict[str, set[str]] = {}
+        for predecessor_id, successor_id in edge_pairs:
+            if predecessor_id not in by_id or successor_id not in by_id:
+                issues.add("missing_family_member")
+                continue
+            outgoing.setdefault(predecessor_id, set()).add(successor_id)
+            neighbors.setdefault(predecessor_id, set()).add(successor_id)
+            neighbors.setdefault(successor_id, set()).add(predecessor_id)
+        if any(len(successors) > 1 for successors in outgoing.values()):
+            issues.add("forked_successor_family")
+
+        family = {item_id}
+        pending = [item_id]
+        while pending:
+            current = pending.pop()
+            for neighbor in neighbors.get(current, set()):
+                if neighbor not in family:
+                    family.add(neighbor)
+                    pending.append(neighbor)
+
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def _visit(node_id: str) -> None:
+            if node_id in visiting:
+                issues.add("cyclic_successor_family")
+                return
+            if node_id in visited:
+                return
+            visiting.add(node_id)
+            for successor_id in outgoing.get(node_id, set()):
+                if successor_id in family:
+                    _visit(successor_id)
+            visiting.remove(node_id)
+            visited.add(node_id)
+
+        for family_id in family:
+            _visit(family_id)
+
+        graph_leaves = sorted(
+            family_id for family_id in family if not outgoing.get(family_id)
+        )
+        active_leaves = sorted(
+            family_id
+            for family_id in graph_leaves
+            if str(by_id[family_id]["status"]) == "active"
+        )
+        if len(graph_leaves) != 1:
+            issues.add("multiple_family_leaves")
+        if len(active_leaves) == 0:
+            issues.add("no_active_leaf")
+        elif len(active_leaves) > 1:
+            issues.add("multiple_active_leaves")
+
+        active_leaf_id = active_leaves[0] if len(active_leaves) == 1 else ""
+        return {
+            "ok": not issues,
+            "item_id": item_id,
+            "family_ids": sorted(family),
+            "active_leaf_id": active_leaf_id,
+            "is_exact_active_leaf": active_leaf_id == item_id and not issues,
+            "family_active_leaves": active_leaves,
+            "predecessor_event_ids": sorted(
+                family_id for family_id in family if outgoing.get(family_id)
+            ),
+            "forked": (
+                "forked_successor_family" in issues
+                or "multiple_family_leaves" in issues
+                or "multiple_active_leaves" in issues
+            ),
+            "edges": [
+                {"predecessor_id": predecessor_id, "successor_id": successor_id}
+                for predecessor_id, successor_id in sorted(edge_pairs)
+                if predecessor_id in family and successor_id in family
+            ],
+            "issues": sorted(issues),
+        }
 
     def list(
         self,
@@ -684,6 +1270,21 @@ class FactEventStore:
                         if previous in family and candidate not in family:
                             family.add(candidate)
                             changed = True
+                    edge_rows = conn.execute(
+                        """
+                        SELECT predecessor_id, successor_id
+                        FROM fact_event_replacement_edges
+                        """
+                    ).fetchall()
+                    for row in edge_rows:
+                        predecessor = str(row["predecessor_id"])
+                        successor = str(row["successor_id"])
+                        if successor in family and predecessor not in family:
+                            family.add(predecessor)
+                            changed = True
+                        if predecessor in family and successor not in family:
+                            family.add(successor)
+                            changed = True
 
                 item_ids = sorted(family)
                 placeholders = ",".join("?" for _ in item_ids)
@@ -698,6 +1299,14 @@ class FactEventStore:
                 conn.execute(
                     f"DELETE FROM fact_event_sources WHERE item_id IN ({placeholders})",
                     item_ids,
+                )
+                conn.execute(
+                    f"""
+                    DELETE FROM fact_event_replacement_edges
+                    WHERE predecessor_id IN ({placeholders})
+                       OR successor_id IN ({placeholders})
+                    """,
+                    [*item_ids, *item_ids],
                 )
                 conn.execute(
                     f"DELETE FROM fact_events WHERE item_id IN ({placeholders})",
@@ -1074,8 +1683,10 @@ def _normalize_item(raw: Any) -> dict[str, Any]:
     refs_raw = raw.get("source_refs")
     if not isinstance(refs_raw, list) or not refs_raw:
         raise ValueError("source_refs must be a non-empty list")
-    if len(refs_raw) > 100:
-        raise ValueError("at most 100 source refs may support one item")
+    if len(refs_raw) > MAX_SOURCE_REFS_PER_ITEM:
+        raise ValueError(
+            f"at most {MAX_SOURCE_REFS_PER_ITEM} source refs may support one item"
+        )
     refs = [normalize_evidence_ref(item) for item in refs_raw]
     primary_count = sum(1 for ref in refs if ref["evidence_kind"] == "primary")
     if primary_count != 1:
@@ -1234,6 +1845,55 @@ def _normalize_ids(raw: Any, field: str, *, limit: int) -> list[str]:
         item_id = _required_identifier(value, field, 128)
         if item_id not in result:
             result.append(item_id)
+    return result
+
+
+def _normalize_expected_predecessors(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("expected_predecessors must be a non-empty list")
+    if len(raw) > 100:
+        raise ValueError("expected_predecessors may contain at most 100 values")
+    result: dict[str, dict[str, Any]] = {}
+    for value in raw:
+        if not isinstance(value, dict):
+            raise ValueError("each expected predecessor must be an object")
+        item_id = _required_identifier(value.get("item_id"), "expected predecessor item_id", 128)
+        if item_id in result:
+            raise ValueError("duplicate expected predecessor item_id")
+        fingerprint = str(value.get("fingerprint") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            raise ValueError("expected predecessor fingerprint must be SHA-256")
+        raw_source_keys = value.get("source_keys")
+        if not isinstance(raw_source_keys, list) or not raw_source_keys:
+            raise ValueError("expected predecessor source_keys must be a non-empty list")
+        if len(raw_source_keys) > MAX_SOURCE_REFS_PER_ITEM:
+            raise ValueError(
+                "expected predecessor source_keys may contain at most "
+                f"{MAX_SOURCE_REFS_PER_ITEM} values"
+            )
+        source_keys: set[tuple[str, str, str]] = set()
+        for raw_key in raw_source_keys:
+            if not isinstance(raw_key, dict):
+                raise ValueError("each expected predecessor source key must be an object")
+            source_system = _required_text(
+                raw_key.get("source_system"),
+                "expected source_system",
+                80,
+            )
+            session_id = str(raw_key.get("session_id") or "").strip()
+            message_id = _required_text(
+                raw_key.get("message_id"),
+                "expected message_id",
+                200,
+            )
+            key = (source_system, session_id, message_id)
+            if key in source_keys:
+                raise ValueError("duplicate expected predecessor source key")
+            source_keys.add(key)
+        result[item_id] = {
+            "fingerprint": fingerprint,
+            "source_keys": source_keys,
+        }
     return result
 
 
