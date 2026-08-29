@@ -125,6 +125,7 @@ def verify_dynamic_read_blockers() -> None:
         )
     assert narrative["resolved_items"][0]["narrative_ref"] is True
     assert narrative["resolved_items"][0]["scene_ref"] is False
+    assert [item["item_id"] for item in narrative["resolved_items"]] == ["event_leaf"]
     assert narrative["resolutions"][0]["blocked"] is True
     assert narrative["resolutions"][0]["blocking_reasons"] == [
         "active_narrative_reference"
@@ -149,10 +150,57 @@ def verify_dynamic_read_blockers() -> None:
         )
     assert scene["resolved_items"][0]["narrative_ref"] is False
     assert scene["resolved_items"][0]["scene_ref"] is True
+    assert [item["item_id"] for item in scene["resolved_items"]] == ["event_leaf"]
     assert scene["resolutions"][0]["blocked"] is True
     assert scene["resolutions"][0]["blocking_reasons"] == [
         "active_scene_dependency"
     ]
+
+    with tempfile.TemporaryDirectory(prefix="fact-event-blocked-read-") as temp_dir:
+        store = FactEventStore({"state_dir": temp_dir}, create=True)
+        exact_ref = ref(9199, "user", "被引用的 active Event。", "primary")
+        inserted = store.write_many(
+            [
+                {
+                    "type": "event",
+                    "title": "被动态引用的 Event",
+                    "body": "即使替换被阻止，读取仍须返回完整 active leaf。",
+                    "origin_id": "haven_bridge:blocked-read-fixture",
+                    "source_refs": [exact_ref],
+                }
+            ]
+        )
+        event_id = inserted["items"][0]["item_id"]
+        exact = store.read_many(
+            [event_id],
+            include_sources=True,
+            resolve_active_successors=True,
+        )
+        with (
+            patch.object(server, "narrative_roll_store", NarrativeFixture([event_id])),
+            patch.object(server, "scene_evidence_store", SceneFixture({})),
+        ):
+            blocked_narrative = asyncio.run(
+                server._materialize_fact_event_read_blockers(copy.deepcopy(exact))
+            )
+        assert blocked_narrative["resolutions"][0]["blocked"] is True
+        assert [item["item_id"] for item in blocked_narrative["resolved_items"]] == [
+            event_id
+        ]
+        with (
+            patch.object(server, "narrative_roll_store", NarrativeFixture([])),
+            patch.object(
+                server,
+                "scene_evidence_store",
+                SceneFixture({"scene_exact": [exact_ref]}),
+            ),
+            patch.object(server, "_validate_scene_evidence_target", active_scene),
+        ):
+            blocked_scene = asyncio.run(
+                server._materialize_fact_event_read_blockers(copy.deepcopy(exact))
+            )
+        assert blocked_scene["resolutions"][0]["blocked"] is True
+        assert [item["item_id"] for item in blocked_scene["resolved_items"]] == [event_id]
 
 
 def main() -> None:
@@ -394,7 +442,22 @@ def main() -> None:
         assert fork_read["resolutions"][0]["forked"]
         assert fork_read["resolutions"][0]["blocked"]
         assert set(fork_read["resolutions"][0]["family_active_leaves"]) == set(children)
-        assert fork_read["resolved_items"] == []
+        assert {
+            item["item_id"] for item in fork_read["resolved_items"]
+        } == set(children), "blocked fork leaves must remain materialized for audit"
+        with closing(sqlite3.connect(store.db_path)) as conn:
+            conn.executemany(
+                "UPDATE fact_events SET status='archived' WHERE item_id=?",
+                [(item_id,) for item_id in children],
+            )
+            conn.commit()
+        terminal = store.read_many(
+            [root_id],
+            include_sources=True,
+            resolve_active_successors=True,
+        )
+        assert terminal["resolutions"][0]["family_active_leaves"] == []
+        assert terminal["resolved_items"] == []
 
     with tempfile.TemporaryDirectory(prefix="fact-event-wide-source-") as temp_dir:
         store = FactEventStore({"state_dir": temp_dir}, create=True)
@@ -456,4 +519,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

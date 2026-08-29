@@ -580,11 +580,11 @@ class FactEventStore:
             ]
             resolved_ids = list(
                 dict.fromkeys(
-                    str(family.get("active_leaf_id") or "")
+                    str(active_leaf_id or "")
                     for family in families
                     if resolve_active_successors
-                    and family.get("ok")
-                    and str(family.get("active_leaf_id") or "")
+                    for active_leaf_id in family.get("family_active_leaves") or []
+                    if str(active_leaf_id or "")
                 )
             )
             resolved_rows = {
