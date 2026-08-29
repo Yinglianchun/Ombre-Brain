@@ -14,6 +14,7 @@ from identity import identity_names
 _SCENE_ID_RE = re.compile(r"\bscene_mig2_[A-Za-z0-9]+\b")
 _EVENT_ID_RE = re.compile(r"\bevent_[0-9a-f]{24}\b")
 _DIARY_ID_RE = re.compile(r"\bdiary:(\d{1,9})\b")
+_DARKROOM_ID_RE = re.compile(r"\bdarkroom:(\d{1,9})\b")
 _NARRATIVE_ID_RE = re.compile(r"^narrative_[A-Za-z0-9_.:-]{1,96}$")
 _ARC_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}:[^\s\x00-\x1f\x7f]{1,127}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -172,6 +173,7 @@ class NarrativeRollStore:
                 "linked_scene_ids": [],
                 "linked_event_ids": [],
                 "linked_diary_ids": [],
+                "linked_darkroom_ids": [],
                 "arc_key": normalize_arc_key(entry.get("arc_key")),
                 "parent_narrative_id": (
                     str(entry.get("parent_narrative_id") or "").strip()
@@ -241,6 +243,19 @@ class NarrativeRollStore:
                     if diary_id not in excluded_diary_ids
                 )
             )
+            linked_darkroom_ids = list(
+                dict.fromkeys(
+                    darkroom_id
+                    for darkroom_id in [
+                        *(
+                            int(value)
+                            for value in entry.get("linked_darkroom_ids", []) or []
+                            if str(value or "").strip().isdigit() and int(value) > 0
+                        ),
+                        *(int(value) for value in _DARKROOM_ID_RE.findall(document)),
+                    ]
+                )
+            )
             if expected_hash and actual_hash != expected_hash:
                 integrity_status = "hash_mismatch"
             elif not body and publication_status != "collecting":
@@ -261,6 +276,8 @@ class NarrativeRollStore:
                     "linked_event_count": len(linked_event_ids),
                     "linked_diary_ids": linked_diary_ids,
                     "linked_diary_count": len(linked_diary_ids),
+                    "linked_darkroom_ids": linked_darkroom_ids,
+                    "linked_darkroom_count": len(linked_darkroom_ids),
                 }
             )
             items.append(item)
@@ -297,6 +314,8 @@ class NarrativeRollStore:
                 "linked_event_count",
                 "linked_diary_ids",
                 "linked_diary_count",
+                "linked_darkroom_ids",
+                "linked_darkroom_count",
                 "integrity_status",
             )
         }
@@ -403,12 +422,14 @@ class NarrativeRollStore:
             "linked_scene_ids": list(item.get("linked_scene_ids") or []),
             "linked_event_ids": list(item.get("linked_event_ids") or []),
             "linked_diary_ids": list(item.get("linked_diary_ids") or []),
+            "linked_darkroom_ids": list(item.get("linked_darkroom_ids") or []),
             "history": [
                 {
                     **history_item,
                     "linked_scene_ids": list(history_item.get("linked_scene_ids") or []),
                     "linked_event_ids": list(history_item.get("linked_event_ids") or []),
                     "linked_diary_ids": list(history_item.get("linked_diary_ids") or []),
+                    "linked_darkroom_ids": list(history_item.get("linked_darkroom_ids") or []),
                 }
                 for history_item in item.get("history", []) or []
                 if isinstance(history_item, dict)
@@ -417,10 +438,10 @@ class NarrativeRollStore:
             "full_document": str(item.get("full_document") or ""),
             "reading_boundary": (
                 "This collecting Arc is a source index, not authored narrative or original evidence. "
-                "Read its linked Scene/Event/raw and Diary sources selectively."
+                "Read its linked Scene/Event/raw, Diary, and Darkroom sources selectively."
                 if str(item.get("publication_status") or "") == "collecting"
                 else "Narrative Roll is a sourced first-person projection, not original evidence. "
-                "For exact dates or wording, read its linked Scene/Event/raw and Diary sources."
+                "For exact dates or wording, read its linked Scene/Event/raw, Diary, and Darkroom sources."
             ),
         }
 
@@ -474,6 +495,17 @@ class NarrativeRollStore:
         )
 
     @staticmethod
+    def source_darkroom_ids(document: str, explicit_ids: list[int] | None = None) -> list[int]:
+        values = [*(explicit_ids or []), *_DARKROOM_ID_RE.findall(str(document or ""))]
+        return list(
+            dict.fromkeys(
+                int(value)
+                for value in values
+                if str(value or "").strip().isdigit() and int(value) > 0
+            )
+        )
+
+    @staticmethod
     def _string_list(values: Any, *, limit: int = 40) -> list[str]:
         if isinstance(values, str):
             source = re.split(r"[\n,|]+", values)
@@ -501,6 +533,7 @@ class NarrativeRollStore:
         source_scene_ids: list[str] | None = None,
         source_event_ids: list[str] | None = None,
         source_diary_ids: list[int] | None = None,
+        source_darkroom_ids: list[int] | None = None,
         title_aliases: list[str] | None = None,
         primary_entities: list[str] | None = None,
         supporting_entities: list[str] | None = None,
@@ -541,7 +574,14 @@ class NarrativeRollStore:
         linked_scene_ids = self.source_scene_ids(exact_document, source_scene_ids)
         linked_event_ids = self.source_event_ids(exact_document, source_event_ids)
         linked_diary_ids = self.source_diary_ids(exact_document, source_diary_ids)
-        if len(linked_scene_ids) + len(linked_event_ids) + len(linked_diary_ids) < 2:
+        linked_darkroom_ids = self.source_darkroom_ids(exact_document, source_darkroom_ids)
+        if (
+            len(linked_scene_ids)
+            + len(linked_event_ids)
+            + len(linked_diary_ids)
+            + len(linked_darkroom_ids)
+            < 2
+        ):
             return {
                 "status": "invalid",
                 "reason": (
@@ -601,6 +641,18 @@ class NarrativeRollStore:
                 "reason": "source_diary_id_missing_from_document",
                 "narrative_id": safe_id,
                 "diary_ids": missing_diaries_in_document,
+            }
+        missing_darkrooms_in_document = [
+            darkroom_id
+            for darkroom_id in linked_darkroom_ids
+            if f"darkroom:{darkroom_id}" not in exact_document
+        ]
+        if missing_darkrooms_in_document:
+            return {
+                "status": "invalid",
+                "reason": "source_darkroom_id_missing_from_document",
+                "narrative_id": safe_id,
+                "darkroom_ids": missing_darkrooms_in_document,
             }
 
         lifecycle = str(lifecycle or "active").strip().lower()
@@ -749,6 +801,7 @@ class NarrativeRollStore:
                         "linked_scene_ids",
                         "linked_event_ids",
                         "linked_diary_ids",
+                        "linked_darkroom_ids",
                         "arc_key",
                         "parent_narrative_id",
                     )
@@ -777,6 +830,7 @@ class NarrativeRollStore:
             "linked_scene_ids": linked_scene_ids,
             "linked_event_ids": linked_event_ids,
             "linked_diary_ids": linked_diary_ids,
+            "linked_darkroom_ids": linked_darkroom_ids,
             "published_at": published_at,
             "published_by": f"{self.identity['ai_name']}_manual",
             "history": history,
@@ -824,6 +878,7 @@ class NarrativeRollStore:
                 "source_scene_ids": linked_scene_ids,
                 "source_event_ids": linked_event_ids,
                 "source_diary_ids": linked_diary_ids,
+                "source_darkroom_ids": linked_darkroom_ids,
                 "canonical_scene_changed": False,
                 "model_called": False,
             }

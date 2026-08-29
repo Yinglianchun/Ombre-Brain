@@ -152,6 +152,21 @@ def diary_source_marker(
     )
 
 
+def darkroom_source_marker(
+    *,
+    darkroom_id: int,
+    revision: int,
+    content_sha256: str,
+    comments_sha256: str,
+) -> str:
+    """Return the exact source marker required for one unlocked Darkroom snapshot."""
+
+    return (
+        f"darkroom:{int(darkroom_id)} revision:{int(revision)} "
+        f"content_sha256:{content_sha256} comments_sha256:{comments_sha256}"
+    )
+
+
 def verify_narrative_diary_sources(
     *,
     exact_document: str,
@@ -207,6 +222,68 @@ def verify_narrative_diary_sources(
                 "diary_id": diary_id,
                 "title": str(diary.get("title") or f"Diary {diary_id}"),
                 "date": str(diary.get("date") or ""),
+                "revision": revision,
+                "content_sha256": content_sha256,
+                "comments_sha256": comments_sha256,
+            }
+        )
+    return resolved, errors
+
+
+def verify_narrative_darkroom_sources(
+    *,
+    exact_document: str,
+    darkroom_ids: list[int],
+    get_darkroom: Callable[[int], dict[str, Any] | None],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Verify unlocked Darkroom snapshots without exposing their readable content."""
+
+    resolved: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for darkroom_id in darkroom_ids:
+        darkroom = get_darkroom(darkroom_id)
+        if (
+            not darkroom
+            or str(darkroom.get("entry_type") or "") != "darkroom"
+            or str(darkroom.get("visibility") or "") != "active"
+            or darkroom.get("locked") is not False
+            or not bool(darkroom.get("body_available"))
+        ):
+            errors.append(
+                {"darkroom_id": darkroom_id, "reason": "darkroom_source_unavailable"}
+            )
+            continue
+        try:
+            revision = int(darkroom.get("revision") or 0)
+        except (TypeError, ValueError):
+            revision = 0
+        if revision <= 0:
+            errors.append(
+                {"darkroom_id": darkroom_id, "reason": "darkroom_source_unavailable"}
+            )
+            continue
+        content_sha256 = hashlib.sha256(
+            str(darkroom.get("content") or "").encode("utf-8")
+        ).hexdigest()
+        comments_sha256 = diary_comments_sha256(darkroom.get("comments"))
+        marker = darkroom_source_marker(
+            darkroom_id=darkroom_id,
+            revision=revision,
+            content_sha256=content_sha256,
+            comments_sha256=comments_sha256,
+        )
+        if marker not in exact_document:
+            errors.append(
+                {
+                    "darkroom_id": darkroom_id,
+                    "reason": "darkroom_snapshot_marker_missing_from_document",
+                }
+            )
+            continue
+        resolved.append(
+            {
+                "source_type": "darkroom",
+                "darkroom_id": darkroom_id,
                 "revision": revision,
                 "content_sha256": content_sha256,
                 "comments_sha256": comments_sha256,

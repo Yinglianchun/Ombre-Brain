@@ -166,6 +166,7 @@ from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
 from narrative_arc_rank import NarrativeArcMemberRanker, normalize_arc_rank_request
 from narrative_source_verification import (
+    verify_narrative_darkroom_sources,
     verify_narrative_diary_sources,
     verify_narrative_scene_sources,
 )
@@ -12414,6 +12415,7 @@ async def publish_narrative(
     source_scene_ids: list[str] | None = None,
     source_event_ids: list[str] | None = None,
     source_diary_ids: list[int] | None = None,
+    source_darkroom_ids: list[int] | None = None,
     title_aliases: list[str] | None = None,
     primary_entities: list[str] | None = None,
     supporting_entities: list[str] | None = None,
@@ -12425,11 +12427,14 @@ async def publish_narrative(
     publication_status: str = "reviewed",
     lifecycle: str = "active",
 ) -> dict:
-    """发布或修订 Narrative Roll。Diary 来源须绑定 active 普通日记的精确 revision 和内容哈希；collecting Arc 必须填写唯一稳定 arc_key。"""
+    """发布或修订 Narrative Roll。Diary 与已解锁 Darkroom 来源须绑定精确快照；collecting Arc 必须填写唯一稳定 arc_key。"""
     exact_document = str(document or "")
     linked_ids = narrative_roll_store.source_scene_ids(exact_document, source_scene_ids)
     linked_event_ids = narrative_roll_store.source_event_ids(exact_document, source_event_ids)
     linked_diary_ids = narrative_roll_store.source_diary_ids(exact_document, source_diary_ids)
+    linked_darkroom_ids = narrative_roll_store.source_darkroom_ids(
+        exact_document, source_darkroom_ids
+    )
     current_roll = narrative_roll_store.read(str(narrative_id or "").strip())
 
     def _active_narrative_source_scene(scene: dict) -> bool:
@@ -12494,6 +12499,13 @@ async def publish_narrative(
     )
     resolved_sources.extend(resolved_diaries)
     errors.extend(diary_errors)
+    resolved_darkrooms, darkroom_errors = verify_narrative_darkroom_sources(
+        exact_document=exact_document,
+        darkroom_ids=linked_darkroom_ids,
+        get_darkroom=_get_diary,
+    )
+    resolved_sources.extend(resolved_darkrooms)
+    errors.extend(darkroom_errors)
     if errors:
         return {
             "status": "invalid",
@@ -12512,6 +12524,7 @@ async def publish_narrative(
         source_scene_ids=linked_ids,
         source_event_ids=linked_event_ids,
         source_diary_ids=linked_diary_ids,
+        source_darkroom_ids=linked_darkroom_ids,
         title_aliases=title_aliases,
         primary_entities=primary_entities,
         supporting_entities=supporting_entities,
