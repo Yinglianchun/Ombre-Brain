@@ -634,6 +634,26 @@ class FactEventStore:
             for row in rows
         ]
 
+    def arc_event_link_counts(self) -> dict[str, int]:
+        if not os.path.exists(self.db_path):
+            return {}
+        self._init_db()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT links.arc_key, COUNT(*) AS count
+                FROM fact_event_arc_links AS links
+                JOIN fact_events AS events ON events.item_id=links.event_id
+                WHERE events.item_type='event' AND events.status='active'
+                GROUP BY links.arc_key
+                """
+            ).fetchall()
+        return {
+            str(row["arc_key"]): int(row["count"] or 0)
+            for row in rows
+            if str(row["arc_key"] or "")
+        }
+
     def settlement_receipt(self, operation_id: Any, raw_items: Any) -> dict[str, Any] | None:
         """Return an exact committed operation replay without touching canonical rows."""
 

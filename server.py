@@ -8788,11 +8788,12 @@ async def api_narrative_arc_cards(request):
     if err:
         return err
     result = narrative_roll_store.list(query="", limit=100)
+    automatic_counts = fact_event_store.arc_event_link_counts()
     items = [
         {
             **item,
-            "automatic_linked_event_count": len(
-                fact_event_store.arc_event_links(str(item.get("arc_key") or ""))
+            "automatic_linked_event_count": automatic_counts.get(
+                str(item.get("arc_key") or ""), 0
             ),
         }
         for item in result.get("items") or []
