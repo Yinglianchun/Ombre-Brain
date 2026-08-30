@@ -42,11 +42,13 @@ class NarrativeArcMemberRanker:
         embedding_engine: Any,
         event_index: Any,
         passage_index: Any,
+        automatic_event_links: Any = None,
     ) -> None:
         self.store = store
         self.embedding_engine = embedding_engine
         self.event_index = event_index
         self.passage_index = passage_index
+        self.automatic_event_links = automatic_event_links
 
     async def rank(self, *, arc_key: str, query: str, top_k: int = 8) -> dict[str, Any]:
         request = normalize_arc_rank_request(
@@ -59,7 +61,23 @@ class NarrativeArcMemberRanker:
         if arc.get("status") != "ok":
             return arc
 
-        event_ids = list(dict.fromkeys(str(value) for value in arc.get("linked_event_ids", []) if value))
+        automatic_links = (
+            self.automatic_event_links(request["arc_key"])
+            if callable(self.automatic_event_links)
+            else []
+        )
+        event_ids = list(
+            dict.fromkeys(
+                [
+                    *(str(value) for value in arc.get("linked_event_ids", []) if value),
+                    *(
+                        str(item.get("event_id") or "")
+                        for item in automatic_links or []
+                        if isinstance(item, dict) and str(item.get("event_id") or "")
+                    ),
+                ]
+            )
+        )
         scene_ids = list(dict.fromkeys(str(value) for value in arc.get("linked_scene_ids", []) if value))
         if event_ids:
             event_availability = self.event_index.read_availability()
@@ -199,7 +217,7 @@ class NarrativeArcMemberRanker:
             "direct_member_count": len(event_ids) + len(scene_ids),
             "ranked_members": ranked[: request["top_k"]],
             "unindexed_members": unindexed,
-            "membership_source": "narrative_roll_registry",
+            "membership_source": "narrative_roll_registry+automatic_event_links",
             "membership_changed": False,
             "index_write_attempted": False,
         }

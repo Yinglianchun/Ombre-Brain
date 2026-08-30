@@ -143,6 +143,18 @@ class FactEventStore:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS fact_event_arc_links (
+                    arc_key TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    event_fingerprint TEXT NOT NULL,
+                    linked_at TEXT NOT NULL,
+                    PRIMARY KEY(arc_key, event_id),
+                    FOREIGN KEY(event_id) REFERENCES fact_events(item_id) ON DELETE RESTRICT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_fact_event_arc_links_event
+                ON fact_event_arc_links(event_id, arc_key);
+
                 CREATE TABLE IF NOT EXISTS fact_relation_proposals (
                     proposal_id TEXT PRIMARY KEY,
                     new_fact_id TEXT NOT NULL,
@@ -452,6 +464,27 @@ class FactEventStore:
                             raise FactEventSettlementBlockedError(
                                 "predecessor status changed during settlement"
                             )
+                    migrated_arc_keys: set[str] = set()
+                    for predecessor_id in predecessors:
+                        rows = conn.execute(
+                            "SELECT arc_key FROM fact_event_arc_links WHERE event_id=?",
+                            (predecessor_id,),
+                        ).fetchall()
+                        for row in rows:
+                            arc_key = str(row["arc_key"] or "")
+                            conn.execute(
+                                """
+                                INSERT OR IGNORE INTO fact_event_arc_links(
+                                  arc_key, event_id, event_fingerprint, linked_at
+                                ) VALUES(?, ?, ?, ?)
+                                """,
+                                (arc_key, item_id, item["fingerprint"], now),
+                            )
+                            migrated_arc_keys.add(arc_key)
+                        conn.execute(
+                            "DELETE FROM fact_event_arc_links WHERE event_id=?",
+                            (predecessor_id,),
+                        )
                     results.append(
                         {
                             "index": index,
@@ -461,6 +494,7 @@ class FactEventStore:
                             "fingerprint": item["fingerprint"],
                             "superseded_item_ids": predecessors,
                             "source_refs": item["source_refs"],
+                            "migrated_arc_keys": sorted(migrated_arc_keys),
                         }
                     )
 
@@ -495,6 +529,110 @@ class FactEventStore:
                 conn.rollback()
                 raise
         return result
+
+    def link_arc_events(self, arc_key: Any, raw_events: Any) -> dict[str, Any]:
+        """Attach active Events to one existing Arc without touching Narrative prose."""
+
+        safe_key = str(arc_key or "").strip()
+        if not safe_key:
+            raise ValueError("arc_key is required")
+        if not isinstance(raw_events, list) or not 1 <= len(raw_events) <= 12:
+            raise ValueError("events must have 1 to 12 items")
+        prepared: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for raw in raw_events:
+            if not isinstance(raw, dict):
+                raise ValueError("each Event receipt must be an object")
+            event_id = str(raw.get("event_id") or "").strip()
+            fingerprint = str(raw.get("fingerprint") or "").strip().lower()
+            if (
+                not re.fullmatch(r"event_[0-9a-f]{24}", event_id)
+                or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)
+                or event_id in seen
+            ):
+                raise ValueError("Event receipt is invalid or duplicated")
+            seen.add(event_id)
+            prepared.append((event_id, fingerprint))
+
+        self._init_db()
+        inserted = 0
+        idempotent = 0
+        now = _now()
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for event_id, fingerprint in prepared:
+                    row = conn.execute(
+                        "SELECT item_type, status, fingerprint FROM fact_events WHERE item_id=?",
+                        (event_id,),
+                    ).fetchone()
+                    if (
+                        row is None
+                        or str(row["item_type"]) != "event"
+                        or str(row["status"]) != "active"
+                    ):
+                        raise ValueError(f"Event is not active: {event_id}")
+                    if str(row["fingerprint"] or "").lower() != fingerprint:
+                        raise FactEventSettlementBlockedError(
+                            f"Event fingerprint drifted: {event_id}"
+                        )
+                    existing = conn.execute(
+                        "SELECT event_fingerprint FROM fact_event_arc_links WHERE arc_key=? AND event_id=?",
+                        (safe_key, event_id),
+                    ).fetchone()
+                    if existing:
+                        if str(existing["event_fingerprint"] or "").lower() != fingerprint:
+                            raise FactEventSettlementBlockedError(
+                                f"Arc link fingerprint drifted: {event_id}"
+                            )
+                        idempotent += 1
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO fact_event_arc_links(
+                          arc_key, event_id, event_fingerprint, linked_at
+                        ) VALUES(?, ?, ?, ?)
+                        """,
+                        (safe_key, event_id, fingerprint, now),
+                    )
+                    inserted += 1
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {
+            "status": "updated" if inserted else "idempotent",
+            "arc_key": safe_key,
+            "inserted": inserted,
+            "idempotent": idempotent,
+            "event_ids": [event_id for event_id, _ in prepared],
+            "body_unchanged": True,
+        }
+
+    def arc_event_links(self, arc_key: Any) -> list[dict[str, str]]:
+        safe_key = str(arc_key or "").strip()
+        if not safe_key or not os.path.exists(self.db_path):
+            return []
+        self._init_db()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT links.event_id, links.event_fingerprint, links.linked_at
+                FROM fact_event_arc_links AS links
+                JOIN fact_events AS events ON events.item_id=links.event_id
+                WHERE links.arc_key=? AND events.item_type='event' AND events.status='active'
+                ORDER BY events.source_ended_at ASC, links.event_id ASC
+                """,
+                (safe_key,),
+            ).fetchall()
+        return [
+            {
+                "event_id": str(row["event_id"]),
+                "fingerprint": str(row["event_fingerprint"]),
+                "linked_at": str(row["linked_at"]),
+            }
+            for row in rows
+        ]
 
     def settlement_receipt(self, operation_id: Any, raw_items: Any) -> dict[str, Any] | None:
         """Return an exact committed operation replay without touching canonical rows."""

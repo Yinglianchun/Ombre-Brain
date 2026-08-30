@@ -271,6 +271,7 @@ narrative_arc_member_ranker = NarrativeArcMemberRanker(
     embedding_engine,
     fact_event_semantic_index,
     passage_shadow_index,
+    fact_event_store.arc_event_links,
 )
 legacy_memory_review_store = LegacyMemoryReviewStore(config) # Admin-only legacy lifecycle / bridge review cards
 legacy_memory_lifecycle_publisher = LegacyMemoryLifecyclePublisher(
@@ -8700,7 +8701,21 @@ async def _read_narrative_memory(narrative_id: str) -> dict:
     narrative_id = _coerce_memory_id(narrative_id)
     if not narrative_id or not MEMORY_ID_RE.fullmatch(narrative_id):
         return {"status": "invalid", "error": "invalid narrative_id"}
-    return narrative_roll_store.read(narrative_id)
+    result = narrative_roll_store.read(narrative_id)
+    if result.get("status") != "ok" or not str(result.get("arc_key") or ""):
+        return result
+    automatic_links = fact_event_store.arc_event_links(result["arc_key"])
+    direct_ids = list(result.get("linked_event_ids") or [])
+    automatic_ids = [
+        item["event_id"]
+        for item in automatic_links
+        if item["event_id"] not in direct_ids
+    ]
+    result["automatic_event_links"] = automatic_links
+    result["automatic_linked_event_ids"] = automatic_ids
+    result["linked_event_ids"] = [*direct_ids, *automatic_ids]
+    result["linked_event_count"] = len(result["linked_event_ids"])
+    return result
 
 
 read_narrative_roll = _read_narrative_memory
@@ -8759,6 +8774,148 @@ async def api_rank_narrative_arc_members(request):
         if result.get("status") == "invalid"
         else 503
         if result.get("status") == "unavailable"
+        else 200
+    )
+    return JSONResponse(result, status_code=status_code)
+
+
+@mcp.custom_route("/api/narrative-arcs/cards", methods=["GET"])
+async def api_narrative_arc_cards(request):
+    """Return the bounded active Arc card index without narrative prose."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    result = narrative_roll_store.list(query="", limit=100)
+    items = [
+        {
+            **item,
+            "automatic_linked_event_count": len(
+                fact_event_store.arc_event_links(str(item.get("arc_key") or ""))
+            ),
+        }
+        for item in result.get("items") or []
+        if str(item.get("arc_key") or "")
+        and str(item.get("lifecycle") or "active") == "active"
+    ]
+    return JSONResponse(
+        {
+            "status": "ok",
+            "items": items,
+            "count": len(items),
+            "body_included": False,
+            "writes_performed": [],
+        }
+    )
+
+
+@mcp.custom_route("/api/narrative-arcs/append-event-materials", methods=["POST"])
+async def api_append_narrative_arc_event_materials(request):
+    """Append active Event receipts to one existing Arc without rewriting its prose."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"status": "invalid", "reason": "invalid_json_body"}, status_code=400)
+    if not isinstance(body, dict) or set(body) != {
+        "arc_key",
+        "expected_revision",
+        "expected_document_sha256",
+        "events",
+    }:
+        return JSONResponse({"status": "invalid", "reason": "invalid_request_fields"}, status_code=400)
+    events = body.get("events")
+    if not isinstance(events, list) or not 1 <= len(events) <= 12:
+        return JSONResponse({"status": "invalid", "reason": "events_must_have_1_to_12_items"}, status_code=400)
+
+    verified: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in events:
+        if not isinstance(raw, dict) or set(raw) != {"event_id", "fingerprint"}:
+            return JSONResponse({"status": "invalid", "reason": "invalid_event_receipt_fields"}, status_code=400)
+        event_id = str(raw.get("event_id") or "").strip()
+        fingerprint = str(raw.get("fingerprint") or "").strip().lower()
+        if not re.fullmatch(r"event_[0-9a-f]{24}", event_id) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            return JSONResponse({"status": "invalid", "reason": "invalid_event_receipt"}, status_code=400)
+        if event_id in seen:
+            return JSONResponse({"status": "invalid", "reason": "duplicate_event_id"}, status_code=400)
+        seen.add(event_id)
+        event = fact_event_store.read(event_id, include_sources=True)
+        if not event:
+            return JSONResponse({"status": "invalid", "reason": "event_not_found", "event_id": event_id}, status_code=400)
+        if str(event.get("item_type") or "") != "event" or str(event.get("status") or "") != "active":
+            return JSONResponse({"status": "invalid", "reason": "event_not_active", "event_id": event_id}, status_code=400)
+        actual_fingerprint = str(event.get("fingerprint") or "").strip().lower()
+        if actual_fingerprint != fingerprint:
+            return JSONResponse(
+                {
+                    "status": "conflict",
+                    "reason": "event_fingerprint_mismatch",
+                    "event_id": event_id,
+                    "expected_fingerprint": fingerprint,
+                    "current_fingerprint": actual_fingerprint,
+                },
+                status_code=409,
+            )
+        verified.append({"event_id": event_id, "fingerprint": fingerprint})
+
+    arc_key = str(body.get("arc_key") or "").strip()
+    current_arc = narrative_roll_store.read_by_arc_key(arc_key)
+    if current_arc.get("status") != "ok":
+        status_code = 404 if current_arc.get("status") == "not_found" else 400
+        return JSONResponse(current_arc, status_code=status_code)
+    try:
+        expected_revision = int(body.get("expected_revision"))
+    except (TypeError, ValueError):
+        return JSONResponse({"status": "invalid", "reason": "invalid_expected_revision"}, status_code=400)
+    expected_hash = str(body.get("expected_document_sha256") or "").strip().lower()
+    if (
+        expected_revision != int(current_arc.get("revision") or 0)
+        or expected_hash != str(current_arc.get("document_sha256") or "").strip().lower()
+    ):
+        return JSONResponse(
+            {
+                "status": "conflict",
+                "reason": "arc_revision_or_document_drift",
+                "arc_key": arc_key,
+                "current_revision": int(current_arc.get("revision") or 0),
+                "current_document_sha256": str(current_arc.get("document_sha256") or ""),
+            },
+            status_code=409,
+        )
+    try:
+        result = fact_event_store.link_arc_events(arc_key, verified)
+    except FactEventSettlementBlockedError as exc:
+        return JSONResponse({"status": "conflict", "reason": str(exc)}, status_code=409)
+    except ValueError as exc:
+        return JSONResponse({"status": "invalid", "reason": str(exc)}, status_code=400)
+    result.update(
+        {
+            "narrative_id": current_arc.get("narrative_id"),
+            "revision": current_arc.get("revision"),
+            "document_sha256": current_arc.get("document_sha256"),
+            "authored_body_sha256_before": current_arc.get("body_sha256"),
+            "authored_body_sha256_after": current_arc.get("body_sha256"),
+        }
+    )
+    result["verified_event_ids"] = [row["event_id"] for row in verified]
+    result["writes_performed"] = (
+        [{"type": "arc_event_link", "arc_key": arc_key, "event_ids": result.get("event_ids")}]
+        if result.get("status") == "updated"
+        else []
+    )
+    status_code = (
+        404
+        if result.get("status") == "not_found"
+        else 409
+        if result.get("status") == "conflict"
+        else 400
+        if result.get("status") in {"invalid", "error"}
         else 200
     )
     return JSONResponse(result, status_code=status_code)
