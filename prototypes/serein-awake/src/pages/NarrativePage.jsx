@@ -189,7 +189,7 @@ export function NarrativePage() {
                 </div>
                 <div>
                   <dt>来源</dt>
-                  <dd>{selectedRoll.sceneCount} Scene</dd>
+                  <dd>{selectedRoll.sourceCount ?? selectedRoll.sceneCount} 条</dd>
                 </div>
               </dl>
             </header>
@@ -203,17 +203,20 @@ export function NarrativePage() {
                 <summary>
                   <span>
                     <strong>来源账</strong>
-                    <small>{selectedRoll.sources.length} 条 Scene 原文</small>
+                    <small>{selectedRoll.sources.length} 条绑定材料</small>
                   </span>
                   <CaretDown size={17} weight="light" aria-hidden="true" />
                 </summary>
                 <ol>
                   {selectedRoll.sources.map((source) => (
-                    <li key={source.id}>
-                      <time>{source.date}</time>
+                    <li key={`${source.type || "scene"}:${source.id}`}>
+                      <time>{source.date || "—"}</time>
                       <span>
-                        <strong>{source.title}</strong>
-                        <small>{source.purpose}</small>
+                        <span className="narrative-ledger__source-title">
+                          <em>{source.typeLabel || "Scene"}</em>
+                          <strong>{source.title}</strong>
+                        </span>
+                        <small>{source.purpose || source.id}</small>
                       </span>
                     </li>
                   ))}
@@ -223,7 +226,7 @@ export function NarrativePage() {
               <section className="narrative-scenes" aria-labelledby="narrative-scenes-title">
                 <div>
                   <h2 id="narrative-scenes-title">卷中的 Scene</h2>
-                  <span>{selectedRoll.sceneCount} 条来源</span>
+                  <span>{selectedRoll.sourceCount ?? selectedRoll.sceneCount} 条来源</span>
                 </div>
                 <ul>
                   {selectedRoll.sceneNames.map((scene) => <li key={scene}>{scene}</li>)}

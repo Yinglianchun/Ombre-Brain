@@ -376,41 +376,137 @@ async function readLiveMemoryProjection(sourceIds) {
 }
 
 async function readLiveDiaries() {
-  const ombreBase = String(process.env.OMBRE_MEMORY_URL || "http://8.136.154.242:18001").replace(/\/$/, "");
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 25_000);
   const diaries = [];
   let offset = 0;
-  try {
-    while (offset < 500) {
-      const upstream = await fetch(`${ombreBase}/diaries/search`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keyword: "", limit: 100, offset }),
-        signal: controller.signal,
-      });
-      if (!upstream.ok) throw new Error(`diary_live_${upstream.status}`);
-      const payload = await upstream.json();
-      const page = Array.isArray(payload.diaries) ? payload.diaries : [];
-      diaries.push(...page);
-      if (page.length < 100) break;
-      offset += page.length;
-    }
-    const fingerprint = diaries.map((entry) => (
-      `${entry.id}:${entry.updated_at || entry.created_at || ""}:${entry.revision || 0}`
-    )).join("|");
-    return {
-      status: "ok",
-      snapshotId: Buffer.from(fingerprint, "utf8").toString("base64url"),
-      source: "Ombre DiaryStore live read-only projection",
-      entries: diaries,
-    };
-  } finally {
-    clearTimeout(timer);
+  while (offset < 500) {
+    const upstream = await callOmbreDashboard("/diaries/search", {
+      method: "POST",
+      body: { keyword: "", limit: 100, offset },
+    });
+    if (!upstream.ok) throw new Error(`diary_live_${upstream.status}`);
+    const page = Array.isArray(upstream.payload?.diaries) ? upstream.payload.diaries : [];
+    diaries.push(...page);
+    if (page.length < 100) break;
+    offset += page.length;
   }
+  const fingerprint = diaries.map((entry) => (
+    `${entry.id}:${entry.updated_at || entry.created_at || ""}:${entry.revision || 0}`
+  )).join("|");
+  return {
+    status: "ok",
+    snapshotId: Buffer.from(fingerprint, "utf8").toString("base64url"),
+    source: "Ombre DiaryStore live read-only projection",
+    entries: diaries,
+  };
 }
 
-async function readLiveNarratives() {
+function uniqueNarrativeSourceIds(items, key) {
+  return Array.from(new Set(
+    items.flatMap((item) => (Array.isArray(item?.[key]) ? item[key] : []))
+      .map((value) => String(value ?? "").trim())
+      .filter(Boolean),
+  ));
+}
+
+function sourceDate(...values) {
+  const value = values.find((candidate) => String(candidate || "").trim());
+  return value ? String(value).slice(0, 10) : "";
+}
+
+export function buildNarrativeSourceLedgers(items, metadata = {}) {
+  const eventById = new Map((metadata.events || []).map((item) => [String(item.item_id), item]));
+  const sceneById = new Map((metadata.scenes || []).map((item) => [String(item.id), item]));
+  const diaryById = new Map((metadata.diaries || []).map((item) => [String(item.id), item]));
+
+  return items.map((item) => {
+    const sourceLedger = [];
+    for (const sourceId of item.linked_event_ids || []) {
+      const id = String(sourceId);
+      const source = eventById.get(id);
+      sourceLedger.push({
+        source_type: "event",
+        source_id: id,
+        title: String(source?.title || "未找到的 Event"),
+        date: sourceDate(source?.local_date, source?.source_started_at, source?.created_at),
+        status: String(source?.status || (source ? "active" : "missing")),
+      });
+    }
+    for (const sourceId of item.linked_scene_ids || []) {
+      const id = String(sourceId);
+      const source = sceneById.get(id);
+      sourceLedger.push({
+        source_type: "scene",
+        source_id: id,
+        title: String(source?.name || source?.title || "未找到的 Scene"),
+        date: sourceDate(source?.source_date, source?.created, source?.created_at, source?.updated_at),
+        status: String(source?.status_view || source?.status || (source ? "active" : "missing")),
+      });
+    }
+    for (const sourceId of item.linked_diary_ids || []) {
+      const id = String(sourceId);
+      const source = diaryById.get(id);
+      sourceLedger.push({
+        source_type: "diary",
+        source_id: id,
+        title: String(source?.title || `日记 ${id}`),
+        date: sourceDate(source?.date, source?.created_at),
+        status: String(source?.entry_type || source?.visibility || (source ? "active" : "missing")),
+      });
+    }
+    for (const sourceId of item.linked_darkroom_ids || []) {
+      const id = String(sourceId);
+      const source = diaryById.get(id);
+      sourceLedger.push({
+        source_type: "darkroom",
+        source_id: id,
+        title: String(source?.title || `暗房 ${id}`),
+        date: sourceDate(source?.date, source?.created_at),
+        status: String(source?.entry_type || source?.visibility || (source ? "active" : "missing")),
+      });
+    }
+    return { ...item, source_ledger: sourceLedger };
+  });
+}
+
+async function attachNarrativeSourceLedgers(items) {
+  const eventIds = uniqueNarrativeSourceIds(items, "linked_event_ids");
+  const sceneIds = uniqueNarrativeSourceIds(items, "linked_scene_ids");
+  const diaryIds = new Set([
+    ...uniqueNarrativeSourceIds(items, "linked_diary_ids"),
+    ...uniqueNarrativeSourceIds(items, "linked_darkroom_ids"),
+  ]);
+
+  let events = [];
+  if (eventIds.length) {
+    const result = await callOmbreDashboard("/api/fact-events/read-many", {
+      method: "POST",
+      body: { item_ids: eventIds, include_sources: false, resolve_active_successors: false },
+    });
+    if (result.ok) events = Array.isArray(result.payload?.items) ? result.payload.items : [];
+  }
+
+  let scenes = [];
+  if (sceneIds.length) {
+    const result = await callOmbreDashboard("/api/buckets/light?include_archive=1&limit=2000");
+    if (result.ok) scenes = Array.isArray(result.payload?.buckets) ? result.payload.buckets : [];
+  }
+
+  let diaries = [];
+  if (diaryIds.size) {
+    const result = await readLiveDiaries();
+    diaries = result.entries.filter((entry) => diaryIds.has(String(entry.id)));
+    const found = new Set(diaries.map((entry) => String(entry.id)));
+    for (const diaryId of diaryIds) {
+      if (found.has(diaryId)) continue;
+      const exact = await callOmbreDashboard(`/diaries/${encodeURIComponent(diaryId)}`);
+      if (exact.ok) diaries.push(exact.payload);
+    }
+  }
+
+  return buildNarrativeSourceLedgers(items, { events, scenes, diaries });
+}
+
+export async function readLiveNarratives() {
   const index = await callOmbreDashboard("/api/narrative-rolls?limit=100");
   if (!index.ok) throw new Error(`narrative_live_projection_${index.status}`);
   const summaries = Array.isArray(index.payload?.items) ? index.payload.items : [];
@@ -422,14 +518,15 @@ async function readLiveNarratives() {
     if (!result.ok) throw new Error(`narrative_live_projection_${result.status}`);
     items.push(result.payload);
   }
-  const fingerprint = items.map((item) => (
-    `${item?.narrative_id || ""}:${item?.revision || ""}:${item?.document_sha256 || ""}`
+  const enrichedItems = await attachNarrativeSourceLedgers(items);
+  const fingerprint = enrichedItems.map((item) => (
+    `${item?.narrative_id || ""}:${item?.revision || ""}:${item?.document_sha256 || ""}:${JSON.stringify(item.source_ledger)}`
   )).join("|");
   return {
     status: "ok",
     snapshotId: createHash("sha256").update(fingerprint).digest("hex"),
     source: "Ombre Narrative Roll registry live read-only projection",
-    items,
+    items: enrichedItems,
   };
 }
 

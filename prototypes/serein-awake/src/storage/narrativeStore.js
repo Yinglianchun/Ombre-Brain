@@ -77,10 +77,45 @@ function parseSourceLedger(document) {
     });
 }
 
+const sourceTypeLabels = {
+  event: "Event",
+  scene: "Scene",
+  diary: "日记",
+  darkroom: "暗房",
+};
+
+function projectSources(item, fallback) {
+  const writtenNotes = new Map(parseSourceLedger(item.full_document).map((source) => [source.id, source]));
+  const structured = Array.isArray(item.source_ledger) ? item.source_ledger : [];
+  if (structured.length) {
+    return structured.map((source) => {
+      const id = String(source.source_id || "");
+      const note = writtenNotes.get(id);
+      const type = String(source.source_type || "scene");
+      return {
+        type,
+        typeLabel: sourceTypeLabels[type] || type,
+        id,
+        title: String(source.title || note?.title || id),
+        date: String(source.date || note?.date || ""),
+        purpose: String(note?.purpose || ""),
+        status: String(source.status || ""),
+      };
+    });
+  }
+  const written = Array.from(writtenNotes.values()).map((source) => ({
+    ...source,
+    type: "scene",
+    typeLabel: "Scene",
+    status: "",
+  }));
+  return written.length ? written : fallback?.sources || [];
+}
+
 function projectLiveRoll(item, index, fallback) {
   const parsedTitle = parseTitle(item.title);
   const displayTitle = fallback?.displayTitle || parsedTitle.title;
-  const sources = parseSourceLedger(item.full_document);
+  const sources = projectSources(item, fallback);
   const paragraphs = splitParagraphs(item.body);
   return {
     ...fallback,
@@ -94,6 +129,7 @@ function projectLiveRoll(item, index, fallback) {
     timeStart: String(item.time_start || fallback?.timeStart || ""),
     timeEnd: String(item.time_end || fallback?.timeEnd || ""),
     sceneCount: Number(item.linked_scene_count || item.linked_scene_ids?.length || fallback?.sceneCount || 0),
+    sourceCount: sources.length,
     size: fallback?.size || visualSizes[index % visualSizes.length],
     tone: fallback?.tone || visualTones[index % visualTones.length],
     status: item.lifecycle === "active" ? "仍在生长" : String(item.lifecycle || "已审阅"),
@@ -101,7 +137,7 @@ function projectLiveRoll(item, index, fallback) {
     projectionStatus: String(item.publication_status || fallback?.projectionStatus || "reviewed"),
     current: String(item.current_status_cue || fallback?.current || ""),
     paragraphs: paragraphs.length ? paragraphs : fallback?.paragraphs || [],
-    sources: sources.length ? sources : fallback?.sources,
+    sources,
     sceneNames: sources.length
       ? sources.map((source) => source.title)
       : fallback?.sceneNames || item.linked_scene_ids || [],

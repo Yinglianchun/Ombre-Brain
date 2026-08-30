@@ -3416,6 +3416,21 @@ label:has(input:focus-visible) {
   display: grid;
   gap: 5px;
 }
+.narrative-ledger__source-title {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+}
+.narrative-ledger__source-title em {
+  flex: 0 0 auto;
+  color: #8b9692;
+  font-family: var(--font-editorial);
+  font-size: 8px;
+  font-style: normal;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
 .narrative-ledger ol strong {
   color: #475650;
   font-family: var(--font-editorial-cjk);
