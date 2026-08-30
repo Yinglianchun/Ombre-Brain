@@ -129,7 +129,11 @@ export function NarrativePage() {
                   <span className="narrative-book__page narrative-book__page--three" aria-hidden="true" />
                   <span className="narrative-book__cover">
                     <span className="narrative-book__volume">VOL. {roll.volume}</span>
-                    <span className="narrative-book__title">{roll.spineTitle}</span>
+                    <span
+                      className={`narrative-book__title${/[A-Za-z]/u.test(roll.spineTitle) ? " narrative-book__title--latin" : ""}`}
+                    >
+                      {roll.spineTitle}
+                    </span>
                     <span className="narrative-book__subtitle">{roll.spineSubtitle}</span>
                     <span className="narrative-book__footer">
                       <span>{roll.timeStart}</span>

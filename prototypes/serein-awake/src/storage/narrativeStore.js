@@ -124,9 +124,11 @@ export async function loadNarrativeRolls() {
       return fallbackNarrativeRolls;
     }
     const fallbackById = new Map(fallbackNarrativeRolls.map((roll) => [roll.id, roll]));
-    return payload.items.map((item, index) => (
-      projectLiveRoll(item, index, fallbackById.get(item.narrative_id))
-    ));
+    return payload.items
+      .filter((item) => String(item.body || "").trim())
+      .map((item, index) => (
+        projectLiveRoll(item, index, fallbackById.get(item.narrative_id))
+      ));
   } catch {
     return fallbackNarrativeRolls;
   }

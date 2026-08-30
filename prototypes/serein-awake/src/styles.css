@@ -2906,12 +2906,18 @@ label:has(input:focus-visible) {
 }
 .narrative-book__title {
   align-self: center;
+  max-width: 100%;
   color: inherit;
   font-family: var(--font-editorial-cjk);
   font-size: clamp(21px, 2vw, 28px);
   font-weight: 400;
   line-height: 1.35;
   letter-spacing: 0.03em;
+}
+.narrative-book__title--latin {
+  font-size: clamp(18px, 1.55vw, 22px);
+  letter-spacing: 0.01em;
+  overflow-wrap: anywhere;
 }
 .narrative-book__subtitle {
   min-height: 38px;
