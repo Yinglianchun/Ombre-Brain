@@ -1,11 +1,12 @@
 # Event / Scene typed recall and entity scope shadow
 
 Status: candidate and admission benchmarks remain available as simulation-only
-shadow, and the explicitly gated typed Event/Scene context cutover is enabled on
-the Germany Gateway at `6774226`. Arc Narrative prose and raw dialogue remain
-pull-only. The deployment performs no canonical mutation, Arc mutation, cursor
-advance, or model installation; verify the current live HEAD and health before
-relying on this status.
+shadow. The typed Event/Scene context cutover code is deployed on the Germany
+Gateway, but its runtime flag is currently disabled pending an explicit Event
+visibility policy. Arc Narrative prose and raw dialogue remain pull-only. The
+deployment performs no canonical mutation, Arc mutation, cursor advance, or
+model installation; verify the current live HEAD and health before relying on
+this status.
 
 ## Candidate contract
 
