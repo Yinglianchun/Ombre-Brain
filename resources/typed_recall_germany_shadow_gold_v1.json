@@ -85,8 +85,8 @@
       "expected": {
         "shadow_status": "ok",
         "scope_status": "scoped_recall",
-        "intent": "member_search",
-        "operator": "member_search",
+        "intent": "recent",
+        "operator": "latest_relevant_member",
         "arc_key": "work:间谍过家家",
         "all_candidates_in_scope": true
       }

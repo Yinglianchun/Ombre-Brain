@@ -271,8 +271,8 @@ def verify_observed_entities_and_scope() -> None:
 
         recent_status = index.resolve_query("间谍过家家最近怎么样")
         assert recent_status["status"] == "scoped_recall", recent_status
-        assert recent_status["intent"] == "member_search", recent_status
-        assert recent_status["operator"] == "member_search", recent_status
+        assert recent_status["intent"] == "recent", recent_status
+        assert recent_status["operator"] == "latest_relevant_member", recent_status
 
         entity_only = index.resolve_query("阿尼亚")
         assert entity_only["status"] == "scope_only", entity_only

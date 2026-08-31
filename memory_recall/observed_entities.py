@@ -41,9 +41,14 @@ _INTENT_PATTERNS = (
     ("progress", "latest_relevant_member", re.compile(r"看到哪|读到哪|做到哪|进行到哪|进展(?:到哪|如何|怎么样)|追到哪")),
     ("timeline", "timeline", re.compile(r"后来|后续|之后|怎么发展|如何发展|发展成|演变|时间线")),
     (
+        "recent",
+        "latest_relevant_member",
+        re.compile(r"最近(?:怎么样|如何|发生了什么|有什么)"),
+    ),
+    (
         "member_search",
         "member_search",
-        re.compile(r"第(?:一|1)次|初次|最初|刚开始|最近(?:怎么样|如何|发生了什么|有什么)"),
+        re.compile(r"第(?:一|1)次|初次|最初|刚开始"),
     ),
     ("member_search", "member_search", re.compile(r"哪一段|那一段|这段|其中一段|某一段|提到.+(?:那段|一段)")),
     ("recall_reference", "arc_index", re.compile(r"还记得|记得|想起|回忆|上次(?:聊|说|看|读|做)")),

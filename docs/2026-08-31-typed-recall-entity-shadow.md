@@ -159,3 +159,28 @@ Every request uses `recall_mode=full`, `simulation=true`, and
 `simulation_scope=full_shadow`. The evaluator fails if a candidate/debug row
 claims an admission decision or live injection. It checks routing and candidate
 generation only; final evidence admission remains a separate benchmark layer.
+
+## Operator-aware evidence admission shadow
+
+Typed admission is not one global score threshold:
+
+- `latest_relevant_member` selects the newest dated candidate with structured
+  progress evidence; reranker scores do not decide chronology.
+- `timeline` marks candidates as Arc-scoped material rather than direct answer
+  evidence.
+- `narrative_read` and `exact_evidence` defer to their pull-based reading views.
+- ordinary global detail and scoped `member_search` use the existing reranker
+  shadow on title plus the best owner passage. Scoped queries remove the Arc
+  entity before reranking, cues are omitted, and `0.65` is only a frozen shadow
+  threshold for direct evidence.
+
+The Germany pair gold and evaluator are:
+
+```text
+resources/typed_admission_germany_gold_v1.json
+scripts/evaluate_typed_admission_germany_shadow.py
+```
+
+Run inside the Gateway container. It may call the already-configured remote
+reranker for direct-detail cases, but it installs no model and never applies the
+result to live admission or injection.
