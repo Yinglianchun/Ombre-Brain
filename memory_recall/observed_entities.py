@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover - reduced runtimes may ship jieba without 
     jieba_posseg = None
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _DYNAMIC_POS = frozenset({"nr", "ns", "nt", "nz", "eng"})
 _QUOTED_WORK = re.compile(r"《([^》]{2,40})》")
 _QUOTED_NAME = re.compile(r"[“「『]([^”」』]{2,24})[”」』]")
@@ -193,16 +193,28 @@ def _known_terms(profiles: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return output
 
 
-def _dynamic_terms(text: str) -> set[str]:
-    output = set(_QUOTED_WORK.findall(text))
-    output.update(_QUOTED_NAME.findall(text))
-    output.update(_LATIN_NAME.findall(text))
+def _dynamic_terms(text: str) -> dict[str, set[str]]:
+    output: dict[str, set[str]] = defaultdict(set)
+    for value in _QUOTED_WORK.findall(text):
+        output[_surface(value)].add("quoted_work")
+    for value in _QUOTED_NAME.findall(text):
+        output[_surface(value)].add("quoted_name")
+    for value in _LATIN_NAME.findall(text):
+        output[_surface(value)].add("latin")
     if jieba_posseg is not None:
         for word, flag in jieba_posseg.cut(text):
             value = _surface(word)
             if flag in _DYNAMIC_POS and 2 <= len(value) <= 24:
-                output.add(value)
+                output[value].add(f"jieba_{flag}")
     return output
+
+
+def _short_quoted_entity(value: str) -> bool:
+    text = _surface(value)
+    return bool(
+        2 <= len(text) <= 8
+        and not re.search(r"[\s，。！？!?；;：:,、]", text)
+    )
 
 
 def extract_observed_entities(
@@ -237,11 +249,14 @@ def extract_observed_entities(
     candidates: dict[str, str] = {
         key: str(row["entity_text"]) for key, row in known_terms.items()
     }
+    discovery_kinds: dict[str, set[str]] = defaultdict(set)
     for source in sources:
-        for value in _dynamic_terms(source["content"]):
+        for value, kinds in _dynamic_terms(source["content"]).items():
             key = _key(value)
             if key and key not in candidates:
                 candidates[key] = _surface(value)
+            if key:
+                discovery_kinds[key].update(kinds)
 
     rows: list[dict[str, Any]] = []
     for entity_key, entity_text in candidates.items():
@@ -285,6 +300,13 @@ def extract_observed_entities(
             basis = "repeated_bound_source"
         else:
             basis = "known_arc_title"
+        kinds = discovery_kinds.get(entity_key) or set()
+        scope_eligible = bool(
+            explicit_work
+            or mentioned_known_title
+            or kinds.intersection({"jieba_nr", "jieba_ns", "jieba_nt"})
+            or ("quoted_name" in kinds and _short_quoted_entity(entity_text))
+        )
         rows.append(
             {
                 "entity_key": entity_key,
@@ -292,6 +314,7 @@ def extract_observed_entities(
                 "occurrence_count": total,
                 "source_count": support_sources,
                 "confidence_basis": basis,
+                "scope_eligible": scope_eligible,
                 "known_roles": sorted(known.get("roles") or []),
                 "known_arc_keys": sorted(known.get("arc_keys") or []),
                 "supports": supports[:8],
@@ -377,6 +400,7 @@ class ObservedEntityShadowIndex:
                     occurrence_count INTEGER NOT NULL,
                     source_count INTEGER NOT NULL,
                     confidence_basis TEXT NOT NULL,
+                    scope_eligible INTEGER NOT NULL DEFAULT 0,
                     known_roles_json TEXT NOT NULL,
                     known_arc_keys_json TEXT NOT NULL,
                     supports_json TEXT NOT NULL,
@@ -433,6 +457,15 @@ class ObservedEntityShadowIndex:
                 );
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(observed_entities)").fetchall()
+            }
+            if "scope_eligible" not in columns:
+                conn.execute(
+                    "ALTER TABLE observed_entities "
+                    "ADD COLUMN scope_eligible INTEGER NOT NULL DEFAULT 0"
+                )
 
     def _owner_state(self) -> dict[tuple[str, str], str]:
         if not os.path.exists(self.db_path):
@@ -476,6 +509,7 @@ class ObservedEntityShadowIndex:
                     "occurrence_count": int(row["occurrence_count"]),
                     "source_count": int(row["source_count"]),
                     "confidence_basis": str(row["confidence_basis"]),
+                    "scope_eligible": bool(row["scope_eligible"]),
                     "known_roles": json.loads(str(row["known_roles_json"] or "[]")),
                     "known_arc_keys": json.loads(
                         str(row["known_arc_keys_json"] or "[]")
@@ -604,6 +638,12 @@ class ObservedEntityShadowIndex:
                 stop_keys=self.stop_keys,
             )
         entity_count = sum(len(entities) for entities in owner_rows.values())
+        scope_eligible_entity_count = sum(
+            1
+            for entities in owner_rows.values()
+            for entity in entities
+            if entity.get("scope_eligible")
+        )
         if dry_run:
             return {
                 "status": "dry_run",
@@ -612,6 +652,7 @@ class ObservedEntityShadowIndex:
                 "owners_unchanged": len(unchanged_keys),
                 "owners_deleted": len(deleted_keys),
                 "observed_entities": entity_count,
+                "scope_eligible_entities": scope_eligible_entity_count,
                 "arcs": len(profiles),
                 "decision_applied": False,
                 "canonical_writes": False,
@@ -631,10 +672,13 @@ class ObservedEntityShadowIndex:
                         {
                             "entity_text": entity["entity_text"],
                             "members": set(),
+                            "scope_eligible_members": set(),
                             "occurrence_count": 0,
                         },
                     )
                     aggregate["members"].add(member_key)
+                    if entity.get("scope_eligible"):
+                        aggregate["scope_eligible_members"].add(member_key)
                     aggregate["occurrence_count"] += int(entity["occurrence_count"])
 
         authored_by_key: dict[str, list[dict[str, str]]] = defaultdict(list)
@@ -653,8 +697,9 @@ class ObservedEntityShadowIndex:
                             {"arc_key": profile["arc_key"], "entity_text": value, "role": role}
                         )
         observed_arcs_by_key: dict[str, set[str]] = defaultdict(set)
-        for arc_key, entity_key in arc_aggregates:
-            observed_arcs_by_key[entity_key].add(arc_key)
+        for (arc_key, entity_key), aggregate in arc_aggregates.items():
+            if len(aggregate["scope_eligible_members"]) >= 2:
+                observed_arcs_by_key[entity_key].add(arc_key)
 
         scope_rows: list[dict[str, Any]] = []
         for entity_key, authored_rows in authored_by_key.items():
@@ -672,7 +717,7 @@ class ObservedEntityShadowIndex:
                     }
                 )
         for (arc_key, entity_key), aggregate in arc_aggregates.items():
-            member_count = len(aggregate["members"])
+            member_count = len(aggregate["scope_eligible_members"])
             if member_count < 2 or entity_key in authored_by_key:
                 continue
             arc_count = len(observed_arcs_by_key[entity_key])
@@ -715,9 +760,11 @@ class ObservedEntityShadowIndex:
                             }
                         )
                     aggregate = arc_aggregates.get((arc_key, entity_key))
-                    if aggregate:
+                    if aggregate and entity.get("scope_eligible"):
                         other_members = {
-                            member for member in aggregate["members"] if member != owner_key
+                            member
+                            for member in aggregate["scope_eligible_members"]
+                            if member != owner_key
                         }
                         if other_members:
                             weight = 20 + min(20, len(other_members) * 5)
@@ -756,8 +803,9 @@ class ObservedEntityShadowIndex:
                         INSERT INTO observed_entities(
                             owner_kind, owner_id, entity_key, entity_text,
                             occurrence_count, source_count, confidence_basis,
-                            known_roles_json, known_arc_keys_json, supports_json, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            scope_eligible, known_roles_json, known_arc_keys_json,
+                            supports_json, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             owner_key[0],
@@ -767,6 +815,7 @@ class ObservedEntityShadowIndex:
                             entity["occurrence_count"],
                             entity["source_count"],
                             entity["confidence_basis"],
+                            int(bool(entity.get("scope_eligible"))),
                             json.dumps(entity["known_roles"], ensure_ascii=False),
                             json.dumps(entity["known_arc_keys"], ensure_ascii=False),
                             json.dumps(entity["supports"], ensure_ascii=False),
@@ -860,6 +909,7 @@ class ObservedEntityShadowIndex:
             "owners_unchanged": len(unchanged_keys),
             "owners_deleted": len(deleted_keys),
             "observed_entities": entity_count,
+            "scope_eligible_entities": scope_eligible_entity_count,
             "arcs": len(profiles),
             "arc_observed_entities": len(arc_aggregates),
             "scope_anchors": len(scope_rows),
@@ -888,6 +938,7 @@ class ObservedEntityShadowIndex:
                 "occurrence_count": int(row["occurrence_count"]),
                 "source_count": int(row["source_count"]),
                 "confidence_basis": str(row["confidence_basis"]),
+                "scope_eligible": bool(row["scope_eligible"]),
                 "supports": json.loads(str(row["supports_json"] or "[]")),
             }
             for row in rows

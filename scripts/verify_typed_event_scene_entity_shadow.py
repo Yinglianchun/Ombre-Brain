@@ -171,12 +171,12 @@ def verify_observed_entities_and_scope() -> None:
             {
                 "owner_kind": "scene",
                 "owner_id": "scene-spy",
-                "source_refs": [source("1", "“奇美拉”玩偶出现了，后来又提到“奇美拉”。")],
+                "source_refs": [source("1", "“奇美拉”玩偶出现了，后来又提到“奇美拉”。“在本地的codex好萌啊TT”这句话又写成“在本地的codex好萌啊TT”。")],
             },
             {
                 "owner_kind": "event",
                 "owner_id": "event-spy",
-                "source_refs": [source("2", "阿尼亚抱着“奇美拉”，还说最喜欢奇美拉。")],
+                "source_refs": [source("2", "阿尼亚抱着“奇美拉”，还说最喜欢奇美拉。“在本地的codex好萌啊TT”被重复成“在本地的codex好萌啊TT”。")],
             },
             {
                 "owner_kind": "event",
@@ -226,6 +226,7 @@ def verify_observed_entities_and_scope() -> None:
         by_entity = {row["entity"]: row for row in observed}
         assert by_entity["阿尼亚"]["occurrence_count"] == 2, observed
         assert by_entity["奇美拉"]["source_count"] == 2, observed
+        assert by_entity["奇美拉"]["scope_eligible"] is True, observed
         assert by_entity["间谍过家家"]["confidence_basis"] == "explicit_work_title", observed
 
         links = index.link_candidates("event", "event-new")
@@ -256,6 +257,9 @@ def verify_observed_entities_and_scope() -> None:
         aggregated = index.resolve_query("奇美拉后来怎么发展")
         assert aggregated["status"] == "scoped_recall", aggregated
         assert aggregated["scope_anchor"]["source_kind"] == "observed", aggregated
+
+        long_quote = index.resolve_query("在本地的codex好萌啊TT后来怎么发展")
+        assert long_quote["status"] == "insufficient_scope", long_quote
 
         self_proof = index.resolve_query("邦德曼后来怎么发展")
         assert self_proof["status"] == "insufficient_scope", self_proof

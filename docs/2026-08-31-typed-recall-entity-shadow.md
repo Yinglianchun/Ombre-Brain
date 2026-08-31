@@ -85,6 +85,10 @@ membership.
 Titles and title aliases are scope anchors. Primary/supporting entities are
 anchors only when their Arc mapping is unique. Derived observed entities need
 support from at least two confirmed Arc members and a unique Arc mapping.
+Only entity-shaped observations can become a derived scope or cross-member link
+signal: an actually mentioned known title, an explicit work title, a short
+quoted entity, or a jieba person/place/organization name. Broader repeated
+`nz`/Latin terms remain auditable observations but receive no scope authority.
 
 Entity resolution and retrieval intent form a hard conjunction:
 
