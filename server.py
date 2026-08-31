@@ -1296,16 +1296,12 @@ def _bucket_matches_breath_date(bucket: dict, date_key: str) -> bool:
     return False
 
 
-def _breath_date_bucket_sort_key(bucket: dict) -> tuple[str, int]:
+def _breath_date_bucket_sort_key(bucket: dict) -> str:
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
     date_value = str(meta.get("date") or "")
     if not date_value:
         date_value = max(str(meta.get(key) or "") for key in ("updated_at", "last_active", "created"))
-    try:
-        importance = int(meta.get("importance", 5))
-    except (TypeError, ValueError):
-        importance = 5
-    return date_value, importance
+    return date_value
 
 
 def _breath_query_requests_date_read(query: str) -> bool:
@@ -1548,7 +1544,6 @@ def _select_anchor_buckets(all_buckets: list[dict], limit: int = 2) -> list[dict
     ]
     anchors.sort(
         key=lambda b: (
-            int(b.get("metadata", {}).get("importance", 5)),
             decay_engine.calculate_score(b.get("metadata", {})),
             b.get("metadata", {}).get("updated_at") or b.get("metadata", {}).get("created", ""),
         ),
@@ -1571,7 +1566,6 @@ def _select_self_anchor_buckets(all_buckets: list[dict], limit: int = 1) -> list
         anchors.append(bucket)
     anchors.sort(
         key=lambda b: (
-            int((b.get("metadata") or {}).get("importance", 5)),
             decay_engine.calculate_score(b.get("metadata", {})),
             (b.get("metadata") or {}).get("updated_at") or (b.get("metadata") or {}).get("created", ""),
         ),
@@ -2805,7 +2799,6 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "domain",
         "tags",
         "facets",
-        "importance",
         "valence",
         "arousal",
         "model_valence",
@@ -2879,7 +2872,6 @@ def _bucket_summary_payload(bucket: dict) -> dict:
         "facets": meta.get("facets", []),
         "metadata_view": metadata_view,
         **metadata_view,
-        "importance": meta.get("importance", 5),
         "valence": meta.get("valence", 0.5),
         "arousal": meta.get("arousal", 0.5),
         "confidence": meta.get("confidence", 0.5),
@@ -2916,7 +2908,6 @@ def _bucket_light_payload(bucket: dict) -> dict:
         "tags": meta.get("tags", []),
         "facets": meta.get("facets", []),
         "source": meta.get("source", ""),
-        "importance": meta.get("importance", 5),
         "confidence": meta.get("confidence", 0.5),
         "created": _metadata_text(meta.get("created")),
         "updated_at": _metadata_text(meta.get("updated_at")),
@@ -3508,7 +3499,6 @@ async def _call_anchor_proposal_model(
         "bucket_type": meta.get("type", ""),
         "bucket_tags": meta.get("tags", []),
         "bucket_domain": meta.get("domain", []),
-        "importance": meta.get("importance"),
         "created": meta.get("created", ""),
         "updated_at": meta.get("updated_at", ""),
         "last_active": meta.get("last_active", ""),
@@ -4680,7 +4670,6 @@ async def _merge_or_create(
                     bucket["id"],
                     content=merged,
                     tags=list(set(bucket["metadata"].get("tags", []) + tags)),
-                    importance=max(bucket["metadata"].get("importance", 5), importance),
                     domain=list(set(bucket["metadata"].get("domain", []) + domain)),
                     valence=merged_valence,
                     arousal=merged_arousal,
@@ -4693,7 +4682,7 @@ async def _merge_or_create(
     bucket_id = await bucket_mgr.create(
         content=content,
         tags=tags,
-        importance=importance,
+        importance=5,
         domain=domain,
         valence=valence,
         arousal=arousal,
@@ -5144,7 +5133,6 @@ def _moment_diffusion_map(moments: list[dict]) -> dict[str, dict]:
             continue
         item = dict(moment)
         meta = dict(item.get("metadata", {}) or {})
-        meta["importance"] = meta.get("bucket_importance", 5)
         meta["type"] = meta.get("bucket_type", "")
         meta["anchor"] = meta.get("bucket_anchor", False)
         meta["pinned"] = meta.get("bucket_pinned", False)
@@ -5557,7 +5545,6 @@ def _canonical_scene_recall_item(bucket: dict) -> dict | None:
             "bucket_type": meta.get("type") or "dynamic",
             "bucket_tags": list(meta.get("tags") or []),
             "bucket_domain": list(meta.get("domain") or []),
-            "bucket_importance": meta.get("importance"),
             "bucket_date": meta.get("date"),
             "bucket_created": meta.get("created"),
             "bucket_updated_at": meta.get("updated_at") or meta.get("last_active"),
@@ -5603,7 +5590,6 @@ def _source_record_synthetic_moment_for_bucket(
             "bucket_type": meta.get("type") or "source",
             "bucket_tags": list(meta.get("tags") or []),
             "bucket_domain": list(meta.get("domain") or []),
-            "bucket_importance": meta.get("importance"),
             "bucket_created": meta.get("created"),
             "bucket_updated_at": meta.get("updated_at") or meta.get("last_active"),
             "source_record_direct": True,
@@ -5775,11 +5761,6 @@ def _bucket_is_high_value(bucket: dict) -> bool:
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
     if meta.get("pinned") or meta.get("protected") or meta.get("anchor"):
         return True
-    try:
-        if int(meta.get("importance", 5)) >= 9:
-            return True
-    except (TypeError, ValueError):
-        pass
     return has_favorite_memory_tag(meta.get("tags", []) or [], ai_name=_ai_author_name())
 
 
@@ -6568,18 +6549,15 @@ def _breath_bucket_score(
     topic: float,
     emotion: float,
     time_s: float,
-    importance: float,
 ) -> float:
     _ = emotion  # legacy diagnostic input; P1 excludes it from ranking
     w_topic = float(getattr(bucket_mgr, "w_topic", 4.0) or 4.0)
     w_time = float(getattr(bucket_mgr, "w_time", 1.5) or 1.5)
-    w_importance = float(getattr(bucket_mgr, "w_importance", 1.0) or 1.0)
     raw_total = (
         topic * w_topic
         + time_s * w_time
-        + importance * w_importance
     )
-    weight_sum = w_topic + w_time + w_importance
+    weight_sum = w_topic + w_time
     normalized = (raw_total / weight_sum) * 100 if weight_sum > 0 else 0
     if (bucket.get("metadata") or {}).get("resolved", False):
         normalized *= 0.3
@@ -6619,14 +6597,12 @@ def _append_breath_lexical_matches(
             if hasattr(bucket_mgr, "_calc_time_score")
             else 0.5
         )
-        importance = max(1, min(10, int(meta.get("importance", 5)))) / 10.0
         score = max(
             _breath_bucket_score(
                 bucket,
                 topic=topic,
                 emotion=emotion,
                 time_s=time_s,
-                importance=importance,
             ),
             float(getattr(bucket_mgr, "fuzzy_threshold", 50) or 50) + 5,
         )
@@ -7232,8 +7208,6 @@ async def _collect_diffusion_seed_buckets(query: str, max_seeds: int) -> tuple[l
         base_score = _safe_float(candidate.get("score"))
         if base_score is None:
             base_score = _safe_float(meta.get("score"))
-        if base_score is None:
-            base_score = _safe_float(meta.get("importance"))
         if base_score is None:
             base_score = 0.0
         candidate["score"] = round(base_score * float(decision.multiplier), 4)
@@ -7915,7 +7889,6 @@ async def _recall_memory(
         )
         pinned.sort(
             key=lambda b: (
-                int(b["metadata"].get("importance", 5)),
                 decay_engine.calculate_score(b["metadata"]),
                 b["metadata"].get("updated_at") or b["metadata"].get("created", ""),
             ),
@@ -8592,9 +8565,8 @@ async def _select_resurface_buckets(
         if meta.get("anchor"):
             continue
         dormant_days = _bucket_days_since_last_active(meta)
-        importance = max(1, min(10, int(meta.get("importance", 5))))
         archived_bonus = 1.15 if meta.get("type") == "archived" else 1.0
-        resurface_score = (dormant_days + 1.0) * (0.6 + importance / 10.0) * archived_bonus
+        resurface_score = (dormant_days + 1.0) * archived_bonus
         candidates.append((resurface_score, bucket))
 
     candidates.sort(key=lambda item: item[0], reverse=True)
@@ -9759,7 +9731,8 @@ async def hold(
         if contract_error:
             return f"写入被拒绝：{contract_error}"
 
-    importance = max(1, min(10, importance))
+    _ = importance  # retired compatibility argument
+    importance = 5
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
     retired_tags = {
         str(tag).strip().lower()
@@ -11085,7 +11058,6 @@ async def trace(
     domain: str = "",
     valence: float = -1,
     arousal: float = -1,
-    importance: int = -1,
     tags: str = "",
     resolved: int = -1,
     pinned: int = -1,
@@ -11124,16 +11096,12 @@ async def trace(
         updates["valence"] = valence
     if 0 <= arousal <= 1:
         updates["arousal"] = arousal
-    if 1 <= importance <= 10:
-        updates["importance"] = importance
     if tags:
         updates["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
     if resolved in (0, 1):
         updates["resolved"] = bool(resolved)
     if pinned in (0, 1):
         updates["pinned"] = bool(pinned)
-        if pinned == 1:
-            updates["importance"] = 10  # pinned → lock importance
     if anchor in (0, 1):
         if anchor == 1:
             ok, message = await _can_mark_anchor(bucket_id, bucket)
@@ -11251,7 +11219,6 @@ async def pulse(include_archive: bool = False) -> str:
             f"bucket_id:{b['id']} "
             f"主题:{domains} "
             f"情感:V{val:.1f}/A{aro:.1f} "
-            f"重要:{meta.get('importance', '?')} "
             f"权重:{score:.2f} "
             f"标签:{','.join(meta.get('tags', []))}"
         )
@@ -13060,7 +13027,6 @@ async def api_create_memory(request):
     tags = _string_list(body.get("tags"), [])
     if _has_favorite_tag(tags) and not _has_favorite_reason(content):
         return JSONResponse({"error": _favorite_reason_error()}, status_code=400)
-    importance = _int_between(body.get("importance"), 5)
     valence = _float_between(body.get("valence"), 0.5)
     arousal = _float_between(body.get("arousal"), 0.5)
     confidence = _float_between(body.get("confidence"), 0.5)
@@ -13097,7 +13063,6 @@ async def api_create_memory(request):
         update_kwargs = {
             "content": content,
             "tags": tags,
-            "importance": importance,
             "domain": domain,
             "valence": valence,
             "arousal": arousal,
@@ -13133,7 +13098,7 @@ async def api_create_memory(request):
         bucket_id = await bucket_mgr.create(
             content=content,
             tags=tags,
-            importance=importance,
+            importance=5,
             domain=domain,
             valence=valence,
             arousal=arousal,
@@ -13381,7 +13346,6 @@ async def api_buckets(request):
                 "valence": meta.get("valence", 0.5),
                 "arousal": meta.get("arousal", 0.3),
                 "model_valence": meta.get("model_valence"),
-                "importance": meta.get("importance", 5),
                 "confidence": meta.get("confidence", 0.5),
                 "resolved": meta.get("resolved", False),
                 "pinned": meta.get("pinned", False),
@@ -15312,7 +15276,7 @@ async def api_fact_relation_proposals(request):
 
 @mcp.custom_route("/api/fact-events/revise", methods=["POST"])
 async def api_revise_fact_event(request):
-    """Create a source-preserving revision, or update importance metadata."""
+    """Create a source-preserving revision, or update Event recallability metadata."""
     from starlette.responses import JSONResponse
 
     err = _require_raw_api_auth(request)
@@ -15325,11 +15289,15 @@ async def api_revise_fact_event(request):
     if not isinstance(body, dict):
         return JSONResponse({"error": "request body must be an object"}, status_code=400)
     try:
+        revise_kwargs = {
+            "title": body.get("title"),
+            "body": body.get("body"),
+        }
+        if "recallable" in body:
+            revise_kwargs["recallable"] = body.get("recallable")
         result = fact_event_store.revise(
             str(body.get("item_id") or ""),
-            title=body.get("title"),
-            body=body.get("body"),
-            importance=body.get("importance"),
+            **revise_kwargs,
         )
         result["scene_coverage"] = await _reconcile_scene_covered_events()
         result["item"] = fact_event_store.read(
@@ -15343,6 +15311,37 @@ async def api_revise_fact_event(request):
         return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception as exc:
         logger.warning("Fact/Event revision failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/fact-events/recallable-review", methods=["POST"])
+async def api_review_event_recallable(request):
+    """Plan or atomically apply a fingerprint-guarded Event recallability review."""
+    from starlette.responses import JSONResponse
+
+    err = _require_raw_api_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    try:
+        result = fact_event_store.review_event_recallable(
+            body.get("reviews"),
+            apply=body.get("apply") is True,
+        )
+        if result["applied"]:
+            result["passage_shadow_refresh"] = await _queue_gateway_passage_shadow_refresh(
+                fact_event_ids=[item["item_id"] for item in result["items"]]
+            )
+        return JSONResponse(result)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Event recallability review failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
@@ -15429,7 +15428,6 @@ async def api_network(request):
                 "valence": meta.get("valence", 0.5),
                 "arousal": meta.get("arousal", 0.3),
                 "score": decay_engine.calculate_score(meta),
-                "importance": meta.get("importance", 5),
                 "confidence": meta.get("confidence", 0.5),
                 "resolved": meta.get("resolved", False),
                 "pinned": meta.get("pinned", False),
@@ -15620,7 +15618,6 @@ async def api_breath_debug(request):
             "topic": bucket_mgr.w_topic,
             "emotion": bucket_mgr.w_emotion,
             "time": bucket_mgr.w_time,
-            "importance": bucket_mgr.w_importance,
         }
         w_sum = sum(w.values())
         lexical_terms = _breath_lexical_match_terms(query, all_buckets=all_buckets)
@@ -15637,13 +15634,10 @@ async def api_breath_debug(request):
                 topic = topic_scores.get(str(bid), 0.0) if query else 0.0
                 emotion = bucket_mgr._calc_emotion_score(q_valence, q_arousal, meta)
                 time_s = bucket_mgr._calc_time_score(meta)
-                imp = max(1, min(10, int(meta.get("importance", 5)))) / 10.0
-
                 raw_total = (
                     topic * w["topic"]
                     + emotion * w["emotion"]
                     + time_s * w["time"]
-                    + imp * w["importance"]
                 )
                 normalized = (raw_total / w_sum) * 100 if w_sum > 0 else 0
                 resolved = meta.get("resolved", False)
@@ -15673,7 +15667,6 @@ async def api_breath_debug(request):
                         "topic": round(topic, 4),
                         "emotion": round(emotion, 4),
                         "time": round(time_s, 4),
-                        "importance": round(imp, 4),
                         "lexical": 1.0 if lexical_match else 0.0,
                     },
                     "lexical_terms": lexical_terms if lexical_match else [],
@@ -17220,7 +17213,6 @@ async def api_import_results(request):
                 "type": b["metadata"].get("type", ""),
                 "domain": b["metadata"].get("domain", []),
                 "tags": b["metadata"].get("tags", []),
-                "importance": b["metadata"].get("importance", 5),
                 "created": b["metadata"].get("created", ""),
             })
         return JSONResponse({"buckets": results, "total": len(all_buckets)})
@@ -17243,6 +17235,19 @@ async def api_import_review(request):
     decisions = body.get("decisions", [])
     if not decisions:
         return JSONResponse({"error": "No decisions provided"}, status_code=400)
+    unsupported_actions = sorted(
+        {
+            str(item.get("action") or "")
+            for item in decisions
+            if isinstance(item, dict)
+            and str(item.get("action") or "") not in {"pin", "anchor", "noise", "delete"}
+        }
+    )
+    if unsupported_actions:
+        return JSONResponse(
+            {"error": "unsupported review actions", "actions": unsupported_actions},
+            status_code=400,
+        )
 
     applied = 0
     errors = 0
@@ -17252,9 +17257,7 @@ async def api_import_review(request):
         if not bid or not action:
             continue
         try:
-            if action == "important":
-                await bucket_mgr.update(bid, importance=9)
-            elif action == "pin":
+            if action == "pin":
                 await bucket_mgr.update(bid, pinned=True)
             elif action == "anchor":
                 bucket = await bucket_mgr.get(bid)
@@ -17265,11 +17268,13 @@ async def api_import_review(request):
                     raise ValueError(message)
                 await bucket_mgr.update(bid, anchor=True)
             elif action == "noise":
-                await bucket_mgr.update(bid, resolved=True, importance=1)
+                await bucket_mgr.update(bid, resolved=True)
             elif action == "delete":
                 result = await _delete_bucket_and_indexes(bid)
                 if result.get("status") != "deleted":
                     raise ValueError(result.get("reason") or "bucket not found")
+            else:
+                raise ValueError(f"unsupported review action: {action}")
             applied += 1
         except Exception as e:
             logger.warning(f"Review action failed for {bid}: {e}")

@@ -72,6 +72,21 @@ async def main() -> None:
                 "title": "看到第140话",
                 "body": "我们一起看到第140话，约好明天继续。",
                 "memory_date": "2026-08-31",
+                "recallable": True,
+            },
+            "event-off": {
+                "owner_kind": "event",
+                "title": "关闭召回的 Event",
+                "body": "这条 Event 仍在 shadow，但不能进入 live。",
+                "memory_date": "2026-08-31",
+                "recallable": False,
+            },
+            "event-unreviewed": {
+                "owner_kind": "event",
+                "title": "未审核的 Event",
+                "body": "这条 Event 也只能留在 shadow。",
+                "memory_date": "2026-08-31",
+                "recallable": None,
             },
             "scene-free": {
                 "owner_kind": "scene",
@@ -87,6 +102,20 @@ async def main() -> None:
                     "status": "not_retrieved",
                     "reason": "entity_without_recall_intent",
                     "entity_scope": {"status": "scope_only"},
+                }
+            if query == "gated":
+                return {
+                    "status": "ok",
+                    "entity_scope": {
+                        "status": "global_recall",
+                        "operator": "none",
+                        "intent": "none",
+                    },
+                    "candidates": [
+                        candidate("event", "event-off", with_arc=False),
+                        candidate("event", "event-unreviewed", with_arc=False),
+                        candidate("scene", "scene-free", with_arc=False),
+                    ],
                 }
             scoped = query.startswith("spy")
             row = candidate(
@@ -181,6 +210,20 @@ async def main() -> None:
         )
         assert "可能是你的相关记忆，若无关可忽略" in free["context"], free
         assert "[arc_materials" not in free["context"], free
+
+        gated = await service._typed_event_scene_live_context(
+            "gated",
+            "session-a",
+            [0.1],
+        )
+        assert gated["status"] == "injected", gated
+        assert gated["selected_refs"] == ["scene:scene-free"], gated
+        assert "event-off" not in gated["context"], gated
+        assert "event-unreviewed" not in gated["context"], gated
+        assert gated["excluded_event_refs_by_recallable"] == [
+            "event:event-off",
+            "event:event-unreviewed",
+        ], gated
 
         veto = await service._typed_event_scene_live_context(
             "entity only",

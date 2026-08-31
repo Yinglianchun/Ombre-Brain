@@ -176,7 +176,6 @@ passage_shadow:
   auto_refresh_max_passages: 3    # mutation refresh only; startup warm is always plan-only
   backfill_embedding_concurrency: 2
   backfill_request_delay_ms: 150  # explicit atomic backfill only
-  min_fact_event_importance: 3   # legacy Fact floor; every active Event remains shadow-eligible
 
 # --- Typed Event / Scene recall cutover ---
 # Uses the rebuildable passage/entity projections above. Arc prose and raw
@@ -452,7 +451,6 @@ gateway:
   recall_fusion_mode: dynamic        # dynamic | legacy; legacy uses the weights below as the main score
   semantic_weight: 0.45
   keyword_weight: 0.35               # explicit lexical evidence only (authored cue / exact anchor), not body keywords
-  importance_weight: 0.03            # legacy main score only; dynamic caps it as a tiny adjustment
   freshness_weight: 0.03             # legacy main score only; dynamic caps it as a tiny adjustment
   first_card_min_score: 0.55
   retrieval_budget_reranker_entry_floor: 0.50 # simulation only: anchored body-semantic gray zone; never direct admission
@@ -780,7 +778,6 @@ scoring_weights:
   topic_relevance: 4.0
   emotion_resonance: 0.0          # legacy compatibility only; ignored by ordinary recall ranking
   time_proximity: 1.5
-  importance: 1.0
 
 # --- Fuzzy matching / 模糊匹配参数 ---
 matching:

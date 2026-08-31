@@ -63,9 +63,8 @@ class CuePassageIndex:
 class FactSemanticIndex:
     def search_by_embedding(self, *_args, **kwargs):
         assert kwargs["memory_kinds"] == ("event",)
-        assert kwargs["min_importance_by_kind"] == {"event": 1}
         matches = [
-            {"memory_kind": "event", "memory_id": "event-a", "score": 0.78, "importance": 3},
+            {"memory_kind": "event", "memory_id": "event-a", "score": 0.78},
         ]
         allowed = kwargs.get("allowed_memory_ids")
         if allowed is not None:
@@ -78,7 +77,6 @@ class LexicalIndex:
         assert kwargs["memory_kinds"] == ("event",)
         match = row("event", "event-a", 4.2)
         match.update({
-            "importance": 4,
             "candidate_sources": ["fact_event_lexical"],
             "specific_terms": ["初遇"],
         })
@@ -89,9 +87,6 @@ class LexicalIndex:
 
 service = GatewayService.__new__(GatewayService)
 service.passage_candidate_shadow_enabled = True
-service.passage_shadow_min_fact_event_importance = 3
-service.passage_shadow_min_fact_importance = 3
-service.passage_shadow_min_event_importance = 1
 service.passage_shadow_index = PassageIndex()
 service.cue_passage_shadow_index = CuePassageIndex()
 service.fact_event_semantic_index = FactSemanticIndex()
@@ -103,7 +98,7 @@ service._passage_candidate_shadow_catalog = {
     "event-a": {
         "owner_kind": "event",
         "title": "E",
-        "importance": 3,
+        "recallable": True,
         "body": "event body",
         "memory_date": "2026-08-20",
     },
@@ -254,7 +249,7 @@ class ClauseCuePassageIndex:
 query_view_service.passage_shadow_index = ClausePassageIndex()
 query_view_service.cue_passage_shadow_index = ClauseCuePassageIndex()
 query_view_service._passage_candidate_shadow_catalog = {
-    "scene-target": {"owner_kind": "scene", "title": "Target", "importance": None},
+    "scene-target": {"owner_kind": "scene", "title": "Target"},
 }
 
 
@@ -629,8 +624,6 @@ async def verify_mutation_refresh_queue() -> None:
 
 async def verify_warm_plans_and_bounded_refresh_applies() -> None:
     warm_service = GatewayService.__new__(GatewayService)
-    warm_service.passage_shadow_min_fact_importance = 3
-    warm_service.passage_shadow_min_event_importance = 1
     warm_service.passage_shadow_auto_refresh_max_passages = 3
 
     class Store:
@@ -642,7 +635,7 @@ async def verify_warm_plans_and_bounded_refresh_applies() -> None:
                         "item_type": "event",
                         "title": "warm event",
                         "body": "event body",
-                        "importance": 1,
+                        "recallable": None,
                     }
                 ],
                 "count": 1,

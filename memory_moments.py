@@ -527,7 +527,6 @@ class MemoryMomentStore:
             key=lambda item: (
                 item.get("score", 0.0),
                 _moment_section_weight(item.get("section")),
-                _metadata_float(item.get("metadata", {}), "bucket_importance", 5.0),
             ),
             reverse=True,
         )
@@ -1332,7 +1331,6 @@ def _bucket_metadata(meta: dict, bucket: dict) -> dict:
             "bucket_tags": tags,
             "bucket_domain": _list_text(meta.get("domain")),
             "bucket_scene_cues": _list_text(meta.get("scene_cues")),
-            "bucket_importance": meta.get("importance"),
             "bucket_valence": meta.get("valence"),
             "bucket_arousal": meta.get("arousal"),
             "bucket_anchor": meta.get("anchor"),
@@ -1602,7 +1600,6 @@ def _moment_query_score(
     if score <= 0:
         return 0.0
     score *= _moment_section_weight(moment.get("section"))
-    score += min(_metadata_float(meta, "bucket_importance", 5.0) / 10.0, 1.0) * 0.08
     if meta.get("bucket_favorite") or meta.get("bucket_anchor"):
         score += 0.06
     return round(min(score, 1.5), 4)

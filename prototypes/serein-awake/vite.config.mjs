@@ -1222,7 +1222,7 @@ function sereinMemoryBridge() {
               item_id: String(body.itemId || "").trim(),
               title: body.title,
               body: body.body,
-              importance: body.importance,
+              ...(Object.prototype.hasOwnProperty.call(body, "recallable") ? { recallable: body.recallable } : {}),
             },
           });
           response.statusCode = upstream.status;

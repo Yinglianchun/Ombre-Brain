@@ -1689,12 +1689,12 @@ label:has(input:focus-visible) {
   font-size: 11px;
 }
 .scene-detail__meta span { display: inline-flex; align-items: center; gap: 6px; }
-.fact-event-importance {
+.fact-event-recallable {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
-.fact-event-importance select {
+.fact-event-recallable select {
   height: 25px;
   padding: 0 5px;
   border: 1px solid #d6dcda;
@@ -1703,7 +1703,7 @@ label:has(input:focus-visible) {
   color: #59645f;
   font: inherit;
 }
-.fact-event-importance select:disabled { border-color: transparent; background: transparent; opacity: 1; }
+.fact-event-recallable select:disabled { opacity: 0.55; }
 .fact-event-detail__message { margin: 14px 0 0; color: #64716c; font-family: var(--font-editorial-cjk); font-size: 10px; }
 .fact-event-detail__message.is-error { color: #955d54; }
 .memory-action-message { margin: -8px 0 18px; color: #64716c; font-size: 11px; }

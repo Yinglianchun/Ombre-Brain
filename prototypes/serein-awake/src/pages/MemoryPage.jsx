@@ -187,7 +187,6 @@ function FactEventDetail({ item, onClose, onRevised, onStatusChanged, onDeleted 
   const [draft, setDraft] = useState(() => ({
     title: item.title || "",
     body: item.body || "",
-    importance: Number(item.importance) || 1,
   }));
   const [state, setState] = useState("idle");
   const [message, setMessage] = useState("");
@@ -204,7 +203,6 @@ function FactEventDetail({ item, onClose, onRevised, onStatusChanged, onDeleted 
           itemId: item.item_id,
           ...(draft.title.trim() !== (item.title || "") ? { title: draft.title.trim() } : {}),
           ...(draft.body.trim() !== item.body ? { body: draft.body.trim() } : {}),
-          ...(draft.importance !== Number(item.importance) ? { importance: draft.importance } : {}),
         }),
       });
       const payload = await response.json().catch(() => ({}));
@@ -212,7 +210,32 @@ function FactEventDetail({ item, onClose, onRevised, onStatusChanged, onDeleted 
       onRevised(item.item_id, payload.item);
       setEditing(false);
       setState("saved");
-      setMessage(payload.status === "superseded" ? "已保存为新的修订版" : "重要度已更新");
+      setMessage(
+        payload.status === "superseded" && item.item_type === "event"
+          ? "已保存为新的修订版；请重新审核是否允许自动浮现"
+          : "已保存",
+      );
+    } catch (error) {
+      setState("error");
+      setMessage(error.message || "保存失败");
+    }
+  };
+
+  const setRecallable = async (value) => {
+    if (item.item_type !== "event") return;
+    setState("saving");
+    setMessage("");
+    try {
+      const response = await fetch("/__serein/memory/revise-fact-event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ itemId: item.item_id, recallable: value }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.item) throw new Error(payload.message || payload.error || "保存失败");
+      onRevised(item.item_id, payload.item);
+      setState("saved");
+      setMessage(value === true ? "已允许自动浮现" : value === false ? "已关闭自动浮现" : "已设为未审核");
     } catch (error) {
       setState("error");
       setMessage(error.message || "保存失败");
@@ -299,12 +322,20 @@ function FactEventDetail({ item, onClose, onRevised, onStatusChanged, onDeleted 
         <div className="scene-detail__meta">
           <span>{memoryTypeLabels[item.item_type]}</span>
           <span><LinkSimple size={15} weight="light" aria-hidden="true" />{factEventSourceCount(item)} 条原文</span>
-          <label className="fact-event-importance">
-            重要度
-            <select value={draft.importance} disabled={!editing} onChange={(event) => setDraft({ ...draft, importance: Number(event.target.value) })}>
-              {[1, 2, 3, 4, 5].map((value) => <option value={value} key={value}>{value}</option>)}
-            </select>
-          </label>
+          {item.item_type === "event" ? (
+            <label className="fact-event-recallable">
+              自动浮现
+              <select
+                value={item.recallable == null ? "" : String(item.recallable)}
+                disabled={state === "saving"}
+                onChange={(event) => setRecallable(event.target.value === "" ? null : event.target.value === "true")}
+              >
+                <option value="">未审核</option>
+                <option value="true">允许</option>
+                <option value="false">关闭</option>
+              </select>
+            </label>
+          ) : <span>不参与普通召回</span>}
           {item.status !== "active" ? <span>{item.status === "archived" ? "已归档" : "旧版本"}</span> : null}
         </div>
         {message ? <p className={`fact-event-detail__message${state === "error" ? " is-error" : ""}`} role={state === "error" ? "alert" : "status"}>{message}</p> : null}
@@ -1204,7 +1235,9 @@ export function MemoryPage() {
                       <p className={`scene-entry__excerpt${item.item_type === "fact" ? " is-fact" : ""}`}>{item.body}</p>
                       <span className="scene-entry__meta">
                         <span><LinkSimple size={15} weight="light" aria-hidden="true" />{factEventSourceCount(item)} 条原文</span>
-                        <span>重要度 {item.importance}</span>
+                        <span>{item.item_type === "event"
+                          ? item.recallable === true ? "可自动浮现" : item.recallable === false ? "不自动浮现" : "召回资格未审核"
+                          : "不参与普通召回"}</span>
                         {item.injection_count ? <span>已注入 {item.injection_count} 次</span> : null}
                       </span>
                       <CaretRight className="scene-entry__chevron" size={18} weight="light" aria-hidden="true" />

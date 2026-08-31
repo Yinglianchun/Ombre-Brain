@@ -283,7 +283,7 @@ function RecallSimulator() {
   const cheapRetrieval = retrievalBudget.cheap_retrieval ?? {};
   const rerankerShadow = retrievalBudget.rerank ?? {};
   const cueSemanticShadow = retrievalBudget.cue_semantic ?? {};
-  const factEventProbe = retrievalBudget.fact_event_probe ?? {};
+  const eventProbe = retrievalBudget.event_probe ?? retrievalBudget.fact_event_probe ?? {};
   const passageCandidateShadow = retrievalBudget.passage_candidate_shadow ?? {};
   const passageCandidatePolicy = passageCandidateShadow.policy ?? {};
   const passageCandidateLanes = passageCandidateShadow.lanes ?? {};
@@ -480,7 +480,7 @@ function RecallSimulator() {
               <div><dt>absolute floor</dt><dd>{cheapRetrieval.floor_qualified_count ?? 0} / {cheapRetrieval.candidate_count ?? 0}</dd></div>
               <div><dt>reranker gray zone</dt><dd>{cheapRetrieval.gray_zone_count ?? 0} / {cheapRetrieval.reranker_eligible_count ?? 0} eligible</dd></div>
               <div><dt>cue embedding</dt><dd>{cueSemanticShadow.status === "available" ? `${cueSemanticShadow.candidate_count ?? 0} 条候选 · v${cueSemanticShadow.dataset_version ?? "?"}` : cueSemanticShadow.reason || "未建立索引"}</dd></div>
-              <div><dt>Fact / Event probe</dt><dd>{factEventProbe.status === "ok" ? `${factEventProbe.candidate_count ?? 0} 条 · ${(factEventProbe.matches || []).slice(0, 3).map((item) => `${item.memory_kind}:${percent(item.score)}`).join(" · ") || "无达标候选"}` : factEventProbe.reason || factEventProbe.status || "未启用"}</dd></div>
+              <div><dt>Event probe</dt><dd>{eventProbe.status === "ok" ? `${eventProbe.candidate_count ?? 0} 条 · ${(eventProbe.matches || []).slice(0, 3).map((item) => `${item.memory_kind}:${percent(item.score)}`).join(" · ") || "无达标候选"}` : eventProbe.reason || eventProbe.status || "未启用"}</dd></div>
               <div><dt>passage candidate shadow</dt><dd>{passageCandidateShadow.status === "ok" ? `${passageCandidateShadow.candidate_count ?? 0} / ${passageCandidatePolicy.pool_limit ?? 7} 条占席 · 不参与决定` : passageCandidateShadow.reason || passageCandidateShadow.status || "未启用"}</dd></div>
               <div><dt>reranker shadow</dt><dd>{rerankerShadow.called ? `${rerankerShadow.score_count ?? 0} / ${rerankerShadow.candidate_count ?? 0} 已评分 · 不参与决定` : rerankerShadow.would_call ? rerankerShadowReasonLabels[rerankerShadow.reason] || rerankerShadow.reason || "有资格，尚未调用" : rerankerShadowReasonLabels[rerankerShadow.reason] || rerankerShadow.reason || "未进入"}</dd></div>
               <div><dt>同一事件核对</dt><dd>{episodeVerifier.called ? `${episodeVerifier.decisions?.length ?? 0} / ${episodeVerifier.candidate_count ?? 0} 已核对 · ${episodeVerifier.timing_ms ?? 0} ms` : episodeVerifier.reason || "未进入"}</dd></div>
@@ -504,7 +504,7 @@ function RecallSimulator() {
               <span>{passageCandidates.length} 条 · live injection 关闭</span>
             </div>
             <p className="recall-evidence-decomposition__note">
-              四路各自占席，不跨路叠分：cue 绑定片段 2、普通 passage 2、Fact/Event 正文 2、Fact/Event 词语 1。同一父记忆重复命中只合并来源；Fact/Event 重要度低于 {passageCandidatePolicy.min_fact_event_importance ?? 3} 已在评分前排除。
+              Scene / Event 都只用整体与长文本 passage 两路 embedding，按 owner 取最高分；cue 和词语只负责带入候选，不参与评分。Fact 已退出召回，importance 不参与候选或排序；shadow 仍观察全部 active Event。
             </p>
             {weakCandidateTriggerShadow.status === "observed" && (
               <p className="recall-evidence-decomposition__note">
@@ -540,7 +540,7 @@ function RecallSimulator() {
                         </header>
                         <dl>
                           <div><dt>候选分数</dt><dd>{passageCandidateScore(candidate)}</dd></div>
-                          <div><dt>重要度</dt><dd>{candidate.importance == null ? "Scene 不适用" : candidate.importance}</dd></div>
+                          <div><dt>自动浮现</dt><dd>{candidate.owner_kind !== "event" ? "Scene 按自身合同" : candidate.recallable === true ? "允许" : candidate.recallable === false ? "关闭" : "未审核（仅 shadow）"}</dd></div>
                           <div><dt>发现来源</dt><dd>{(candidate.candidate_sources || []).map((source) => recallCandidateSourceLabels[source] || source).join(" · ") || "未记录"}</dd></div>
                           <div><dt>命中 cue / 词语</dt><dd>{[...(candidate.matched_cues || []), ...(candidate.specific_terms || [])].join(" · ") || "—"}</dd></div>
                         </dl>

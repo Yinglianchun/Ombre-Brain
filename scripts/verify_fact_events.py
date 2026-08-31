@@ -91,6 +91,36 @@ def main() -> None:
         assert event_row and event_row["local_start_time"] == "16:15"
         assert event_row["local_end_time"] == "16:17"
         assert len(event_row["source_refs"]) == 2
+        assert event_row["recallable"] is None
+        original_fingerprint = event_row["fingerprint"]
+
+        recallable_revision = store.revise(event_id, recallable=True)
+        assert recallable_revision["status"] == "updated"
+        assert recallable_revision["item"]["item_id"] == event_id
+        assert recallable_revision["item"]["fingerprint"] == original_fingerprint
+        assert recallable_revision["item"]["recallable"] is True
+        assert len(recallable_revision["item"]["source_refs"]) == 2
+        assert store.revise(event_id, recallable=False)["item"]["recallable"] is False
+
+        review = {
+            "item_id": event_id,
+            "fingerprint": original_fingerprint,
+            "recallable": True,
+        }
+        planned = store.review_event_recallable([review])
+        assert planned["applied"] is False and planned["changed"] == 1, planned
+        assert store.read(event_id)["recallable"] is False
+        applied = store.review_event_recallable([review], apply=True)
+        assert applied["applied"] is True and applied["changed"] == 1, applied
+        assert store.read(event_id)["recallable"] is True
+        try:
+            store.review_event_recallable(
+                [{**review, "fingerprint": "0" * 64}], apply=True
+            )
+        except ValueError as exc:
+            assert "fingerprint changed" in str(exc)
+        else:
+            raise AssertionError("stale review fingerprint must fail closed")
 
         listed = store.list(item_type="fact", date="2026-08-08")
         assert listed["count"] == 1 and listed["items"][0]["item_id"] == fact_id
@@ -233,6 +263,7 @@ def main() -> None:
         assert revised_event_id != event_id
         assert store.read(event_id)["status"] == "superseded"
         assert len(event_revision["item"]["source_refs"]) == 2
+        assert event_revision["item"]["recallable"] is None
         event_id = revised_event_id
 
         partial_scene = store.archive_events_covered_by_scene("scene_partial", [source_a])
@@ -272,9 +303,10 @@ def main() -> None:
             [
                 {"type": "event", "body": "没有标题。", "source_refs": [source_a]},
                 {**fact, "origin_id": "bad-fact-title", "title": "事实不需要标题"},
+                {**fact, "origin_id": "bad-fact-recallable", "recallable": True},
             ]
         )
-        assert invalid["rejected"] == 2 and invalid["inserted"] == 0
+        assert invalid["rejected"] == 3 and invalid["inserted"] == 0
 
         deleted_event = store.delete(event_id)
         assert deleted_event["deleted"] == 2

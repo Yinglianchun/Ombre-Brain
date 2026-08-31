@@ -105,7 +105,10 @@ class BucketManager:
         self.configured_w_emotion = scoring.get("emotion_resonance", 0.0)
         self.w_emotion = 0.0
         self.w_time = scoring.get("time_proximity", 1.5)
-        self.w_importance = scoring.get("importance", 1.0)
+        # Legacy importance may still exist in old bucket files, but it is no
+        # longer writable or used by recall/lifecycle decisions.
+        self.configured_w_importance = scoring.get("importance", 1.0)
+        self.w_importance = 0.0
         self.content_weight = scoring.get("content_weight", 1.0)  # Added to allow better content-based matching during merge
         self.lexical_stop_terms = self._build_lexical_stop_terms(config)
         self._lexical_profile_cache: dict[
@@ -148,9 +151,8 @@ class BucketManager:
         Create a new memory bucket, return bucket ID.
         创建一个新的记忆桶，返回桶 ID。
 
-        pinned/protected=True: bucket won't be merged, decayed, or have importance changed.
-        Importance is locked to 10 for pinned/protected buckets.
-        pinned/protected 桶不参与合并与衰减，importance 强制锁定为 10。
+        pinned/protected=True: bucket won't be merged or decayed.
+        pinned/protected 桶不参与合并与衰减。
         """
         bucket_id = bucket_id or generate_bucket_id()
         bucket_name = sanitize_name(name) if name else bucket_id
@@ -161,10 +163,7 @@ class BucketManager:
         last_active_at = last_active or created_at
         updated_at_value = updated_at or created_at
 
-        # --- Pinned/protected buckets: lock importance to 10 ---
-        # --- 钉选/保护桶：importance 强制锁定为 10 ---
-        if pinned or protected:
-            importance = 10
+        _ = importance  # retired compatibility argument
 
         # --- Build YAML frontmatter metadata / 构建元数据 ---
         metadata = {
@@ -174,7 +173,6 @@ class BucketManager:
             "domain": domain,
             "valence": max(0.0, min(1.0, valence)),
             "arousal": max(0.0, min(1.0, arousal)),
-            "importance": max(1, min(10, importance)),
             "type": bucket_type,
             "created": created_at,
             "date": str(date).strip() if date else str(created_at)[:10],
@@ -286,7 +284,7 @@ class BucketManager:
     # ---------------------------------------------------------
     # Update bucket
     # 更新桶
-    # Supports: content, tags, facets, importance, valence, arousal, name, resolved
+    # Supports: content, tags, facets, valence, arousal, name, resolved
     # ---------------------------------------------------------
     async def update(self, bucket_id: str, **kwargs) -> bool:
         """
@@ -306,11 +304,7 @@ class BucketManager:
             logger.warning("Refused immutable source record update / 拒绝修改不可变来源记录: %s", bucket_id)
             return False
 
-        # --- Pinned/protected buckets: lock importance to 10, ignore importance changes ---
-        # --- 钉选/保护桶：importance 不可修改，强制保持 10 ---
-        is_pinned = post.get("pinned", False) or post.get("protected", False)
-        if is_pinned:
-            kwargs.pop("importance", None)  # silently ignore importance update
+        kwargs.pop("importance", None)  # retired compatibility field
 
         # --- Update only fields that were passed in / 只改传入的字段 ---
         if "content" in kwargs:
@@ -319,8 +313,6 @@ class BucketManager:
             post["tags"] = kwargs["tags"]
         if "facets" in kwargs:
             post["facets"] = kwargs["facets"] if isinstance(kwargs["facets"], list) else []
-        if "importance" in kwargs:
-            post["importance"] = max(1, min(10, int(kwargs["importance"])))
         if "domain" in kwargs:
             post["domain"] = kwargs["domain"]
         if "valence" in kwargs:
@@ -333,8 +325,6 @@ class BucketManager:
             post["resolved"] = bool(kwargs["resolved"])
         if "pinned" in kwargs:
             post["pinned"] = bool(kwargs["pinned"])
-            if kwargs["pinned"]:
-                post["importance"] = 10  # pinned → lock importance to 10
         if "anchor" in kwargs:
             post["anchor"] = bool(kwargs["anchor"])
         if "digested" in kwargs:
@@ -592,7 +582,6 @@ class BucketManager:
             "content": "",
             "valence": 0.5,
             "arousal": 0.5,
-            "importance": 1,
             "pinned": False,
             "resolved": True,
             "digested": True,
@@ -710,12 +699,11 @@ class BucketManager:
     # 策略：主题域预筛 → 多维加权精排
     #
     # Ranking formula:
-    #   total = topic(×w_topic) + time(×w_time) + importance(×w_importance)
+    #   total = topic(×w_topic) + time(×w_time)
     #
     # Per-dimension scores (normalized to 0~1):
     #   topic     = rapidfuzz weighted match (name/tags/domain/body)
     #   time      = e^(-0.02 × days) (recent memories first)
-    #   importance = importance / 10
     # ---------------------------------------------------------
     async def search(
         self,
@@ -771,17 +759,13 @@ class BucketManager:
                 # Dim 2: time proximity (exponential decay, 0~1)
                 time_score = self._calc_time_score(meta)
 
-                # Dim 3: importance (direct normalization)
-                importance_score = max(1, min(10, int(meta.get("importance", 5)))) / 10.0
-
                 # --- Weighted sum / 加权求和 ---
                 total = (
                     topic_score * self.w_topic
                     + time_score * self.w_time
-                    + importance_score * self.w_importance
                 )
                 # Normalize to 0~100 for readability
-                weight_sum = self.w_topic + self.w_time + self.w_importance
+                weight_sum = self.w_topic + self.w_time
                 normalized = (total / weight_sum) * 100 if weight_sum > 0 else 0
 
                 if normalized >= self.fuzzy_threshold:

@@ -33,6 +33,7 @@ SOURCE_KEY_LOOKUP_MAX_KEYS = 4000
 SOURCE_KEY_LOOKUP_RESULT_LIMIT = 20
 SOURCE_KEY_LOOKUP_SQL_CHUNK = 300
 MAX_SOURCE_REFS_PER_ITEM = 4000
+_UNSET = object()
 
 
 class FactEventSettlementBlockedError(ValueError):
@@ -80,6 +81,7 @@ class FactEventStore:
                     title TEXT NOT NULL DEFAULT '',
                     body TEXT NOT NULL,
                     importance INTEGER NOT NULL DEFAULT 1 CHECK(importance BETWEEN 1 AND 5),
+                    recallable INTEGER CHECK(recallable IN (0, 1)),
                     status TEXT NOT NULL DEFAULT 'active'
                         CHECK(status IN ('active', 'archived', 'superseded', 'tombstoned')),
                     local_date TEXT NOT NULL,
@@ -118,9 +120,6 @@ class FactEventStore:
 
                 CREATE INDEX IF NOT EXISTS idx_fact_events_date_type
                 ON fact_events(local_date, item_type, status, local_start_time, item_id);
-
-                CREATE INDEX IF NOT EXISTS idx_fact_events_surface
-                ON fact_events(status, importance, injection_count, local_date);
 
                 CREATE INDEX IF NOT EXISTS idx_fact_event_sources_message
                 ON fact_event_sources(source_system, session_id, message_id);
@@ -187,6 +186,17 @@ class FactEventStore:
                 conn.execute(
                     "ALTER TABLE fact_events ADD COLUMN atomic_question TEXT NOT NULL DEFAULT ''"
                 )
+            if "recallable" not in columns:
+                conn.execute(
+                    "ALTER TABLE fact_events ADD COLUMN recallable INTEGER CHECK(recallable IN (0, 1))"
+                )
+            conn.execute("DROP INDEX IF EXISTS idx_fact_events_surface")
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_fact_events_surface
+                ON fact_events(status, item_type, recallable, injection_count, local_date)
+                """
+            )
             proposal_columns = {
                 str(row[1])
                 for row in conn.execute("PRAGMA table_info(fact_relation_proposals)").fetchall()
@@ -1115,11 +1125,11 @@ class FactEventStore:
             """
             INSERT INTO fact_events (
                 item_id, schema_version, fingerprint, origin_id, item_type, title,
-                body, importance, status, local_date, local_end_date,
+                body, importance, recallable, status, local_date, local_end_date,
                 local_start_time, local_end_time, source_started_at,
                 source_ended_at, supersedes_item_id, created_at, updated_at,
                 fact_type, atomic_question
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item["item_id"],
@@ -1130,6 +1140,7 @@ class FactEventStore:
                 item["title"],
                 item["body"],
                 item["importance"],
+                item["recallable"],
                 item["local_date"],
                 item["local_end_date"],
                 item["local_start_time"],
@@ -1412,8 +1423,9 @@ class FactEventStore:
         title: Any = None,
         body: Any = None,
         importance: Any = None,
+        recallable: Any = _UNSET,
     ) -> dict[str, Any]:
-        """Revise prose by superseding the item; update importance as metadata."""
+        """Revise prose by superseding the item; update Event recallability as metadata."""
 
         current = self.read(item_id, include_sources=True)
         if current is None:
@@ -1425,12 +1437,24 @@ class FactEventStore:
         next_title = str(current["title"] if title is None else title).strip()
         next_body = str(current["body"] if body is None else body).strip()
         next_importance = current["importance"] if importance is None else importance
+        if item_type == "event":
+            next_importance = current["importance"]
+        prose_changed = (
+            next_title != str(current.get("title") or "")
+            or next_body != str(current.get("body") or "")
+        )
+        next_recallable = recallable
+        if recallable is _UNSET:
+            next_recallable = (
+                None if item_type == "event" and prose_changed else current.get("recallable")
+            )
         candidate = _normalize_item(
             {
                 "type": item_type,
                 "title": next_title,
                 "body": next_body,
                 "importance": next_importance,
+                "recallable": next_recallable,
                 "fact_type": current.get("fact_type", ""),
                 "atomic_question": current.get("atomic_question", ""),
                 "supersedes_item_id": str(current["item_id"]),
@@ -1442,8 +1466,17 @@ class FactEventStore:
             now = _now()
             with closing(self._connect()) as conn:
                 conn.execute(
-                    "UPDATE fact_events SET importance=?, updated_at=? WHERE item_id=?",
-                    (candidate["importance"], now, str(current["item_id"])),
+                    """
+                    UPDATE fact_events
+                    SET importance=?, recallable=?, updated_at=?
+                    WHERE item_id=?
+                    """,
+                    (
+                        candidate["importance"],
+                        candidate["recallable"],
+                        now,
+                        str(current["item_id"]),
+                    ),
                 )
                 conn.commit()
             return {
@@ -1459,6 +1492,7 @@ class FactEventStore:
                     "title": next_title,
                     "body": next_body,
                     "importance": candidate["importance"],
+                    "recallable": candidate["recallable"],
                     "fact_type": current.get("fact_type", ""),
                     "atomic_question": current.get("atomic_question", ""),
                     "supersedes_item_id": str(current["item_id"]),
@@ -1474,6 +1508,88 @@ class FactEventStore:
             "status": "superseded",
             "previous_item_id": str(current["item_id"]),
             "item": self.read(str(written["item_id"]), include_sources=True),
+        }
+
+    def review_event_recallable(
+        self,
+        reviews: Any,
+        *,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """Validate an audited Event recallability batch and optionally apply it atomically."""
+
+        if not isinstance(reviews, list) or not reviews:
+            raise ValueError("reviews must be a non-empty list")
+        if len(reviews) > 1000:
+            raise ValueError("reviews must contain at most 1000 items")
+
+        normalized: list[tuple[str, str, int | None]] = []
+        seen: set[str] = set()
+        for index, review in enumerate(reviews):
+            if not isinstance(review, dict):
+                raise ValueError(f"reviews[{index}] must be an object")
+            item_id = _required_identifier(review.get("item_id"), "item_id", 128)
+            fingerprint = _required_identifier(
+                review.get("fingerprint"), "fingerprint", 128
+            )
+            value = review.get("recallable")
+            if value is not None and type(value) is not bool:
+                raise ValueError(f"reviews[{index}].recallable must be boolean or null")
+            if item_id in seen:
+                raise ValueError(f"duplicate item_id: {item_id}")
+            seen.add(item_id)
+            normalized.append(
+                (item_id, fingerprint, None if value is None else int(value))
+            )
+
+        with closing(self._connect()) as conn:
+            if apply:
+                conn.execute("BEGIN IMMEDIATE")
+            checked: list[dict[str, Any]] = []
+            for item_id, fingerprint, value in normalized:
+                row = conn.execute(
+                    """
+                    SELECT item_id, fingerprint, item_type, status, recallable
+                    FROM fact_events
+                    WHERE item_id=?
+                    """,
+                    (item_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"item not found: {item_id}")
+                if str(row["item_type"]) != "event":
+                    raise ValueError(f"item is not an Event: {item_id}")
+                if str(row["status"]) != "active":
+                    raise ValueError(f"Event is not active: {item_id}")
+                if str(row["fingerprint"]) != fingerprint:
+                    raise ValueError(f"fingerprint changed: {item_id}")
+                checked.append(
+                    {
+                        "item_id": item_id,
+                        "fingerprint": fingerprint,
+                        "before": (
+                            None if row["recallable"] is None else bool(row["recallable"])
+                        ),
+                        "recallable": None if value is None else bool(value),
+                    }
+                )
+
+            if apply:
+                now = _now()
+                conn.executemany(
+                    "UPDATE fact_events SET recallable=?, updated_at=? WHERE item_id=?",
+                    [(value, now, item_id) for item_id, _fingerprint, value in normalized],
+                )
+                conn.commit()
+
+        return {
+            "ok": True,
+            "applied": bool(apply),
+            "reviewed": len(checked),
+            "changed": sum(
+                item["before"] != item["recallable"] for item in checked
+            ),
+            "items": checked,
         }
 
     def set_status(self, item_id: str, status: str) -> dict[str, Any]:
@@ -1901,6 +2017,12 @@ class FactEventStore:
     ) -> dict[str, Any]:
         payload = {key: row[key] for key in row.keys()}
         payload["origin_id"] = str(payload.get("origin_id") or "")
+        payload["recallable"] = (
+            bool(int(payload["recallable"]))
+            if payload.get("recallable") is not None
+            and str(payload.get("item_type") or "") == "event"
+            else None
+        )
         if include_sources:
             refs = conn.execute(
                 "SELECT * FROM fact_event_sources WHERE item_id=? ORDER BY created_at, id",
@@ -1941,6 +2063,14 @@ def _normalize_item(raw: Any) -> dict[str, Any]:
         raise ValueError("importance must be an integer from 1 to 5") from exc
     if not 1 <= importance <= 5:
         raise ValueError("importance must be an integer from 1 to 5")
+    raw_recallable = raw.get("recallable")
+    recallable = None
+    if item_type == "fact" and raw_recallable is not None:
+        raise ValueError("fact must not carry recallable")
+    if item_type == "event" and raw_recallable is not None:
+        if type(raw_recallable) is not bool:
+            raise ValueError("event recallable must be true, false, or null")
+        recallable = raw_recallable
 
     refs_raw = raw.get("source_refs")
     if not isinstance(refs_raw, list) or not refs_raw:
@@ -1992,6 +2122,7 @@ def _normalize_item(raw: Any) -> dict[str, Any]:
         "title": title,
         "body": body,
         "importance": importance,
+        "recallable": recallable,
         "supersedes_item_id": supersedes_id,
         "fact_type": fact_type,
         "atomic_question": atomic_question,

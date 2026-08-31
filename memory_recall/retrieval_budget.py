@@ -29,7 +29,6 @@ CURRENT_TURN_ROUTE_NAMES = frozenset(
 PURE_CHITCHAT_MIN_CONFIDENCE = 0.84
 PURE_CHITCHAT_MIN_MARGIN = 0.08
 DEFAULT_SENTINEL_RESCUE_FLOOR = 0.55
-TYPED_RECALL_MIN_IMPORTANCE = 3
 
 _SURFACE_ONLY_ADDRESS_KEYS = frozenset(
     {
@@ -297,16 +296,15 @@ def _budget_top_k(budget: str) -> int:
     }.get(budget, 8)
 
 
-def apply_fact_event_probe(
+def apply_event_probe(
     budget: dict[str, Any],
     probe: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    """Escalate the public three-state budget from typed shadow candidates."""
+    """Escalate the public three-state budget from Event shadow candidates."""
     if not isinstance(budget, dict):
         return budget
     probe = probe if isinstance(probe, Mapping) else {}
-    budget["fact_event_probe"] = dict(probe)
-    budget["typed_min_importance"] = TYPED_RECALL_MIN_IMPORTANCE
+    budget["event_probe"] = dict(probe)
     if str(probe.get("status") or "") != "ok":
         return budget
     floor = _bounded_float(
@@ -317,8 +315,8 @@ def apply_fact_event_probe(
         item
         for item in probe.get("matches") or []
         if isinstance(item, Mapping)
+        and str(item.get("memory_kind") or "") == "event"
         and _bounded_float(item.get("score"), 0.0) >= floor
-        and int(item.get("importance") or 0) >= TYPED_RECALL_MIN_IMPORTANCE
     ]
     budget["typed_qualified_count"] = len(qualified)
     if budget.get("surface_only_kind"):
@@ -341,14 +339,6 @@ def apply_fact_event_probe(
         ),
         None,
     )
-    fact = next(
-        (
-            item
-            for item in qualified
-            if str(item.get("memory_kind") or "") == "fact"
-        ),
-        None,
-    )
     if covered is not None:
         final_budget = BUDGET_DEEP
         reason = "typed_candidate_covered_by_scene"
@@ -357,10 +347,6 @@ def apply_fact_event_probe(
         final_budget = BUDGET_DEEP
         reason = "event_candidate_over_rescue_floor"
         winner = event
-    elif fact is not None:
-        final_budget = BUDGET_SHALLOW
-        reason = "fact_candidate_over_rescue_floor"
-        winner = fact
     else:
         return budget
     budget["final_budget"] = final_budget
@@ -380,6 +366,15 @@ def apply_fact_event_probe(
         sentinel["skip_allowed"] = False
         sentinel["reason"] = reason
     return budget
+
+
+def apply_fact_event_probe(
+    budget: dict[str, Any],
+    probe: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Compatibility alias; Fact rows are deliberately ignored."""
+
+    return apply_event_probe(budget, probe)
 
 
 def build_retrieval_budget(

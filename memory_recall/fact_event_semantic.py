@@ -56,7 +56,7 @@ def _cosine(left: list[float], right: list[float]) -> float:
 
 
 class FactEventSemanticIndex:
-    """Rebuildable body-only shadow index for canonical Fact/Event rows."""
+    """Rebuildable body-only shadow index for canonical Event rows."""
 
     def __init__(self, config: dict[str, Any], embedding_engine: Any):
         state_dir = str(
@@ -121,7 +121,7 @@ class FactEventSemanticIndex:
         output: list[dict[str, Any]] = []
         offset = 0
         while True:
-            page = store.list(status="active", limit=500, offset=offset)
+            page = store.list(item_type="event", status="active", limit=500, offset=offset)
             items = list(page.get("items") or [])
             output.extend(items)
             offset += len(items)
@@ -212,7 +212,7 @@ class FactEventSemanticIndex:
                         json.dumps(vector),
                         str(profile.get("model") or ""),
                         len(vector),
-                        int(item.get("importance") or 1),
+                        1,
                         str(item.get("local_date") or ""),
                         str(item.get("local_start_time") or ""),
                         str(item.get("covered_by_scene_id") or ""),
@@ -240,7 +240,7 @@ class FactEventSemanticIndex:
         query_embedding: list[float],
         *,
         top_k: int = 8,
-        memory_kinds: Iterable[str] = ("fact", "event"),
+        memory_kinds: Iterable[str] = ("event",),
         min_importance: int = 1,
         min_importance_by_kind: dict[str, int] | None = None,
         allowed_memory_ids: Iterable[str] | None = None,
@@ -253,17 +253,10 @@ class FactEventSemanticIndex:
         if availability.get("status") != "ok":
             return {**availability, "matches": []}
         kinds = {str(value).strip().lower() for value in memory_kinds}
-        kinds &= {"fact", "event"}
+        kinds &= {"event"}
         if not kinds:
             return {"status": "ok", "matches": []}
-        default_min_importance = max(1, int(min_importance or 1))
-        importance_floor = {
-            kind: max(
-                1,
-                int((min_importance_by_kind or {}).get(kind, default_min_importance) or 1),
-            )
-            for kind in kinds
-        }
+        _ = min_importance, min_importance_by_kind
         allowed_ids = (
             {
                 str(value or "").strip()
@@ -301,8 +294,6 @@ class FactEventSemanticIndex:
             item_type = str(row["item_type"])
             if item_type not in kinds or str(row["model"]) != model:
                 continue
-            if int(row["importance"] or 0) < importance_floor[item_type]:
-                continue
             try:
                 vector = [float(value) for value in json.loads(row["embedding"])]
             except (TypeError, ValueError, json.JSONDecodeError):
@@ -314,7 +305,6 @@ class FactEventSemanticIndex:
                     "memory_id": str(row["item_id"]),
                     "memory_kind": str(row["item_type"]),
                     "score": round(_cosine(query_embedding, vector), 4),
-                    "importance": int(row["importance"] or 1),
                     "local_date": str(row["local_date"] or ""),
                     "local_start_time": str(row["local_start_time"] or ""),
                     "covered_by_scene_id": str(row["covered_by_scene_id"] or ""),
@@ -325,7 +315,5 @@ class FactEventSemanticIndex:
             "status": "ok",
             "candidate_count": len(matches),
             "indexed_memory_ids": sorted(str(item["memory_id"]) for item in matches),
-            "min_importance": default_min_importance,
-            "min_importance_by_kind": importance_floor,
             "matches": matches[: max(1, min(30, int(top_k or 8)))],
         }

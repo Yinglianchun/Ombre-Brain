@@ -19,7 +19,7 @@ from memory_recall.retrieval_budget import (
     BUDGET_NORMAL,
     BUDGET_SHALLOW,
     BUDGET_SKIP,
-    apply_fact_event_probe,
+    apply_event_probe,
     build_retrieval_budget,
     finalize_retrieval_budget,
     partition_candidates_by_absolute_floor,
@@ -114,7 +114,7 @@ assert quoted_title["anchor_override"] is True
 assert quoted_title["effective_budget"] == BUDGET_NORMAL
 assert quoted_title["final_budget"] == BUDGET_DEEP
 
-fact_budget = apply_fact_event_probe(
+fact_budget = apply_event_probe(
     build("我是不是紫外线过敏"),
     {
         "status": "ok",
@@ -130,9 +130,9 @@ fact_budget = apply_fact_event_probe(
     },
 )
 assert fact_budget["final_budget"] == BUDGET_SHALLOW
-assert fact_budget["escalation_reason"] == "fact_candidate_over_rescue_floor"
+assert fact_budget["typed_qualified_count"] == 0
 
-event_budget = apply_fact_event_probe(
+event_budget = apply_event_probe(
     build("明信片那件事"),
     {
         "status": "ok",
@@ -150,7 +150,7 @@ event_budget = apply_fact_event_probe(
 assert event_budget["final_budget"] == BUDGET_DEEP
 assert event_budget["escalation_reason"] == "event_candidate_over_rescue_floor"
 
-low_importance_event = apply_fact_event_probe(
+low_importance_event = apply_event_probe(
     build("我在刷小红书"),
     {
         "status": "ok",
@@ -165,10 +165,10 @@ low_importance_event = apply_fact_event_probe(
         ],
     },
 )
-assert low_importance_event["final_budget"] == BUDGET_SHALLOW
-assert low_importance_event["typed_qualified_count"] == 0
+assert low_importance_event["final_budget"] == BUDGET_DEEP
+assert low_importance_event["typed_qualified_count"] == 1
 
-bare_address = apply_fact_event_probe(
+bare_address = apply_event_probe(
     build("哥哥"),
     {
         "status": "ok",
@@ -191,7 +191,7 @@ covered_budget = finalize_retrieval_budget(
     {"called": True, "floor_qualified_count": 0, "candidates": []},
 )
 assert covered_budget["skip_ready"] is True
-apply_fact_event_probe(
+apply_event_probe(
     covered_budget,
     {
         "status": "ok",

@@ -4818,8 +4818,7 @@ function getReflectionEventsByDate() {
   });
   Object.keys(byDate).forEach(function(date) {
     byDate[date].sort(function(a, b) {
-      return Number(b.importance || 0) - Number(a.importance || 0)
-        || String(a.created || '').localeCompare(String(b.created || ''));
+      return String(a.created || '').localeCompare(String(b.created || ''));
     });
   });
   return byDate;
@@ -4983,7 +4982,6 @@ function reflectionEventMeta(bucket) {
   var parts = [];
   if (bucket.source) parts.push(bucket.source);
   if (bucket.kind) parts.push(bucket.kind);
-  parts.push('重要度 ' + (bucket.importance || 0));
   return parts.map(function(part) { return '<span>' + esc(part) + '</span>'; }).join('');
 }
 
@@ -6883,7 +6881,6 @@ async function showDetail(id) {
         '<div class="field"><label>事件效价</label>V' + (meta.valence || 0.5).toFixed(2) + '</div>' +
         '<div class="field"><label>唤醒度</label>A' + (meta.arousal || 0.3).toFixed(2) + '</div>' +
         '<div class="field"><label>模型视角</label>' + (meta.model_valence != null ? 'V' + meta.model_valence.toFixed(2) : '—') + '</div>' +
-        '<div class="field"><label>重要度</label>' + (meta.importance || 5) + '/10</div>' +
         '<div class="field"><label>置信度</label>' + (meta.confidence != null ? meta.confidence.toFixed(2) : '—') + '</div>' +
         '<div class="field"><label>周期</label>' + esc(meta.period || '—') + '</div>' +
         '<div class="field"><label>日期</label>' +
@@ -8064,7 +8061,7 @@ async function runBreathDebug() {
     info.innerHTML =
       '<strong>权重配置</strong>&nbsp;' +
       'topic=<code>' + w.topic + '</code> emotion=<code>' + w.emotion + '</code> ' +
-      'time=<code>' + w.time + '</code> importance=<code>' + w.importance + '</code>' +
+      'time=<code>' + w.time + '</code>' +
       ' &nbsp;|&nbsp; 阈值=<code>' + data.threshold + '</code>' +
       ' &nbsp;|&nbsp; 候选=<code>' + data.total_candidates + '</code> 桶' +
       ' → 通过=<code>' + data.passed_count + '</code> 桶' +
@@ -8089,7 +8086,6 @@ async function runBreathDebug() {
       topic: '#2F4F4F',
       emotion: '#8B6A6A',
       time: '#9A7B4F',
-      importance: '#4A7C59',
     };
 
     results.innerHTML = data.results.map(function(r, i) {
@@ -9352,14 +9348,13 @@ async function loadImportResults() {
       <div id="ir-${escAttr(id)}" style="background:var(--surface);border-radius:12px;padding:14px;margin:8px 0;">
         <div style="display:flex;justify-content:space-between;align-items:center;">
           <b>${esc(b.name || id)}</b>
-          <span style="font-size:11px;color:var(--text-dim);">${esc(b.type || '')} | ${esc((b.domain||[]).join(','))} | imp:${esc(b.importance)}</span>
+          <span style="font-size:11px;color:var(--text-dim);">${esc(b.type || '')} | ${esc((b.domain||[]).join(','))}</span>
         </div>
         <p style="font-size:13px;margin:6px 0;white-space:pre-wrap;">${esc(b.content)}</p>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">${esc((b.tags||[]).map(t=>'#'+t).join(' '))}</div>
         <div style="display:flex;gap:8px;">
           <button onclick="reviewAction('${safeId}','pin')" title="固定为永久记忆">📌 固定</button>
           <button onclick="reviewAction('${safeId}','anchor')" title="标为长期锚点">⚓ Anchor</button>
-          <button onclick="reviewAction('${safeId}','important')" title="标为重要">⭐ 重要</button>
           <button onclick="reviewAction('${safeId}','noise')" title="标为噪声并resolve">🗑 噪声</button>
           <button onclick="if(confirm('确定删除？'))reviewAction('${safeId}','delete')" title="彻底删除" style="color:var(--negative);">✕ 删除</button>
         </div>
@@ -9391,7 +9386,6 @@ async function detectPatterns() {
         <div style="display:flex;gap:8px;">
           <button onclick="reviewAction('${firstId}','pin')">📌 固定</button>
           <button onclick="reviewAction('${firstId}','anchor')">⚓ Anchor</button>
-          <button onclick="reviewAction('${firstId}','important')">⭐ 重要</button>
           <button onclick="batchReview('${idsJson}','noise')">🗑 噪声</button>
         </div>
       </div>

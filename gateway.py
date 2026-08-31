@@ -117,7 +117,7 @@ from memory_recall.fact_event_lexical_shadow import FactEventLexicalShadowIndex
 from memory_recall.observed_entities import ObservedEntityShadowIndex
 from memory_recall.passage_shadow import PassageShadowIndex
 from memory_recall.retrieval_budget import (
-    apply_fact_event_probe,
+    apply_event_probe,
     build_retrieval_budget,
     finalize_retrieval_budget,
     optional_shallow_probe_allowed,
@@ -437,19 +437,9 @@ class GatewayService:
             passage_shadow_cfg.get("simulation_enabled"),
             True,
         )
-        self.passage_shadow_min_fact_importance = max(
-            1,
-            int(passage_shadow_cfg.get("min_fact_event_importance") or 3),
-        )
-        # Event importance is not a shadow eligibility gate. Every active Event
-        # may compete inside the Event lane; importance remains diagnostic only.
-        self.passage_shadow_min_event_importance = 1
         self.passage_shadow_auto_refresh_max_passages = max(
             0,
             min(20, int(passage_shadow_cfg.get("auto_refresh_max_passages", 3))),
-        )
-        self.passage_shadow_min_fact_event_importance = (
-            self.passage_shadow_min_fact_importance
         )
         typed_recall_cfg = config.get("typed_recall")
         typed_recall_cfg = typed_recall_cfg if isinstance(typed_recall_cfg, dict) else {}
@@ -686,7 +676,6 @@ class GatewayService:
 
         self.semantic_weight = float(self.gateway_cfg.get("semantic_weight", 0.45))
         self.keyword_weight = float(self.gateway_cfg.get("keyword_weight", 0.35))
-        self.importance_weight = float(self.gateway_cfg.get("importance_weight", 0.03))
         self.freshness_weight = float(self.gateway_cfg.get("freshness_weight", 0.03))
         self.recall_fusion_mode = self._normalize_recall_fusion_mode(
             self.gateway_cfg.get("recall_fusion_mode", "dynamic")
@@ -2428,20 +2417,13 @@ class GatewayService:
                 retrieval_budget,
             )
             finalize_retrieval_budget(retrieval_budget, sentinel_debug)
-            apply_fact_event_probe(
+            apply_event_probe(
                 retrieval_budget,
                 (
                     self.fact_event_semantic_index.search_by_embedding(
                         semantic_query_vector or [],
                         top_k=max(3, int(retrieval_budget.get("semantic_top_k") or 3)),
-                        min_importance_by_kind={
-                            "event": getattr(
-                                self, "passage_shadow_min_event_importance", 1
-                            ),
-                            "fact": getattr(
-                                self, "passage_shadow_min_fact_importance", 3
-                            ),
-                        },
+                        memory_kinds=("event",),
                     )
                     if hasattr(self, "fact_event_semantic_index")
                     else {
@@ -8294,10 +8276,7 @@ class GatewayService:
             and (bucket.get("metadata", {}).get("pinned") or bucket.get("metadata", {}).get("protected"))
         ]
         core_buckets.sort(
-            key=lambda bucket: (
-                int(bucket.get("metadata", {}).get("importance", 0)),
-                bucket.get("metadata", {}).get("last_active", ""),
-            ),
+            key=lambda bucket: bucket.get("metadata", {}).get("last_active", ""),
             reverse=True,
         )
         return await self._summarize_buckets(core_buckets, self.core_budget)
@@ -8772,18 +8751,14 @@ class GatewayService:
                 return True
         return False
 
-    def _date_recall_bucket_sort_key(self, bucket: dict) -> tuple[str, int]:
+    def _date_recall_bucket_sort_key(self, bucket: dict) -> str:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         date_value = ""
         for key in ("updated_at", "last_active", "created", "date"):
             raw = str(meta.get(key) or "")
             if raw > date_value:
                 date_value = raw
-        try:
-            importance = int(meta.get("importance", 5))
-        except (TypeError, ValueError):
-            importance = 5
-        return date_value, importance
+        return date_value
 
     def _local_date_key(self, value: Any) -> str:
         return local_date_key(value, tz=self.gateway_tz)
@@ -9266,7 +9241,7 @@ class GatewayService:
 
         active_pool = [bucket for bucket in candidates if bucket.get("id") not in recent_ids] or candidates
 
-        def favorite_key(bucket: dict) -> tuple[int, int, int, str]:
+        def favorite_key(bucket: dict) -> tuple[int, int, str]:
             meta = bucket.get("metadata", {})
             tags = [str(tag) for tag in meta.get("tags", [])]
             flavor_count = sum(1 for tag in tags if is_flavor_tag(tag))
@@ -9274,7 +9249,6 @@ class GatewayService:
             return (
                 protected,
                 flavor_count,
-                int(meta.get("importance", 5)),
                 str(meta.get("last_active") or meta.get("created") or ""),
             )
 
@@ -9472,7 +9446,6 @@ class GatewayService:
                     "name",
                     "tags",
                     "domain",
-                    "importance",
                     "type",
                     "pinned",
                     "protected",
@@ -9647,7 +9620,6 @@ class GatewayService:
             "bucket_type": meta.get("type") or "source",
             "bucket_tags": list(meta.get("tags") or []),
             "bucket_domain": list(meta.get("domain") or []),
-            "bucket_importance": meta.get("importance"),
             "bucket_date": meta.get("date"),
             "bucket_created": meta.get("created"),
             "bucket_updated_at": meta.get("updated_at") or meta.get("last_active"),
@@ -11814,11 +11786,6 @@ class GatewayService:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         if meta.get("pinned") or meta.get("protected") or meta.get("anchor"):
             return True
-        try:
-            if int(meta.get("importance", 5)) >= 9:
-                return True
-        except (TypeError, ValueError):
-            pass
         return has_favorite_memory_tag(meta.get("tags", []) or [], ai_name=self.identity.get("ai_name"))
 
     @staticmethod
@@ -13195,7 +13162,6 @@ class GatewayService:
                 continue
             item = dict(moment)
             meta = dict(item.get("metadata", {}) or {})
-            meta["importance"] = meta.get("bucket_importance", 5)
             meta["type"] = meta.get("bucket_type", "")
             meta["anchor"] = meta.get("bucket_anchor", False)
             meta["pinned"] = meta.get("bucket_pinned", False)
@@ -13958,13 +13924,6 @@ class GatewayService:
             if scene is not None
         ]
         active_fact_events = self._active_fact_event_shadow_items(self.fact_event_store)
-        eligible_facts = [
-            item
-            for item in active_fact_events
-            if str(item.get("item_type") or "") == "fact"
-            if int(item.get("importance") or 0)
-            >= self.passage_shadow_min_fact_importance
-        ]
         eligible_events = [
             item
             for item in active_fact_events
@@ -14042,8 +14001,7 @@ class GatewayService:
                 "decision_applied": False,
             }
         lexical_sync = self.fact_event_lexical_shadow_index.sync(
-            active_fact_events,
-            min_importance=1,
+            eligible_events,
         )
         fact_semantic_sync = await self.fact_event_semantic_index.sync(self.fact_event_store)
 
@@ -14147,7 +14105,6 @@ class GatewayService:
                 str(scene["id"]): {
                     "owner_kind": "scene",
                     "title": str(scene.get("title") or ""),
-                    "importance": None,
                     "body": str(scene.get("content") or ""),
                     "memory_date": str(scene.get("memory_date") or ""),
                 }
@@ -14157,7 +14114,7 @@ class GatewayService:
                 str(item.get("item_id") or ""): {
                     "owner_kind": str(item.get("item_type") or ""),
                     "title": str(item.get("title") or ""),
-                    "importance": int(item.get("importance") or 0),
+                    "recallable": item.get("recallable"),
                     "body": str(item.get("body") or ""),
                     "memory_date": str(
                         item.get("local_date") or item.get("source_started_at") or ""
@@ -14176,12 +14133,8 @@ class GatewayService:
             "scene_count": len(scenes),
             "eligible_event_count": len(eligible_events),
             "excluded_event_count": 0,
-            "eligible_fact_count": len(eligible_facts),
-            "excluded_fact_count": (
-                len(active_fact_events) - len(eligible_events) - len(eligible_facts)
-            ),
-            "min_event_importance": self.passage_shadow_min_event_importance,
-            "min_fact_importance": self.passage_shadow_min_fact_importance,
+            "eligible_fact_count": 0,
+            "excluded_fact_count": len(active_fact_events) - len(eligible_events),
             "decision_applied": False,
         }
 
@@ -14466,7 +14419,6 @@ class GatewayService:
             top_k=20,
             memory_kinds=("event",),
             allowed_memory_ids=(allowed_event_ids if scope_arc_key else None),
-            min_importance_by_kind={"event": self.passage_shadow_min_event_importance},
         )
         body_rows: list[dict[str, Any]] = []
         for match in fact_search.get("matches") or []:
@@ -14477,7 +14429,6 @@ class GatewayService:
                 "owner_kind": str(match.get("memory_kind") or ""),
                 "owner_id": item_id,
                 "score": float(match.get("score") or 0.0),
-                "importance": int(match.get("importance") or 0),
                 "passages": [{
                     "ordinal": 0,
                     "start_offset": 0,
@@ -14494,7 +14445,6 @@ class GatewayService:
             top_k=20,
             memory_kinds=("event",),
             allowed_memory_ids=(allowed_event_ids if scope_arc_key else None),
-            min_importance_by_kind={"event": self.passage_shadow_min_event_importance},
         )
         lexical_rows = list(lexical_search.get("matches") or [])
         scene_lane = build_scene_lane(scene_passage_rows, cue_rows, scene_whole_rows)
@@ -14505,8 +14455,7 @@ class GatewayService:
                 item = catalog.get(str(row.get("owner_id") or "")) or {}
                 row["title"] = str(item.get("title") or "")
                 row["memory_date"] = str(item.get("memory_date") or "")
-                if row.get("importance") is None:
-                    row["importance"] = item.get("importance")
+                row["recallable"] = item.get("recallable")
             return rerank_lane_with_freshness(rows, query=query)
 
         scene_lane = decorate_lane(scene_lane)
@@ -14524,8 +14473,7 @@ class GatewayService:
         for row in pool:
             item = catalog.get(str(row.get("owner_id") or "")) or {}
             row["title"] = str(item.get("title") or "")
-            if row.get("importance") is None:
-                row["importance"] = item.get("importance")
+            row["recallable"] = item.get("recallable")
             cards = [
                 dict(card)
                 for arc_key in sorted(
@@ -14575,7 +14523,6 @@ class GatewayService:
                 "scope_arc_key": scope_arc_key,
                 "global_specific_terms": specific_global_terms,
                 "event_eligibility": "all_active",
-                "min_event_importance": self.passage_shadow_min_event_importance,
             },
             "lanes": {
                 "scene": {
@@ -14658,7 +14605,11 @@ class GatewayService:
                 event = self.fact_event_store.read(event_id, include_sources=False)
             except ValueError:
                 event = None
-            if not event or str(event.get("item_type") or "") != "event":
+            if (
+                not event
+                or str(event.get("item_type") or "") != "event"
+                or event.get("recallable") is not True
+            ):
                 continue
             materials.append(
                 {
@@ -14790,6 +14741,21 @@ class GatewayService:
             dict(row)
             for row in candidate_result.get("candidates") or []
             if isinstance(row, dict) and self._typed_owner_ref(row)
+        ]
+        catalog = getattr(self, "_passage_candidate_shadow_catalog", {})
+        excluded_event_refs_by_recallable = [
+            self._typed_owner_ref(row)
+            for row in candidates
+            if str(row.get("owner_kind") or "") == "event"
+            and (catalog.get(str(row.get("owner_id") or "")) or {}).get("recallable")
+            is not True
+        ]
+        candidates = [
+            row
+            for row in candidates
+            if str(row.get("owner_kind") or "") != "event"
+            or (catalog.get(str(row.get("owner_id") or "")) or {}).get("recallable")
+            is True
         ]
         admission = evaluate_typed_admission_shadow(query, scope, candidates)
         if admission.get("mode") == "direct_evidence_rerank" and candidates:
@@ -14948,6 +14914,7 @@ class GatewayService:
             },
             "entity_scope": scope,
             "candidate_count": len(candidates),
+            "excluded_event_refs_by_recallable": excluded_event_refs_by_recallable,
             "narrative_body_included": False,
             "raw_source_query_enabled": False,
         }
@@ -15072,9 +15039,6 @@ class GatewayService:
                 query_embedding,
                 top_k=max(10, limit),
                 memory_kinds=("event",),
-                min_importance_by_kind={
-                    "event": getattr(self, "passage_shadow_min_event_importance", 1)
-                },
                 allowed_memory_ids=allowed_event_ids,
             )
             if fact_event_semantic_index is not None
@@ -15119,8 +15083,7 @@ class GatewayService:
         for row in rows:
             item = catalog.get(str(row.get("owner_id") or "")) or {}
             row["title"] = str(item.get("title") or "")
-            if row.get("importance") is None:
-                row["importance"] = item.get("importance")
+            row["recallable"] = item.get("recallable")
         return {
             "status": "ok",
             "scene_passage": scene_passage_search,
@@ -17530,7 +17493,6 @@ class GatewayService:
                 continue
             meta = bucket.get("metadata", {})
             freshness_score = self._clamp(self.bucket_mgr._calc_time_score(meta))
-            importance_score = self._clamp(float(meta.get("importance", 5)) / 10.0)
             semantic_score = self._clamp(semantic_scores.get(bucket_id, 0.0))
             keyword_score = self._clamp(keyword_scores.get(bucket_id, 0.0))
             exact_score = self._clamp(exact_scores.get(bucket_id, 0.0))
@@ -17612,7 +17574,7 @@ class GatewayService:
                 )
             elif self.recall_fusion_mode == "dynamic":
                 fusion_score = self._clamp((alpha * vector_norm + (1.0 - alpha) * keyword_norm) * relevance_score)
-                metadata_adjustment = round(0.02 * importance_score + 0.02 * freshness_score, 4)
+                metadata_adjustment = round(0.02 * freshness_score, 4)
                 cooldown_penalty = round((1.0 - self._clamp(cooldown_multiplier)) * 0.03, 4)
                 final_score = round(
                     self._clamp(
@@ -17626,7 +17588,6 @@ class GatewayService:
                 fusion_score = (
                     semantic_score * self.semantic_weight
                     + self._clamp(keyword_basis.get(bucket_id, 0.0)) * self.keyword_weight
-                    + importance_score * self.importance_weight
                     + freshness_score * self.freshness_weight
                 ) * relevance_score
                 final_score = round(fusion_score * cooldown_multiplier, 4)
@@ -17680,7 +17641,6 @@ class GatewayService:
                         else self._canonical_scene_semantic_threshold(bucket)
                     ),
                     "semantic_route_guard": scene_route_guard,
-                    "importance_score": importance_score,
                     "freshness_score": freshness_score,
                     "cooldown_multiplier": cooldown_multiplier,
                     "fusion_mode": "scene_absolute" if canonical_scene else self.recall_fusion_mode,
@@ -22876,7 +22836,6 @@ class GatewayService:
                 "bucket_type": meta.get("type") or "dynamic",
                 "bucket_tags": list(meta.get("tags") or []),
                 "bucket_domain": list(meta.get("domain") or []),
-                "bucket_importance": meta.get("importance"),
                 "bucket_date": meta.get("date"),
                 "bucket_created": meta.get("created"),
                 "bucket_updated_at": meta.get("updated_at") or meta.get("last_active"),

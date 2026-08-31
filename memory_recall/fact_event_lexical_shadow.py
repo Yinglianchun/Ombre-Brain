@@ -16,7 +16,7 @@ from typing import Any, Iterable
 import jieba
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 FIELD_WEIGHTS = {"title": 1.5, "atomic_question": 2.0, "body": 1.0}
 
 
@@ -52,7 +52,6 @@ def _source_hash(item: dict[str, Any]) -> str:
         "title": str(item.get("title") or ""),
         "atomic_question": str(item.get("atomic_question") or ""),
         "body": str(item.get("body") or ""),
-        "importance": int(item.get("importance") or 0),
     }
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -122,12 +121,12 @@ class FactEventLexicalShadowIndex:
         items: Iterable[dict[str, Any]],
         min_importance: int,
     ) -> list[dict[str, Any]]:
+        _ = min_importance
         return [
             item
             for item in items
-            if str(item.get("item_type") or "") in {"fact", "event"}
+            if str(item.get("item_type") or "") == "event"
             and str(item.get("status") or "active") == "active"
-            and int(item.get("importance") or 0) >= min_importance
             and str(item.get("item_id") or "")
             and str(item.get("body") or "").strip()
         ]
@@ -172,7 +171,6 @@ class FactEventLexicalShadowIndex:
         ]
         result = {
             "status": "dry_run" if dry_run else "ok",
-            "min_importance": max(1, int(min_importance or 1)),
             "eligible": len(eligible),
             "to_index": len(pending),
             "stale_rows": len(stale_ids),
@@ -201,7 +199,7 @@ class FactEventLexicalShadowIndex:
                         item_id,
                         str(item.get("item_type") or ""),
                         _source_hash(item),
-                        int(item.get("importance") or 0),
+                        1,
                         str(item.get("title") or ""),
                         str(item.get("atomic_question") or ""),
                         str(item.get("body") or ""),
@@ -248,7 +246,7 @@ class FactEventLexicalShadowIndex:
         query: str,
         *,
         top_k: int = 10,
-        memory_kinds: Iterable[str] = ("fact", "event"),
+        memory_kinds: Iterable[str] = ("event",),
         min_importance: int = 1,
         min_importance_by_kind: dict[str, int] | None = None,
         allowed_memory_ids: Iterable[str] | None = None,
@@ -260,17 +258,10 @@ class FactEventLexicalShadowIndex:
             return {"status": "unavailable", "reason": "index_missing", "matches": []}
         kinds = {
             str(value or "").strip().lower() for value in memory_kinds
-        }.intersection({"fact", "event"})
+        }.intersection({"event"})
         if not kinds:
             return {"status": "ok", "candidate_count": 0, "matches": []}
-        default_min_importance = max(1, int(min_importance or 1))
-        importance_floor = {
-            kind: max(
-                1,
-                int((min_importance_by_kind or {}).get(kind, default_min_importance) or 1),
-            )
-            for kind in kinds
-        }
+        _ = min_importance, min_importance_by_kind
         allowed_ids = (
             {
                 str(value or "").strip()
@@ -314,8 +305,6 @@ class FactEventLexicalShadowIndex:
                 continue
             if allowed_ids is not None and str(row["item_id"]) not in allowed_ids:
                 continue
-            if int(row["importance"] or 0) < importance_floor[item_type]:
-                continue
             term = str(row["term"])
             df = stats.get(term, n_docs)
             tf = float(row["weighted_tf"] or 0.0)
@@ -328,7 +317,6 @@ class FactEventLexicalShadowIndex:
                 {
                     "owner_kind": str(row["item_type"]),
                     "owner_id": str(row["item_id"]),
-                    "importance": int(row["importance"] or 0),
                     "score": 0.0,
                     "matched_terms": [],
                     "specific_terms": [],
@@ -374,7 +362,6 @@ class FactEventLexicalShadowIndex:
             "corpus_documents": n_docs,
             "query_terms": query_terms,
             "matches": output,
-            "min_importance_by_kind": importance_floor,
             "candidate_only": True,
             "decision_applied": False,
         }

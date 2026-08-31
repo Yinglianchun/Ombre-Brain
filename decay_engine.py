@@ -7,7 +7,7 @@
 #
 # Core formula (P1 source-record lifecycle):
 # 核心公式（P1 事实真源生命周期）：
-#   Score = Importance × (activation_count^0.3) × e^(-λ×days) × freshness
+#   Score = 5 × (activation_count^0.3) × e^(-λ×days) × freshness
 # Legacy valence/arousal fields never affect retention or urgency.
 # 旧 valence/arousal 字段不再影响保留时长或紧迫度。
 #
@@ -95,13 +95,13 @@ class DecayEngine:
         Calculate current activity score for a memory bucket.
         计算一个记忆桶的当前活跃度得分。
 
-        P1 model: retention depends on explicit importance, use and time only.
-        P1：保留分数只取决于显式重要度、使用次数和时间。
+        Retention depends on use and time. The fixed base preserves the old
+        default scale without letting retired importance metadata affect it.
         """
         if not isinstance(metadata, dict):
             return 0.0
 
-        # --- Pinned/protected buckets: never decay, importance locked to 10 ---
+        # --- Pinned/protected buckets: never decay ---
         if metadata.get("pinned") or metadata.get("protected"):
             return 999.0
 
@@ -113,7 +113,6 @@ class DecayEngine:
         if metadata.get("type") == "feel":
             return 50.0
 
-        importance = max(1, min(10, int(metadata.get("importance", 5))))
         activation_count = max(1, int(metadata.get("activation_count", 1)))
 
         # --- Days since last activation ---
@@ -129,7 +128,7 @@ class DecayEngine:
 
         # --- Base score ---
         base_score = (
-            importance
+            5.0
             * (activation_count ** 0.3)
             * math.exp(-self.decay_lambda * days_since)
             * time_weight
@@ -185,27 +184,8 @@ class DecayEngine:
 
             checked += 1
 
-            # --- Auto-resolve: imp≤4 + >30 days old + not resolved → auto resolve ---
-            # --- 自动结案：重要度≤4 + 超过30天 + 未解决 → 自动 resolve ---
-            if not meta.get("resolved", False):
-                imp = int(meta.get("importance", 5))
-                last_active_str = meta.get("last_active", meta.get("created", ""))
-                try:
-                    last_active = self._parse_datetime(last_active_str)
-                    days_since = (self._now_naive_utc() - last_active).total_seconds() / 86400
-                except (ValueError, TypeError):
-                    days_since = 999
-                if imp <= 4 and days_since > 30:
-                    try:
-                        await self.bucket_mgr.update(bucket["id"], resolved=True)
-                        auto_resolved += 1
-                        logger.info(
-                            f"Auto-resolved / 自动结案: "
-                            f"{meta.get('name', bucket['id'])} "
-                            f"(imp={imp}, days={days_since:.0f})"
-                        )
-                    except Exception as e:
-                        logger.warning(f"Auto-resolve failed / 自动结案失败: {e}")
+            # Automatic resolution used to depend on importance. With that
+            # field retired, resolution stays an explicit lifecycle decision.
 
             try:
                 score = self.calculate_score(meta)

@@ -499,11 +499,15 @@ function normalizeSimulationTelemetrySnapshot(input, options = {}) {
     : budget.cue_semantic && typeof budget.cue_semantic === "object"
       ? budget.cue_semantic
       : {};
-  const factEventProbe = budget.factEventProbe && typeof budget.factEventProbe === "object"
-    ? budget.factEventProbe
-    : budget.fact_event_probe && typeof budget.fact_event_probe === "object"
-      ? budget.fact_event_probe
-      : {};
+  const eventProbe = budget.eventProbe && typeof budget.eventProbe === "object"
+    ? budget.eventProbe
+    : budget.event_probe && typeof budget.event_probe === "object"
+      ? budget.event_probe
+      : budget.factEventProbe && typeof budget.factEventProbe === "object"
+        ? budget.factEventProbe
+        : budget.fact_event_probe && typeof budget.fact_event_probe === "object"
+          ? budget.fact_event_probe
+          : {};
   const rerank = budget.rerank && typeof budget.rerank === "object" ? budget.rerank : {};
   const episodeVerifier = budget.episodeVerifier && typeof budget.episodeVerifier === "object"
     ? budget.episodeVerifier
@@ -583,23 +587,22 @@ function normalizeSimulationTelemetrySnapshot(input, options = {}) {
         candidateCount: nullableNonNegativeInteger(cueSemantic.candidate_count),
         datasetVersion: cleanText(cueSemantic.dataset_version) || null,
       },
-      factEventProbe: {
-        status: cleanText(factEventProbe.status) || null,
-        reason: cleanText(factEventProbe.reason) || null,
-        candidateCount: nullableNonNegativeInteger(factEventProbe.candidate_count),
-        matches: (Array.isArray(factEventProbe.matches) ? factEventProbe.matches : [])
+      eventProbe: {
+        status: cleanText(eventProbe.status) || null,
+        reason: cleanText(eventProbe.reason) || null,
+        candidateCount: nullableNonNegativeInteger(eventProbe.candidate_count),
+        matches: (Array.isArray(eventProbe.matches) ? eventProbe.matches : [])
           .map((item) => ({
             memoryId: cleanText(item?.memory_id || item?.memoryId) || null,
             memoryKind: cleanText(item?.memory_kind || item?.memoryKind) || null,
             score: nullableNumber(item?.score),
-            importance: nullableNonNegativeInteger(item?.importance),
             localDate: cleanText(item?.local_date || item?.localDate) || null,
             localStartTime: cleanText(item?.local_start_time || item?.localStartTime) || null,
             coveredBySceneId: cleanText(
               item?.covered_by_scene_id || item?.coveredBySceneId,
             ) || null,
           }))
-          .filter((item) => item.memoryId && ["fact", "event"].includes(item.memoryKind))
+          .filter((item) => item.memoryId && item.memoryKind === "event")
           .slice(0, 12),
       },
       rerank: {

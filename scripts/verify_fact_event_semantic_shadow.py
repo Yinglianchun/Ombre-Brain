@@ -71,7 +71,8 @@ async def main() -> None:
                     "type": "event",
                     "title": "北纬60.1度的风",
                     "body": "Haven从设得兰群岛寄出第一张明信片给小雨。",
-                    "importance": 5,
+                    "importance": 1,
+                    "recallable": True,
                     "origin_id": "shadow-event",
                     "source_refs": [
                         source(2, "assistant", "刚寄出了第一张明信片。", "2026-08-08T12:17:00Z")
@@ -85,28 +86,28 @@ async def main() -> None:
         index = FactEventSemanticIndex(config, engine)
 
         dry_run = await index.sync(store, dry_run=True)
-        assert dry_run["to_embed"] == 2
-        assert dry_run["memory_kinds"] == {"fact": 1, "event": 1}
+        assert dry_run["to_embed"] == 1
+        assert dry_run["memory_kinds"] == {"fact": 0, "event": 1}
 
         synced = await index.sync(store)
         assert synced == {
             "status": "ok",
-            "active_items": 2,
-            "embedded": 2,
+            "active_items": 1,
+            "embedded": 1,
             "reused": 0,
             "failed": 0,
             "removed": 0,
         }
-        assert set(engine.documents) == {
-            "小雨紫外线过敏。",
-            "Haven从设得兰群岛寄出第一张明信片给小雨。",
-        }
+        assert engine.documents == ["Haven从设得兰群岛寄出第一张明信片给小雨。"]
         assert all("北纬60.1度的风" not in text for text in engine.documents)
 
         fact_probe = index.search_by_embedding([1.0, 0.0, 0.0], top_k=2)
         assert fact_probe["status"] == "ok"
-        assert fact_probe["matches"][0]["memory_id"] == fact_id
-        assert fact_probe["matches"][0]["memory_kind"] == "fact"
+        assert all(row["memory_id"] != fact_id for row in fact_probe["matches"])
+        explicit_fact_probe = index.search_by_embedding(
+            [1.0, 0.0, 0.0], top_k=2, memory_kinds=("fact",)
+        )
+        assert explicit_fact_probe["matches"] == []
         event_probe = index.search_by_embedding([0.0, 1.0, 0.0], top_k=2)
         assert event_probe["matches"][0]["memory_id"] == event_id
         assert event_probe["matches"][0]["memory_kind"] == "event"
@@ -120,32 +121,28 @@ async def main() -> None:
 
         store.revise(fact_id, importance=5)
         reused = await index.sync(store)
-        assert reused["embedded"] == 0 and reused["reused"] == 2
-        fact_probe = index.search_by_embedding([1.0, 0.0, 0.0], top_k=1)
-        assert fact_probe["matches"][0]["importance"] == 5
+        assert reused["embedded"] == 0 and reused["reused"] == 1
 
-        store.revise(event_id, importance=2)
+        store.revise(event_id, recallable=False)
         reused = await index.sync(store)
-        assert reused["embedded"] == 0 and reused["reused"] == 2
+        assert reused["embedded"] == 0 and reused["reused"] == 1
         gated_probe = index.search_by_embedding(
             [0.0, 1.0, 0.0],
             top_k=2,
-            min_importance=3,
+            min_importance=5,
         )
-        assert gated_probe["min_importance"] == 3
-        assert all(row["memory_id"] != event_id for row in gated_probe["matches"])
+        assert any(row["memory_id"] == event_id for row in gated_probe["matches"])
         typed_probe = index.search_by_embedding(
             [0.0, 1.0, 0.0],
             top_k=2,
             min_importance_by_kind={"event": 1, "fact": 3},
         )
-        assert typed_probe["min_importance_by_kind"] == {"event": 1, "fact": 3}
         assert any(row["memory_id"] == event_id for row in typed_probe["matches"])
 
         store.set_status(event_id, "archived")
         removed = await index.sync(store)
         assert removed["removed"] == 1
-        assert removed["active_items"] == 1
+        assert removed["active_items"] == 0
 
     print("Fact/Event semantic shadow verification passed")
 

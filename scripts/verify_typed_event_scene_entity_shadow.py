@@ -136,7 +136,7 @@ def verify_lexical_kind_floor() -> None:
                 min_importance_by_kind={"event": 1, "fact": 1},
                 allowed_memory_ids={"fact-low"},
             )
-            assert [row["owner_id"] for row in scoped["matches"]] == ["fact-low"], scoped
+            assert scoped["matches"] == [], scoped
     finally:
         lexical_module.lexical_terms = original
 
