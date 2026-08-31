@@ -228,7 +228,9 @@ can be resolved. An unscoped `present_chitchat` or `present_reality` query whose
 semantic action is `skip` stops there when it has no explicit recall language or
 exact/entity anchor. Its candidate shadow remains observable, but it makes no
 reranker call and injects no typed memory. Scoped queries and explicit recall
-queries bypass this surface gate.
+queries bypass this surface gate. One unconfirmed planner entity is not enough
+to bypass it; a confirmed Arc scope, an explicit phrase/exact/reference anchor,
+or at least two planner entity facets is required.
 
 An admitted owner with no uniquely confirmed Arc carries only the fixed hint
 `可能是你的相关记忆，若无关可忽略`. An admitted owner with a unique Arc carries

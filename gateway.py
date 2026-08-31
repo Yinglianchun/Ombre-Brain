@@ -14744,11 +14744,16 @@ class GatewayService:
             for facet in retrieval_budget.get("query_facets") or []
             if isinstance(facet, dict)
         ]
+        entity_facets = [
+            facet
+            for facet in query_facets
+            if str(facet.get("kind") or "") == "entity"
+        ]
         has_anchor = bool(
-            retrieval_budget.get("anchor_override")
+            len(entity_facets) >= 2
             or any(
                 str(facet.get("kind") or "")
-                in {"entity", "protected_phrase", "exact_anchor", "reference_entity"}
+                in {"protected_phrase", "exact_anchor", "reference_entity"}
                 for facet in query_facets
             )
         )
