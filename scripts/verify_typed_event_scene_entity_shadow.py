@@ -12,7 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from memory_recall.observed_entities import ObservedEntityShadowIndex
+from memory_recall.observed_entities import (
+    ObservedEntityShadowIndex,
+    extract_observed_entities,
+)
 from memory_recall import fact_event_lexical_shadow as lexical_module
 from memory_recall.typed_candidate_shadow import (
     balanced_typed_pool,
@@ -139,6 +142,18 @@ def verify_lexical_kind_floor() -> None:
 
 
 def verify_observed_entities_and_scope() -> None:
+    fragment_rows = extract_observed_entities(
+        [source("fragment", "阿尼亚抱着玩偶，后来阿尼亚又出现了。")],
+        known_terms={},
+        stop_keys=frozenset(),
+    )
+    fragment = next(
+        (row for row in fragment_rows if row["entity_text"] == "尼亚"),
+        None,
+    )
+    if fragment is not None:
+        assert fragment["scope_eligible"] is False, fragment
+
     with tempfile.TemporaryDirectory(prefix="observed-entity-shadow-") as temp_dir:
         config = {
             "state_dir": str(Path(temp_dir) / "state"),

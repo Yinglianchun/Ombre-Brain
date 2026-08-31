@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover - reduced runtimes may ship jieba without 
     jieba_posseg = None
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _DYNAMIC_POS = frozenset({"nr", "ns", "nt", "nz", "eng"})
 _QUOTED_WORK = re.compile(r"《([^》]{2,40})》")
 _QUOTED_NAME = re.compile(r"[“「『]([^”」』]{2,24})[”」』]")
@@ -224,6 +224,40 @@ def _entity_surface_shape(
     )
 
 
+def _consistently_embedded_name_fragment(
+    value: str,
+    sources: Iterable[dict[str, Any]],
+) -> bool:
+    """Reject a jieba person-name suffix/prefix that never occurs on its own.
+
+    A common failure is segmenting ``阿尼亚`` as ``阿`` + ``尼亚``.  If every
+    observed occurrence has the same adjacent Han character, the shorter token
+    is too weak to become an Arc scope anchor.  The observation itself remains
+    available in the audit sidecar.
+    """
+
+    spans: list[tuple[str | None, str | None]] = []
+    for source in sources:
+        content = str(source.get("content") or "")
+        for start, end in _term_spans(content, value):
+            before = content[start - 1] if start > 0 else None
+            after = content[end] if end < len(content) else None
+            spans.append((before, after))
+    if len(spans) < 2:
+        return False
+
+    def same_han(values: list[str | None]) -> bool:
+        return bool(
+            values
+            and all(char is not None and re.fullmatch(r"[\u3400-\u9fff]", char) for char in values)
+            and len(set(values)) == 1
+        )
+
+    return same_han([before for before, _ in spans]) or same_han(
+        [after for _, after in spans]
+    )
+
+
 def extract_observed_entities(
     source_refs: Iterable[dict[str, Any]],
     *,
@@ -313,6 +347,10 @@ def extract_observed_entities(
             entity_key != known_key and entity_key in known_key
             for known_key in known_terms
         )
+        embedded_name_fragment = bool(
+            proper_name
+            and _consistently_embedded_name_fragment(entity_text, sources)
+        )
         quoted_named_term = bool(
             "quoted_name" in kinds
             and _entity_surface_shape(entity_text, min_chars=3, max_chars=8)
@@ -323,6 +361,7 @@ def extract_observed_entities(
             or (
                 proper_name
                 and not fragment_of_known_entity
+                and not embedded_name_fragment
                 and _entity_surface_shape(entity_text, max_chars=12)
             )
             or quoted_named_term
