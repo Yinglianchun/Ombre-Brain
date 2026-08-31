@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover - reduced runtimes may ship jieba without 
     jieba_posseg = None
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _DYNAMIC_POS = frozenset({"nr", "ns", "nt", "nz", "eng"})
 _QUOTED_WORK = re.compile(r"《([^》]{2,40})》")
 _QUOTED_NAME = re.compile(r"[“「『]([^”」』]{2,24})[”」』]")
@@ -209,11 +209,18 @@ def _dynamic_terms(text: str) -> dict[str, set[str]]:
     return output
 
 
-def _entity_surface_shape(value: str, *, max_chars: int) -> bool:
+def _entity_surface_shape(
+    value: str,
+    *,
+    min_chars: int = 2,
+    max_chars: int,
+) -> bool:
     text = _surface(value)
+    compact = _key(text)
     return bool(
-        2 <= len(text) <= max_chars
+        min_chars <= len(text) <= max_chars
         and not re.search(r"[\s，。！？!?；;：:,、]", text)
+        and len(set(compact)) > 1
     )
 
 
@@ -302,14 +309,22 @@ def extract_observed_entities(
             basis = "known_arc_title"
         kinds = discovery_kinds.get(entity_key) or set()
         proper_name = bool(kinds.intersection({"jieba_nr", "jieba_ns", "jieba_nt"}))
+        fragment_of_known_entity = any(
+            entity_key != known_key and entity_key in known_key
+            for known_key in known_terms
+        )
         quoted_named_term = bool(
             "quoted_name" in kinds
-            and _entity_surface_shape(entity_text, max_chars=8)
+            and _entity_surface_shape(entity_text, min_chars=3, max_chars=8)
         )
         scope_eligible = bool(
             explicit_work
             or mentioned_known_title
-            or (proper_name and _entity_surface_shape(entity_text, max_chars=12))
+            or (
+                proper_name
+                and not fragment_of_known_entity
+                and _entity_surface_shape(entity_text, max_chars=12)
+            )
             or quoted_named_term
         )
         rows.append(

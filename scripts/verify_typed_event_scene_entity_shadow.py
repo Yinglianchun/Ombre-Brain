@@ -171,12 +171,12 @@ def verify_observed_entities_and_scope() -> None:
             {
                 "owner_kind": "scene",
                 "owner_id": "scene-spy",
-                "source_refs": [source("1", "“奇美拉”玩偶出现了，后来又提到“奇美拉”。“在本地的codex好萌啊TT”这句话又写成“在本地的codex好萌啊TT”。")],
+                "source_refs": [source("1", "“奇美拉”玩偶出现了，后来又提到“奇美拉”。“正确”又被说成“正确”。“在本地的codex好萌啊TT”这句话又写成“在本地的codex好萌啊TT”。")],
             },
             {
                 "owner_kind": "event",
                 "owner_id": "event-spy",
-                "source_refs": [source("2", "阿尼亚抱着“奇美拉”，还说最喜欢奇美拉。“在本地的codex好萌啊TT”被重复成“在本地的codex好萌啊TT”。")],
+                "source_refs": [source("2", "阿尼亚抱着“奇美拉”，还说最喜欢奇美拉。“正确”再次被说成“正确”。“在本地的codex好萌啊TT”被重复成“在本地的codex好萌啊TT”。")],
             },
             {
                 "owner_kind": "event",
@@ -260,6 +260,9 @@ def verify_observed_entities_and_scope() -> None:
 
         long_quote = index.resolve_query("在本地的codex好萌啊TT后来怎么发展")
         assert long_quote["status"] == "insufficient_scope", long_quote
+
+        quoted_predicate = index.resolve_query("正确后来怎么发展")
+        assert quoted_predicate["status"] == "insufficient_scope", quoted_predicate
 
         self_proof = index.resolve_query("邦德曼后来怎么发展")
         assert self_proof["status"] == "insufficient_scope", self_proof
