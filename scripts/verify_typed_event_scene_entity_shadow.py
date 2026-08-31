@@ -207,6 +207,12 @@ def verify_observed_entities_and_scope() -> None:
         assert result["canonical_writes"] is False, result
         assert result["source_text_queryable"] is False, result
 
+        unrelated = {
+            row["entity"] for row in index.owner_entities("event", "event-loner")
+        }
+        assert "间谍过家家" not in unrelated, unrelated
+        assert "SPY×FAMILY" not in unrelated, unrelated
+
         no_op = index.sync(owners=owners, arc_profiles=arcs)
         assert no_op["owners_extracted"] == 0, no_op
         assert no_op["owners_unchanged"] == len(owners), no_op

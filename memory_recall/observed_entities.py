@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover - reduced runtimes may ship jieba without 
     jieba_posseg = None
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _DYNAMIC_POS = frozenset({"nr", "ns", "nt", "nz", "eng"})
 _QUOTED_WORK = re.compile(r"《([^》]{2,40})》")
 _QUOTED_NAME = re.compile(r"[“「『]([^”」』]{2,24})[”」』]")
@@ -276,7 +276,8 @@ def extract_observed_entities(
         known = known_terms.get(entity_key) or {}
         known_title = bool(set(known.get("roles") or []).intersection({"title", "title_alias"}))
         repeated = total >= 2 or support_sources >= 2
-        if not (repeated or explicit_work or known_title):
+        mentioned_known_title = known_title and total >= 1
+        if not (repeated or explicit_work or mentioned_known_title):
             continue
         if explicit_work:
             basis = "explicit_work_title"
