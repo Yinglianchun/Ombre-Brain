@@ -106,6 +106,7 @@ from memory_edges import (
 from entity_edges import EntityEdgeStore, extract_entity_edges_from_bucket
 from memory_moments import MemoryMomentStore, parse_bucket_moments
 from memory_recall.fact_event_semantic import FactEventSemanticIndex
+from memory_recall.observed_entities import ObservedEntityShadowIndex
 from memory_recall.passage_shadow import PassageShadowIndex
 from memory_relevance import (
     active_facets,
@@ -261,6 +262,7 @@ gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gat
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
 reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
 narrative_roll_store = NarrativeRollStore(config)          # Reviewed sourced Narrative Projection arcs / 审阅后发布的叙事卷
+observed_entity_shadow_index = ObservedEntityShadowIndex(config) # Rebuildable read-only entity-to-Arc scope index
 narrative_revision_inbox_store = NarrativeRevisionInbox(config) # Derived source-to-roll review queue / 派生叙事修订箱
 scene_evidence_store = SceneEvidenceStore(config)           # Independent Scene/source evidence sidecar / Scene 原文证据旁路索引
 fact_event_store = FactEventStore(config)                    # Canonical raw-source Fact/Event store / 原文绑定事实与事件主存储
@@ -8694,6 +8696,56 @@ async def list_buckets_light(
 async def narrative_rolls(query: str = "", limit: int = 20) -> dict:
     """只读搜索叙事卷索引；返回标题、时间范围、状态、实体与 narrative_id，不返回正文。按卷名或实体找卷；精确日期/原话仍应读 Scene、Event 或 raw。"""
     return narrative_roll_store.list(query=query, limit=limit)
+
+
+@mcp.tool()
+async def find_arc(query: str, limit: int = 5) -> dict:
+    """按 Arc 标题、别名或已确认实体查询轻卡，不读取叙事正文。返回 narrative_id 后，可按需用 read_memory 精确读取 narrative。"""
+    result = narrative_roll_store.find_arc_cards(query=query, limit=limit)
+    if result.get("status") != "ok":
+        return result
+    scope = observed_entity_shadow_index.resolve_query(query)
+    scope_arc_key = str((scope.get("scope_anchor") or {}).get("arc_key") or "")
+    if scope_arc_key:
+        scoped = narrative_roll_store.arc_card_by_key(scope_arc_key)
+        scoped_item = dict(scoped.get("item") or {})
+        if scoped_item:
+            scoped_item.update(match_reason="observed_entity_scope", match_score=0.92)
+            existing = {
+                str(item.get("arc_key") or ""): item
+                for item in result.get("items") or []
+            }
+            existing.setdefault(scope_arc_key, scoped_item)
+            result = {
+                **result,
+                "items": sorted(
+                    existing.values(),
+                    key=lambda item: (
+                        -float(item.get("match_score") or 0.0),
+                        str(item.get("title") or ""),
+                    ),
+                )[: max(1, min(int(limit or 5), 10))],
+                "count": len(existing),
+                "entity_scope": scope,
+            }
+    items = []
+    for item in result.get("items") or []:
+        arc_key = str(item.get("arc_key") or "")
+        arc = narrative_roll_store.read_by_arc_key(arc_key)
+        direct_event_ids = set(arc.get("linked_event_ids") or [])
+        automatic_count = sum(
+            1
+            for link in fact_event_store.arc_event_links(arc_key)
+            if str(link.get("event_id") or "") not in direct_event_ids
+        )
+        items.append(
+            {
+                **item,
+                "automatic_linked_event_count": automatic_count,
+                "member_count": int(item.get("member_count") or 0) + automatic_count,
+            }
+        )
+    return {**result, "items": items}
 
 
 async def _read_narrative_memory(narrative_id: str) -> dict:

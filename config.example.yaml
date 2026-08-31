@@ -166,12 +166,16 @@ embedding:
 # scripts. They never admit or inject a memory or become canonical objects.
 passage_shadow:
   simulation_enabled: true       # explicit simulator only; never changes admission or injection
+  min_owner_chars: 200           # <= 200 chars stay whole-only; longer owners may split
   target_chars: 160
   max_chars: 240
   min_chars: 40
   overlap_sentences: 1
   embedding_concurrency: 6
-  min_fact_event_importance: 3   # filter before any Fact/Event candidate scoring
+  auto_refresh_max_passages: 3    # mutation refresh only; startup warm is always plan-only
+  backfill_embedding_concurrency: 2
+  backfill_request_delay_ms: 150  # explicit atomic backfill only
+  min_fact_event_importance: 3   # legacy Fact floor; every active Event remains shadow-eligible
 
 cue_passage_shadow:
   concurrency: 4                  # changed Scenes bound in parallel during an explicit rebuild

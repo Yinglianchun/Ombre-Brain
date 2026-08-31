@@ -108,6 +108,7 @@ from memory_recall.cue_semantic import (
 )
 from memory_recall.fact_event_semantic import FactEventSemanticIndex
 from memory_recall.fact_event_lexical_shadow import FactEventLexicalShadowIndex
+from memory_recall.observed_entities import ObservedEntityShadowIndex
 from memory_recall.passage_shadow import PassageShadowIndex
 from memory_recall.retrieval_budget import (
     apply_fact_event_probe,
@@ -116,6 +117,12 @@ from memory_recall.retrieval_budget import (
     optional_shallow_probe_allowed,
     partition_candidates_by_absolute_floor,
     router_hard_skip_allowed,
+)
+from memory_recall.typed_candidate_shadow import (
+    balanced_typed_pool,
+    build_event_lane,
+    build_scene_lane,
+    rerank_lane_with_freshness,
 )
 from narrative_rolls import NarrativeRollStore
 from persona_engine import PersonaStateEngine
@@ -420,14 +427,29 @@ class GatewayService:
             passage_shadow_cfg.get("simulation_enabled"),
             True,
         )
-        self.passage_shadow_min_fact_event_importance = max(
+        self.passage_shadow_min_fact_importance = max(
             1,
             int(passage_shadow_cfg.get("min_fact_event_importance") or 3),
+        )
+        # Event importance is not a shadow eligibility gate. Every active Event
+        # may compete inside the Event lane; importance remains diagnostic only.
+        self.passage_shadow_min_event_importance = 1
+        self.passage_shadow_auto_refresh_max_passages = max(
+            0,
+            min(20, int(passage_shadow_cfg.get("auto_refresh_max_passages", 3))),
+        )
+        self.passage_shadow_min_fact_event_importance = (
+            self.passage_shadow_min_fact_importance
         )
         self.passage_shadow_index = PassageShadowIndex(config, self.embedding_engine)
         self.cue_passage_shadow_index = CuePassageShadowIndex(config, self.embedding_engine)
         self.fact_event_lexical_shadow_index = FactEventLexicalShadowIndex(config)
+        self.observed_entity_shadow_index = ObservedEntityShadowIndex(config)
         self._passage_candidate_shadow_catalog: dict[str, dict[str, Any]] = {}
+        self._passage_candidate_shadow_arc_members: dict[
+            str, set[tuple[str, str]]
+        ] = {}
+        self._passage_candidate_shadow_arc_cards: dict[str, dict[str, Any]] = {}
         self._passage_candidate_shadow_sync: dict[str, Any] = {
             "status": "not_warmed",
             "decision_applied": False,
@@ -897,6 +919,55 @@ class GatewayService:
                 "route_allowed": bool(route_allowed),
             }
         )
+        entity_scope = (
+            self.observed_entity_shadow_index.resolve_query(query)
+            if hasattr(self, "observed_entity_shadow_index")
+            else None
+        )
+        if entity_scope is not None:
+            debug["entity_scope"] = entity_scope
+            scope_status = str(entity_scope.get("status") or "")
+            admitted_id = str(debug.get("admitted_narrative_id") or "").strip()
+            admitted_candidate = next(
+                (
+                    row
+                    for row in debug.get("candidates") or []
+                    if str(row.get("narrative_id") or "") == admitted_id
+                ),
+                {},
+            )
+            scope_arc_key = str(
+                (entity_scope.get("scope_anchor") or {}).get("arc_key") or ""
+            )
+            admitted_arc_key = str(admitted_candidate.get("arc_key") or "")
+            scope_blocks = scope_status in {
+                "scope_only",
+                "ambiguous_scope",
+                "insufficient_scope",
+            } or (
+                scope_status == "scope_index_unavailable"
+                and str(debug.get("reason") or "")
+                in {
+                    "exact_title",
+                    "exact_primary_entity",
+                    "primary_entity_and_roll_query_cue",
+                    "supporting_entity_and_roll_query_cue",
+                }
+            ) or (
+                scope_status == "scoped_recall"
+                and admitted_id
+                and scope_arc_key
+                and admitted_arc_key != scope_arc_key
+            )
+            if scope_blocks and admitted_id:
+                debug["would_admit_narrative_id"] = admitted_id
+                debug["admitted_narrative_id"] = ""
+                debug["status"] = "not_admitted"
+                debug["reason"] = (
+                    "scope_intent_conjunction_not_satisfied"
+                    if scope_status != "scoped_recall"
+                    else "admitted_arc_outside_resolved_scope"
+                )
         if not str(query or "").strip():
             debug["status"] = "not_run"
             debug["reason"] = str(route_block_reason or "not_current_user_turn")
@@ -2336,11 +2407,14 @@ class GatewayService:
                     self.fact_event_semantic_index.search_by_embedding(
                         semantic_query_vector or [],
                         top_k=max(3, int(retrieval_budget.get("semantic_top_k") or 3)),
-                        min_importance=getattr(
-                            self,
-                            "passage_shadow_min_fact_event_importance",
-                            3,
-                        ),
+                        min_importance_by_kind={
+                            "event": getattr(
+                                self, "passage_shadow_min_event_importance", 1
+                            ),
+                            "fact": getattr(
+                                self, "passage_shadow_min_fact_importance", 3
+                            ),
+                        },
                     )
                     if hasattr(self, "fact_event_semantic_index")
                     else {
@@ -13750,11 +13824,22 @@ class GatewayService:
         }
 
     @staticmethod
-    def _active_fact_event_shadow_items(store: FactEventStore) -> list[dict[str, Any]]:
+    def _active_fact_event_shadow_items(
+        store: FactEventStore,
+        *,
+        item_type: str = "",
+        include_sources: bool = False,
+    ) -> list[dict[str, Any]]:
         output: list[dict[str, Any]] = []
         offset = 0
         while True:
-            page = store.list(status="active", limit=500, offset=offset)
+            page = store.list(
+                item_type=item_type,
+                status="active",
+                limit=500,
+                offset=offset,
+                include_sources=include_sources,
+            )
             items = list(page.get("items") or [])
             output.extend(items)
             offset += len(items)
@@ -13785,11 +13870,19 @@ class GatewayService:
             "content": content,
             "cues": metadata.get("scene_cues"),
             "cue_indexable": scene_is_cue_indexable(bucket),
+            "memory_date": str(
+                metadata.get("date")
+                or bucket.get("created")
+                or metadata.get("updated_at")
+                or ""
+            ),
         }
 
     async def _sync_passage_candidate_shadow(
         self,
         all_buckets: list[dict[str, Any]],
+        *,
+        apply_passage_embeddings: bool = False,
     ) -> dict[str, Any]:
         scenes = [
             scene
@@ -13797,19 +13890,67 @@ class GatewayService:
             if scene is not None
         ]
         active_fact_events = self._active_fact_event_shadow_items(self.fact_event_store)
-        eligible_fact_events = [
+        eligible_facts = [
             item
             for item in active_fact_events
+            if str(item.get("item_type") or "") == "fact"
             if int(item.get("importance") or 0)
-            >= self.passage_shadow_min_fact_event_importance
+            >= self.passage_shadow_min_fact_importance
         ]
         eligible_events = [
-            item for item in eligible_fact_events if str(item.get("item_type") or "") == "event"
+            item
+            for item in active_fact_events
+            if str(item.get("item_type") or "") == "event"
         ]
-        passage_sync = await self.passage_shadow_index.sync(
+        owner_dates = {
+            **{
+                ("scene", str(scene["id"])): str(scene.get("memory_date") or "")
+                for scene in scenes
+            },
+            **{
+                ("event", str(item.get("item_id") or "")): str(
+                    item.get("local_date") or item.get("source_started_at") or ""
+                )
+                for item in eligible_events
+            },
+        }
+        passage_plan = await self.passage_shadow_index.sync(
             scenes=scenes,
             events=eligible_events,
+            dry_run=True,
         )
+        passage_delta = int(
+            passage_plan.get("owners_to_refresh", passage_plan.get("to_embed")) or 0
+        ) + int(
+            passage_plan.get("stale_owners") or 0
+        )
+        if (
+            apply_passage_embeddings
+            and int(passage_plan.get("to_embed") or 0)
+            <= getattr(self, "passage_shadow_auto_refresh_max_passages", 3)
+        ):
+            passage_sync = await self.passage_shadow_index.sync(
+                scenes=scenes,
+                events=eligible_events,
+            )
+            passage_sync["apply_source"] = "bounded_mutation_refresh"
+            passage_sync["embeddings_applied"] = True
+        else:
+            passage_sync = {
+                **passage_plan,
+                "status": "stale" if passage_delta else "ok",
+                "reason": (
+                    "up_to_date"
+                    if not passage_delta
+                    else (
+                        "auto_refresh_limit_exceeded"
+                        if apply_passage_embeddings
+                        else "explicit_backfill_required"
+                    )
+                ),
+                "embeddings_applied": False,
+                "decision_applied": False,
+            }
         cue_scenes = [scene for scene in scenes if scene.get("cue_indexable")]
         passages_by_owner = self.passage_shadow_index.passages_for_owners(
             [("scene", str(scene["id"])) for scene in cue_scenes],
@@ -13834,15 +13975,113 @@ class GatewayService:
             }
         lexical_sync = self.fact_event_lexical_shadow_index.sync(
             active_fact_events,
-            min_importance=self.passage_shadow_min_fact_event_importance,
+            min_importance=1,
         )
         fact_semantic_sync = await self.fact_event_semantic_index.sync(self.fact_event_store)
+
+        observed_entity_sync: dict[str, Any] = {
+            "status": "unavailable",
+            "reason": "observed_entity_shadow_unavailable",
+            "decision_applied": False,
+        }
+        arc_profiles: list[dict[str, Any]] = []
+        if hasattr(self, "narrative_roll_store"):
+            arc_profiles = self.narrative_roll_store.recall_scope_profiles()
+            for profile in arc_profiles:
+                arc_key = str(profile.get("arc_key") or "")
+                automatic_links = self.fact_event_store.arc_event_links(arc_key)
+                members = list(profile.get("members") or [])
+                automatic_added = 0
+                for link in automatic_links:
+                    event_id = str(link.get("event_id") or "")
+                    member = {"owner_kind": "event", "owner_id": event_id}
+                    if event_id and member not in members:
+                        members.append(member)
+                        automatic_added += 1
+                profile["members"] = members
+                profile["card"] = {
+                    **dict(profile.get("card") or {}),
+                    "member_count": int(
+                        (profile.get("card") or {}).get("member_count") or 0
+                    )
+                    + automatic_added,
+                }
+        self._passage_candidate_shadow_arc_members = {
+            str(profile.get("arc_key") or ""): {
+                (
+                    str(member.get("owner_kind") or "").strip().lower(),
+                    str(member.get("owner_id") or "").strip(),
+                )
+                for member in profile.get("members") or []
+                if str(member.get("owner_kind") or "").strip().lower()
+                in {"scene", "event"}
+                and str(member.get("owner_id") or "").strip()
+            }
+            for profile in arc_profiles
+            if str(profile.get("arc_key") or "").strip()
+        }
+        self._passage_candidate_shadow_arc_cards = {}
+        for profile in arc_profiles:
+            arc_key = str(profile.get("arc_key") or "").strip()
+            if not arc_key:
+                continue
+            members = self._passage_candidate_shadow_arc_members.get(arc_key, set())
+            member_dates = sorted(
+                date
+                for owner_key in members
+                if (date := owner_dates.get(owner_key, ""))
+            )
+            self._passage_candidate_shadow_arc_cards[arc_key] = {
+                **dict(profile.get("card") or {}),
+                "latest_member_date": member_dates[-1] if member_dates else "",
+                "read_hint": "可按需读取",
+            }
+        if all(
+            hasattr(self, name)
+            for name in (
+                "observed_entity_shadow_index",
+                "scene_evidence_store",
+                "narrative_roll_store",
+            )
+        ):
+            source_events = self._active_fact_event_shadow_items(
+                self.fact_event_store,
+                item_type="event",
+                include_sources=True,
+            )
+            scene_refs = self.scene_evidence_store.list_active_for_scenes(
+                [str(scene["id"]) for scene in scenes]
+            )
+            observed_entity_sync = self.observed_entity_shadow_index.sync(
+                owners=[
+                    *(
+                        {
+                            "owner_kind": "scene",
+                            "owner_id": str(scene["id"]),
+                            "source_refs": scene_refs.get(str(scene["id"])) or [],
+                        }
+                        for scene in scenes
+                    ),
+                    *(
+                        {
+                            "owner_kind": "event",
+                            "owner_id": str(event.get("item_id") or ""),
+                            "source_refs": event.get("source_refs") or [],
+                        }
+                        for event in source_events
+                    ),
+                ],
+                arc_profiles=arc_profiles,
+                dry_run=not apply_passage_embeddings,
+            )
         self._passage_candidate_shadow_catalog = {
             **{
                 str(scene["id"]): {
                     "owner_kind": "scene",
                     "title": str(scene.get("title") or ""),
                     "importance": None,
+                    "body": str(scene.get("content") or ""),
+                    "memory_date": str(scene.get("memory_date") or ""),
                 }
                 for scene in scenes
             },
@@ -13852,8 +14091,11 @@ class GatewayService:
                     "title": str(item.get("title") or ""),
                     "importance": int(item.get("importance") or 0),
                     "body": str(item.get("body") or ""),
+                    "memory_date": str(
+                        item.get("local_date") or item.get("source_started_at") or ""
+                    ),
                 }
-                for item in eligible_fact_events
+                for item in eligible_events
             },
         }
         return {
@@ -13862,10 +14104,16 @@ class GatewayService:
             "cue_passage": cue_sync,
             "fact_event_lexical": lexical_sync,
             "fact_event_semantic": fact_semantic_sync,
+            "observed_entity": observed_entity_sync,
             "scene_count": len(scenes),
-            "eligible_fact_event_count": len(eligible_fact_events),
-            "excluded_fact_event_count": len(active_fact_events) - len(eligible_fact_events),
-            "min_fact_event_importance": self.passage_shadow_min_fact_event_importance,
+            "eligible_event_count": len(eligible_events),
+            "excluded_event_count": 0,
+            "eligible_fact_count": len(eligible_facts),
+            "excluded_fact_count": (
+                len(active_fact_events) - len(eligible_events) - len(eligible_facts)
+            ),
+            "min_event_importance": self.passage_shadow_min_event_importance,
+            "min_fact_importance": self.passage_shadow_min_fact_importance,
             "decision_applied": False,
         }
 
@@ -13914,7 +14162,10 @@ class GatewayService:
             try:
                 self._clear_gateway_bucket_cache()
                 all_buckets = await self.bucket_mgr.list_all(include_archive=True)
-                result = await self._sync_passage_candidate_shadow(all_buckets)
+                result = await self._sync_passage_candidate_shadow(
+                    all_buckets,
+                    apply_passage_embeddings=True,
+                )
                 self._passage_candidate_shadow_sync = {
                     **result,
                     "refresh_source": "canonical_mutation_notification",
@@ -13961,50 +14212,6 @@ class GatewayService:
             fact_event_ids=ids("fact_event_ids"),
         ))
 
-    @staticmethod
-    def _source_balanced_passage_shadow_pool(
-        lanes: list[tuple[str, list[dict[str, Any]], int]],
-        *,
-        limit: int = 7,
-    ) -> list[dict[str, Any]]:
-        output: list[dict[str, Any]] = []
-        positions: dict[tuple[str, str], int] = {}
-
-        def add(row: dict[str, Any], lane: str) -> None:
-            key = (str(row.get("owner_kind") or ""), str(row.get("owner_id") or ""))
-            if not all(key):
-                return
-            if key in positions:
-                current = output[positions[key]]
-                for field in ("candidate_sources", "matched_terms", "specific_terms", "matched_cues"):
-                    values = list(current.get(field) or [])
-                    for value in row.get(field) or []:
-                        if value not in values:
-                            values.append(value)
-                    if values:
-                        current[field] = values
-                spans = list(current.get("matched_spans") or [])
-                for span in row.get("matched_spans") or []:
-                    if span not in spans:
-                        spans.append(span)
-                if spans:
-                    current["matched_spans"] = spans
-                return
-            if len(output) >= limit:
-                return
-            output.append({**row, "candidate_lane": lane, "decision_applied": False})
-            positions[key] = len(output) - 1
-
-        for lane, rows, quota in lanes:
-            for row in rows[:quota]:
-                add(row, lane)
-        for lane, rows, _quota in lanes:
-            for row in rows:
-                add(row, lane)
-                if len(output) >= limit:
-                    return output
-        return output
-
     def _passage_candidate_shadow_debug(
         self,
         query: str,
@@ -14030,20 +14237,154 @@ class GatewayService:
                 "live_injection_enabled": False,
             }
         catalog = getattr(self, "_passage_candidate_shadow_catalog", {})
-        allowed_scene_ids = {
+        global_scene_ids = {
             item_id
             for item_id, row in catalog.items()
             if row.get("owner_kind") == "scene"
         }
+        global_event_ids = {
+            item_id
+            for item_id, row in catalog.items()
+            if row.get("owner_kind") == "event"
+        }
+        entity_scope = (
+            self.observed_entity_shadow_index.resolve_query(query)
+            if hasattr(self, "observed_entity_shadow_index")
+            else {
+                "status": "unavailable",
+                "operator": "none",
+                "retrieval_allowed": False,
+                "decision_applied": False,
+            }
+        )
+        scope_status = str(entity_scope.get("status") or "")
+        scope_operator = str(entity_scope.get("operator") or "none")
+        scope_arc_key = str(
+            (entity_scope.get("scope_anchor") or {}).get("arc_key") or ""
+        )
+        scope_members = set(
+            getattr(self, "_passage_candidate_shadow_arc_members", {}).get(
+                scope_arc_key,
+                set(),
+            )
+        )
+        hard_scope_block = scope_status in {"scope_only", "ambiguous_scope"} or (
+            scope_status == "insufficient_scope"
+            and scope_operator
+            in {"latest_relevant_member", "timeline", "member_search", "narrative_read"}
+        )
+        specific_term_reader = getattr(
+            getattr(self, "recall_policy", None),
+            "specific_query_terms",
+            None,
+        )
+        raw_global_terms = (
+            specific_term_reader(query)
+            if callable(specific_term_reader)
+            else re.findall(
+                r"[A-Za-z0-9_.-]{2,}|[\u4e00-\u9fff]{2,}",
+                str(query or ""),
+            )
+        )
+        specific_global_terms = [
+            term for term in raw_global_terms if self._matched_query_term_is_specific(term)
+        ]
+        if hard_scope_block or (
+            not scope_arc_key
+            and not specific_global_terms
+            and scope_status not in {"scoped_recall", "scope_only", "ambiguous_scope"}
+        ):
+            return {
+                "status": "not_retrieved",
+                "reason": (
+                    "entity_without_recall_intent"
+                    if scope_status == "scope_only"
+                    else "ambiguous_entity_scope"
+                    if scope_status == "ambiguous_scope"
+                    else "scope_required_for_deictic_intent"
+                    if hard_scope_block
+                    else "global_query_lacks_specific_terms"
+                ),
+                "mode": "simulation_shadow",
+                "decision_applied": False,
+                "live_injection_enabled": False,
+                "entity_scope": entity_scope,
+                "candidate_count": 0,
+                "candidates": [],
+                "lanes": {
+                    "scene": {"matches": []},
+                    "event": {"matches": []},
+                },
+            }
+        allowed_owner_keys = (
+            scope_members
+            if scope_arc_key
+            else {
+                *(("scene", owner_id) for owner_id in global_scene_ids),
+                *(("event", owner_id) for owner_id in global_event_ids),
+            }
+        )
+        allowed_scene_ids = {
+            owner_id for kind, owner_id in allowed_owner_keys if kind == "scene"
+        }
+        allowed_event_ids = {
+            owner_id for kind, owner_id in allowed_owner_keys if kind == "event"
+        }
 
-        passage_search = self.passage_shadow_index.search_by_embedding(
+        scene_passage_search = self.passage_shadow_index.search_by_embedding(
             query_embedding,
             top_k=10,
+            owner_kinds=("scene",),
             passages_per_owner=2,
+            allowed_owner_ids=allowed_owner_keys,
         )
-        passage_rows = list(passage_search.get("matches") or [])
-        for row in passage_rows:
-            row["candidate_sources"] = ["passage_embedding"]
+        scene_passage_rows = list(scene_passage_search.get("matches") or [])
+
+        scene_whole_matches = []
+        scene_whole_search = getattr(
+            getattr(self, "embedding_engine", None),
+            "search_scene_whole_by_embedding",
+            None,
+        )
+        if callable(scene_whole_search):
+            scene_whole_matches = scene_whole_search(
+                query_embedding,
+                scene_ids=allowed_scene_ids,
+                top_k=10,
+            )
+        scene_whole_rows = []
+        for match in scene_whole_matches:
+            scene_id = str(match.get("scene_id") or "")
+            item = catalog.get(scene_id) or {}
+            body = str(item.get("body") or "")
+            score = float(match.get("score") or 0.0)
+            scene_whole_rows.append(
+                {
+                    "owner_kind": "scene",
+                    "owner_id": scene_id,
+                    "score": score,
+                    "passages": [
+                        {
+                            "ordinal": 0,
+                            "start_offset": 0,
+                            "end_offset": len(body),
+                            "text": body,
+                            "score": score,
+                        }
+                    ],
+                    "candidate_only": True,
+                    "decision_applied": False,
+                }
+            )
+
+        event_passage_search = self.passage_shadow_index.search_by_embedding(
+            query_embedding,
+            top_k=10,
+            owner_kinds=("event",),
+            passages_per_owner=2,
+            allowed_owner_ids=allowed_owner_keys,
+        )
+        event_passage_rows = list(event_passage_search.get("matches") or [])
 
         cue_search = self.cue_passage_shadow_index.search_by_embedding(
             query_embedding,
@@ -14051,20 +14392,20 @@ class GatewayService:
             allowed_scene_ids=allowed_scene_ids,
         )
         cue_rows = list(cue_search.get("matches") or [])
-        for row in cue_rows:
-            row["candidate_sources"] = ["cue_passage_embedding"]
 
         fact_search = self.fact_event_semantic_index.search_by_embedding(
             query_embedding,
-            top_k=10,
-            min_importance=self.passage_shadow_min_fact_event_importance,
+            top_k=20,
+            memory_kinds=("event",),
+            allowed_memory_ids=(allowed_event_ids if scope_arc_key else None),
+            min_importance_by_kind={"event": self.passage_shadow_min_event_importance},
         )
-        fact_rows: list[dict[str, Any]] = []
+        body_rows: list[dict[str, Any]] = []
         for match in fact_search.get("matches") or []:
             item_id = str(match.get("memory_id") or "")
             item = catalog.get(item_id) or {}
             body = str(item.get("body") or "")
-            fact_rows.append({
+            body_rows.append({
                 "owner_kind": str(match.get("memory_kind") or ""),
                 "owner_id": item_id,
                 "score": float(match.get("score") or 0.0),
@@ -14076,25 +14417,73 @@ class GatewayService:
                     "text": body,
                     "score": float(match.get("score") or 0.0),
                 }],
-                "candidate_sources": ["fact_event_body_embedding"],
                 "candidate_only": True,
                 "decision_applied": False,
             })
 
-        lexical_search = self.fact_event_lexical_shadow_index.search(query, top_k=10)
+        lexical_search = self.fact_event_lexical_shadow_index.search(
+            query,
+            top_k=20,
+            memory_kinds=("event",),
+            allowed_memory_ids=(allowed_event_ids if scope_arc_key else None),
+            min_importance_by_kind={"event": self.passage_shadow_min_event_importance},
+        )
         lexical_rows = list(lexical_search.get("matches") or [])
-        lanes = [
-            ("cue_passage", cue_rows, 2),
-            ("passage", passage_rows, 2),
-            ("fact_event_body", fact_rows, 2),
-            ("fact_event_lexical", lexical_rows, 1),
-        ]
-        pool = self._source_balanced_passage_shadow_pool(lanes, limit=7)
+        scene_lane = build_scene_lane(scene_passage_rows, cue_rows, scene_whole_rows)
+        event_lane = build_event_lane(event_passage_rows, body_rows, lexical_rows)
+
+        def decorate_lane(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            for row in rows:
+                item = catalog.get(str(row.get("owner_id") or "")) or {}
+                row["title"] = str(item.get("title") or "")
+                row["memory_date"] = str(item.get("memory_date") or "")
+                if row.get("importance") is None:
+                    row["importance"] = item.get("importance")
+            return rerank_lane_with_freshness(rows, query=query)
+
+        scene_lane = decorate_lane(scene_lane)
+        event_lane = decorate_lane(event_lane)
+        pool = balanced_typed_pool(
+            [("scene", scene_lane, 3), ("event", event_lane, 3)],
+            limit=6,
+        )
+        member_to_arcs: dict[tuple[str, str], list[str]] = {}
+        for arc_key, members in getattr(
+            self, "_passage_candidate_shadow_arc_members", {}
+        ).items():
+            for member in members:
+                member_to_arcs.setdefault(member, []).append(arc_key)
         for row in pool:
             item = catalog.get(str(row.get("owner_id") or "")) or {}
             row["title"] = str(item.get("title") or "")
             if row.get("importance") is None:
                 row["importance"] = item.get("importance")
+            cards = [
+                dict(card)
+                for arc_key in sorted(
+                    member_to_arcs.get(
+                        (
+                            str(row.get("owner_kind") or ""),
+                            str(row.get("owner_id") or ""),
+                        ),
+                        [],
+                    )
+                )[:3]
+                if (
+                    card := getattr(
+                        self, "_passage_candidate_shadow_arc_cards", {}
+                    ).get(arc_key)
+                )
+            ]
+            if cards:
+                row["arc_cards"] = cards
+            if hasattr(self, "observed_entity_shadow_index"):
+                row["arc_link_candidates"] = (
+                    self.observed_entity_shadow_index.link_candidates(
+                        str(row.get("owner_kind") or ""),
+                        str(row.get("owner_id") or ""),
+                    )
+                )
         return {
             "status": "ok",
             "mode": "simulation_shadow",
@@ -14102,22 +14491,43 @@ class GatewayService:
             "live_injection_enabled": False,
             "sync": getattr(self, "_passage_candidate_shadow_sync", {}),
             "policy": {
-                "pool_limit": 7,
+                "pool_limit": 6,
                 "lane_quotas": {
-                    "cue_passage": 2,
-                    "passage": 2,
-                    "fact_event_body": 2,
-                    "fact_event_lexical": 1,
+                    "scene": 3,
+                    "event": 3,
                 },
                 "duplicate_score_boost": False,
-                "min_fact_event_importance": self.passage_shadow_min_fact_event_importance,
+                "within_owner_embedding_score": "max",
+                "embedding_routes": ["whole", "passage_for_long_owner"],
+                "cross_lane_score_comparison": False,
+                "freshness_rerank": "bounded_within_lane",
+                "cue_contributes_score": False,
+                "lexical_contributes_score": False,
+                "scope_applied_before_candidate_search": bool(scope_arc_key),
+                "scope_arc_key": scope_arc_key,
+                "global_specific_terms": specific_global_terms,
+                "event_eligibility": "all_active",
+                "min_event_importance": self.passage_shadow_min_event_importance,
             },
             "lanes": {
-                "cue_passage": {**cue_search, "matches": cue_rows},
-                "passage": {**passage_search, "matches": passage_rows},
-                "fact_event_body": {**fact_search, "matches": fact_rows},
-                "fact_event_lexical": {**lexical_search, "matches": lexical_rows},
+                "scene": {
+                    "matches": scene_lane,
+                    "whole_search": {
+                        "status": "ok",
+                        "candidate_count": len(scene_whole_rows),
+                        "matches": scene_whole_rows,
+                    },
+                    "passage_search": scene_passage_search,
+                    "cue_search": cue_search,
+                },
+                "event": {
+                    "matches": event_lane,
+                    "passage_search": event_passage_search,
+                    "body_search": fact_search,
+                    "lexical_search": lexical_search,
+                },
             },
+            "entity_scope": entity_scope,
             "candidate_count": len(pool),
             "candidates": pool,
         }
@@ -14184,35 +14594,105 @@ class GatewayService:
         query_embedding: list[float],
         *,
         limit: int = 7,
+        allowed_owner_keys: set[tuple[str, str]] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        passage_search = self.passage_shadow_index.search_by_embedding(
+        catalog = getattr(self, "_passage_candidate_shadow_catalog", {})
+        if allowed_owner_keys is None:
+            allowed_owner_keys = {
+                (str(row.get("owner_kind") or ""), item_id)
+                for item_id, row in catalog.items()
+                if str(row.get("owner_kind") or "") in {"scene", "event"}
+            }
+        allowed_scene_ids = {
+            owner_id for kind, owner_id in allowed_owner_keys if kind == "scene"
+        }
+        allowed_event_ids = {
+            owner_id for kind, owner_id in allowed_owner_keys if kind == "event"
+        }
+        scene_passage_search = self.passage_shadow_index.search_by_embedding(
             query_embedding,
             top_k=max(10, limit),
+            owner_kinds=("scene",),
             passages_per_owner=2,
+            allowed_owner_ids=allowed_owner_keys,
         )
-        catalog = getattr(self, "_passage_candidate_shadow_catalog", {})
-        allowed_scene_ids = {
-            item_id
-            for item_id, row in catalog.items()
-            if row.get("owner_kind") == "scene"
-        }
+        event_passage_search = self.passage_shadow_index.search_by_embedding(
+            query_embedding,
+            top_k=max(10, limit),
+            owner_kinds=("event",),
+            passages_per_owner=2,
+            allowed_owner_ids=allowed_owner_keys,
+        )
+        scene_whole_rows = []
+        scene_whole_search = getattr(
+            getattr(self, "embedding_engine", None),
+            "search_scene_whole_by_embedding",
+            None,
+        )
+        if callable(scene_whole_search):
+            for match in scene_whole_search(
+                query_embedding,
+                scene_ids=allowed_scene_ids,
+                top_k=max(10, limit),
+            ):
+                scene_id = str(match.get("scene_id") or "")
+                body = str((catalog.get(scene_id) or {}).get("body") or "")
+                score = float(match.get("score") or 0.0)
+                scene_whole_rows.append(
+                    {
+                        "owner_kind": "scene",
+                        "owner_id": scene_id,
+                        "score": score,
+                        "passages": [{"text": body, "score": score}],
+                    }
+                )
+        fact_event_semantic_index = getattr(self, "fact_event_semantic_index", None)
+        event_whole_search = (
+            fact_event_semantic_index.search_by_embedding(
+                query_embedding,
+                top_k=max(10, limit),
+                memory_kinds=("event",),
+                min_importance_by_kind={
+                    "event": getattr(self, "passage_shadow_min_event_importance", 1)
+                },
+                allowed_memory_ids=allowed_event_ids,
+            )
+            if fact_event_semantic_index is not None
+            else {"status": "unavailable", "matches": []}
+        )
+        event_whole_rows = []
+        for match in event_whole_search.get("matches") or []:
+            event_id = str(match.get("memory_id") or "")
+            body = str((catalog.get(event_id) or {}).get("body") or "")
+            score = float(match.get("score") or 0.0)
+            event_whole_rows.append(
+                {
+                    "owner_kind": "event",
+                    "owner_id": event_id,
+                    "score": score,
+                    "passages": [{"text": body, "score": score}],
+                }
+            )
         cue_search = self.cue_passage_shadow_index.search_by_embedding(
             query_embedding,
             top_k=max(10, limit),
             allowed_scene_ids=allowed_scene_ids,
         )
-        passage_rows = list(passage_search.get("matches") or [])
-        for row in passage_rows:
-            row["candidate_sources"] = ["passage_query_view_embedding"]
-            row["candidate_only"] = True
         cue_rows = list(cue_search.get("matches") or [])
-        for row in cue_rows:
-            row["candidate_sources"] = ["cue_passage_query_view_embedding"]
-            row["candidate_only"] = True
-        rows = self._source_balanced_passage_shadow_pool(
+        scene_rows = build_scene_lane(
+            list(scene_passage_search.get("matches") or []),
+            cue_rows,
+            scene_whole_rows,
+        )
+        event_rows = build_event_lane(
+            list(event_passage_search.get("matches") or []),
+            event_whole_rows,
+            [],
+        )
+        rows = balanced_typed_pool(
             [
-                ("cue_passage_query_view", cue_rows, 3),
-                ("passage_query_view", passage_rows, 3),
+                ("scene", scene_rows, max(1, limit // 2)),
+                ("event", event_rows, max(1, limit // 2)),
             ],
             limit=max(1, limit),
         )
@@ -14223,7 +14703,10 @@ class GatewayService:
                 row["importance"] = item.get("importance")
         return {
             "status": "ok",
-            "passage": passage_search,
+            "scene_passage": scene_passage_search,
+            "event_passage": event_passage_search,
+            "scene_whole": scene_whole_rows,
+            "event_whole": event_whole_search,
             "cue_passage": cue_search,
         }, rows
 
@@ -14618,6 +15101,17 @@ class GatewayService:
         rows_by_view: list[tuple[str, list[dict[str, Any]]]] = [
             (query_views[0], list(baseline.get("candidates") or [])),
         ]
+        scope_arc_key = str((baseline.get("policy") or {}).get("scope_arc_key") or "")
+        scoped_owner_keys = (
+            set(
+                getattr(self, "_passage_candidate_shadow_arc_members", {}).get(
+                    scope_arc_key,
+                    set(),
+                )
+            )
+            if scope_arc_key
+            else None
+        )
         view_debug = [{
             "query": query_views[0],
             "source": "original",
@@ -14636,6 +15130,7 @@ class GatewayService:
             view_result, candidates = self._passage_clause_query_view_candidates(
                 vector,
                 limit=int((baseline.get("policy") or {}).get("pool_limit") or 7),
+                allowed_owner_keys=scoped_owner_keys,
             )
             rows_by_view.append((view, candidates))
             view_debug.append({

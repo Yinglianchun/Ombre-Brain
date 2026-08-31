@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "dataset": "typed_recall_scope_gold_v1",
+  "cases": [
+    {
+      "id": "entity_only",
+      "query": "阿尼亚",
+      "expected_status": "scope_only",
+      "expected_intent": "none",
+      "expected_operator": "none",
+      "expected_arc_key": "work:spy-family",
+      "expected_retrieval_allowed": false
+    },
+    {
+      "id": "scoped_progress",
+      "query": "阿尼亚看到哪了",
+      "expected_status": "scoped_recall",
+      "expected_intent": "progress",
+      "expected_operator": "latest_relevant_member",
+      "expected_arc_key": "work:spy-family",
+      "expected_retrieval_allowed": true
+    },
+    {
+      "id": "bare_progress",
+      "query": "看到哪了",
+      "expected_status": "insufficient_scope",
+      "expected_intent": "progress",
+      "expected_operator": "latest_relevant_member",
+      "expected_arc_key": "",
+      "expected_retrieval_allowed": false
+    },
+    {
+      "id": "ambiguous_character",
+      "query": "约尔后来怎么发展",
+      "expected_status": "ambiguous_scope",
+      "expected_intent": "timeline",
+      "expected_operator": "timeline",
+      "expected_arc_key": "",
+      "expected_retrieval_allowed": false
+    },
+    {
+      "id": "cross_member_observed_entity",
+      "query": "奇美拉后来怎么发展",
+      "expected_status": "scoped_recall",
+      "expected_intent": "timeline",
+      "expected_operator": "timeline",
+      "expected_arc_key": "work:spy-family",
+      "expected_retrieval_allowed": true
+    },
+    {
+      "id": "single_member_cannot_self_promote",
+      "query": "邦德曼后来怎么发展",
+      "expected_status": "insufficient_scope",
+      "expected_intent": "timeline",
+      "expected_operator": "timeline",
+      "expected_arc_key": "",
+      "expected_retrieval_allowed": false
+    },
+    {
+      "id": "generic_relationship_name",
+      "query": "哥哥后来怎么发展",
+      "expected_status": "insufficient_scope",
+      "expected_intent": "timeline",
+      "expected_operator": "timeline",
+      "expected_arc_key": "",
+      "expected_retrieval_allowed": false
+    },
+    {
+      "id": "arc_title_narrative",
+      "query": "间谍过家家整体剧情",
+      "expected_status": "scoped_recall",
+      "expected_intent": "arc_narrative",
+      "expected_operator": "narrative_read",
+      "expected_arc_key": "work:spy-family",
+      "expected_retrieval_allowed": true
+    },
+    {
+      "id": "arc_title_exact_evidence",
+      "query": "间谍过家家原话是怎么说的",
+      "expected_status": "scoped_recall",
+      "expected_intent": "exact_evidence",
+      "expected_operator": "exact_evidence",
+      "expected_arc_key": "work:spy-family",
+      "expected_retrieval_allowed": true
+    }
+  ]
+}

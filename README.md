@@ -458,6 +458,7 @@ Codex 接线时注意：
 | --- | --- |
 | `recall_memory` | 按 query/date 寻找 Scene，或从已知 scene_id 展开关联记忆 |
 | `read_memory` | 用明确类型和 ID 精确读取一个对象，不做联想 |
+| `find_arc` | 按标题、别名或已确认实体查询只读 Arc 轻卡；正文按需再读 |
 | `write_scene` | 原样保存一件 canonical Scene |
 | `edit_scene` | 带版本检查地修订一条 authored Scene |
 | `set_scene_status` | 带版本检查地归档或恢复一条 Scene |

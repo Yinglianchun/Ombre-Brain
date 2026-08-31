@@ -37,6 +37,11 @@ try:
     from memory_recall.passage_shadow import PassageShadowIndex
 except ImportError:  # one-off container shadow artifact, outside the app package
     from passage_shadow import PassageShadowIndex
+from memory_recall.typed_candidate_shadow import (
+    balanced_typed_pool,
+    build_event_lane,
+    build_scene_lane,
+)
 from reranker_engine import RerankerEngine
 from utils import bucket_text_for_embedding, load_config
 
@@ -62,14 +67,11 @@ def _is_active_scene(bucket: dict[str, Any]) -> bool:
 
 def _active_events(
     store: FactEventStore,
-    *,
-    min_importance: int,
 ) -> list[dict[str, Any]]:
     return [
         item
         for item in FactEventSemanticItems.active(store)
         if str(item.get("item_type") or "") == "event"
-        and int(item.get("importance") or 0) >= min_importance
     ]
 
 
@@ -227,66 +229,6 @@ def _fuse_matches(*ranked_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return output
 
 
-def _source_balanced_candidate_pool(
-    *,
-    cue_passage_matches: list[dict[str, Any]],
-    passage_matches: list[dict[str, Any]],
-    fact_event_matches: list[dict[str, Any]],
-    fact_event_lexical_matches: list[dict[str, Any]],
-    limit: int = 7,
-    lane_quota: int = 2,
-    lexical_quota: int = 1,
-) -> list[dict[str, Any]]:
-    """Keep bounded source lanes without turning their scores into admission."""
-
-    output: list[dict[str, Any]] = []
-    positions: dict[tuple[str, str], int] = {}
-
-    def add(row: dict[str, Any], lane: str) -> None:
-        key = (str(row.get("owner_kind") or ""), str(row.get("owner_id") or ""))
-        if not all(key):
-            return
-        if key in positions:
-            current = output[positions[key]]
-            for field in ("candidate_sources", "matched_terms", "specific_terms"):
-                values = list(current.get(field) or [])
-                for value in row.get(field) or []:
-                    if value not in values:
-                        values.append(value)
-                if values:
-                    current[field] = values
-            spans = list(current.get("matched_spans") or [])
-            for span in row.get("matched_spans") or []:
-                if span not in spans:
-                    spans.append(span)
-            if spans:
-                current["matched_spans"] = spans
-            return
-        if len(output) >= limit:
-            return
-        output.append({**row, "candidate_lane": lane, "decision_applied": False})
-        positions[key] = len(output) - 1
-
-    for row in cue_passage_matches[: max(0, lane_quota)]:
-        add(row, "cue_passage")
-    for row in passage_matches[: max(0, lane_quota)]:
-        add(row, "passage")
-    for row in fact_event_matches[: max(0, lane_quota)]:
-        add(row, "fact_event_body")
-    for row in fact_event_lexical_matches[: max(0, lexical_quota)]:
-        add(row, "fact_event_lexical")
-    for row in [
-        *cue_passage_matches,
-        *passage_matches,
-        *fact_event_matches,
-        *fact_event_lexical_matches,
-    ]:
-        add(row, "quota_overflow")
-        if len(output) >= limit:
-            break
-    return output
-
-
 async def _answer_evidence_report(
     *,
     query: str,
@@ -381,32 +323,49 @@ async def run(args: argparse.Namespace) -> int:
     ]
     passage_cfg = config.get("passage_shadow")
     passage_cfg = passage_cfg if isinstance(passage_cfg, dict) else {}
-    min_fact_event_importance = max(
+    min_fact_importance = max(
         1, int(passage_cfg.get("min_fact_event_importance") or 3)
     )
+    min_event_importance = 1
     fact_event_store = FactEventStore(config, create=False)
     active_fact_events = FactEventSemanticItems.active(fact_event_store)
-    eligible_fact_events = [
+    eligible_facts = [
         item
         for item in active_fact_events
-        if int(item.get("importance") or 0) >= min_fact_event_importance
+        if str(item.get("item_type") or "") == "fact"
+        and int(item.get("importance") or 0) >= min_fact_importance
     ]
-    events = _active_events(
-        fact_event_store,
-        min_importance=min_fact_event_importance,
-    )
-    sync = await index.sync(
-        scenes=scenes,
-        events=events,
-        dry_run=not args.apply,
-        refresh_all=args.refresh_all,
-    )
+    events = _active_events(fact_event_store)
+    eligible_fact_events = [*eligible_facts, *events]
+    if args.apply:
+        sync = await index.rebuild_atomic(
+            scenes=scenes,
+            events=events,
+            refresh_all=args.refresh_all,
+        )
+    else:
+        sync = await index.sync(
+            scenes=scenes,
+            events=events,
+            dry_run=True,
+            refresh_all=args.refresh_all,
+        )
     report: dict[str, Any] = {
         "sync": sync,
         "fact_event_candidate_policy": {
-            "min_importance": min_fact_event_importance,
-            "eligible": len(eligible_fact_events),
-            "excluded_before_scoring": len(active_fact_events) - len(eligible_fact_events),
+            "event": {
+                "min_importance": min_event_importance,
+                "eligibility": "all_active",
+                "eligible": len(events),
+                "excluded_before_scoring": 0,
+            },
+            "fact": {
+                "min_importance": min_fact_importance,
+                "eligible": len(eligible_facts),
+                "excluded_before_scoring": (
+                    len(active_fact_events) - len(events) - len(eligible_facts)
+                ),
+            },
         },
     }
     fact_event_index: FactEventSemanticIndex | None = None
@@ -424,7 +383,7 @@ async def run(args: argparse.Namespace) -> int:
         fact_event_lexical_index = FactEventLexicalShadowIndex(config)
         fact_event_lexical_sync = fact_event_lexical_index.sync(
             active_fact_events,
-            min_importance=min_fact_event_importance,
+            min_importance=1,
             dry_run=not args.apply,
             refresh_all=args.refresh_all,
         )
@@ -466,17 +425,69 @@ async def run(args: argparse.Namespace) -> int:
             }
     if args.query and (args.apply or sync.get("to_embed") == 0):
         query_embedding = await embedding_engine.embed_query(args.query)
-        search = index.search_by_embedding(
-            query_embedding,
-            top_k=args.top_k,
-            owner_kinds=args.owner_kind,
-            passages_per_owner=2,
+        requested_kinds = set(args.owner_kind or ("scene", "event"))
+        scene_passage_search = (
+            index.search_by_embedding(
+                query_embedding,
+                top_k=args.top_k,
+                owner_kinds=("scene",),
+                passages_per_owner=2,
+            )
+            if "scene" in requested_kinds
+            else {"status": "skipped", "matches": []}
         )
+        event_passage_search = (
+            index.search_by_embedding(
+                query_embedding,
+                top_k=args.top_k,
+                owner_kinds=("event",),
+                passages_per_owner=2,
+            )
+            if "event" in requested_kinds
+            else {"status": "skipped", "matches": []}
+        )
+        scene_by_id = {str(scene["id"]): scene for scene in scenes}
+        scene_whole_rows: list[dict[str, Any]] = []
+        if "scene" in requested_kinds:
+            for match in embedding_engine.search_scene_whole_by_embedding(
+                query_embedding,
+                scene_ids=set(scene_by_id),
+                top_k=args.top_k,
+            ):
+                scene_id = str(match.get("scene_id") or "")
+                body = str((scene_by_id.get(scene_id) or {}).get("content") or "")
+                score = float(match.get("score") or 0.0)
+                scene_whole_rows.append(
+                    {
+                        "owner_kind": "scene",
+                        "owner_id": scene_id,
+                        "score": score,
+                        "passages": [{"text": body, "score": score}],
+                    }
+                )
+        passage_rows = [
+            *list(scene_passage_search.get("matches") or []),
+            *list(event_passage_search.get("matches") or []),
+        ]
+        search = {
+            "status": "ok",
+            "cross_lane_score_comparison": False,
+            "matches": passage_rows,
+            "lanes": {
+                "scene": scene_passage_search,
+                "event": event_passage_search,
+            },
+        }
         report["query"] = args.query
-        for match in search.get("matches") or []:
+        for match in passage_rows:
             match["candidate_sources"] = ["passage_embedding"]
         report["embedding_matches"] = search
-        fused_inputs = [list(search.get("matches") or [])]
+        report["scene_whole_embedding_matches"] = {
+            "status": "ok",
+            "matches": scene_whole_rows,
+            "decision_applied": False,
+        }
+        fused_inputs = [passage_rows]
         fact_event_lexical_rows: list[dict[str, Any]] = []
         if (
             fact_event_lexical_index is not None
@@ -486,6 +497,10 @@ async def run(args: argparse.Namespace) -> int:
             fact_event_lexical_search = fact_event_lexical_index.search(
                 args.query,
                 top_k=args.top_k,
+                min_importance_by_kind={
+                    "event": min_event_importance,
+                    "fact": min_fact_importance,
+                },
             )
             fact_event_lexical_rows = list(
                 fact_event_lexical_search.get("matches") or []
@@ -500,7 +515,10 @@ async def run(args: argparse.Namespace) -> int:
             fact_event_search = fact_event_index.search_by_embedding(
                 query_embedding,
                 top_k=args.top_k,
-                min_importance=min_fact_event_importance,
+                min_importance_by_kind={
+                    "event": min_event_importance,
+                    "fact": min_fact_importance,
+                },
             )
             fact_event_rows = _fact_event_embedding_rows(
                 fact_event_search,
@@ -547,28 +565,49 @@ async def run(args: argparse.Namespace) -> int:
             report["contextual_embedding_matches"] = contextual_search
             fused_inputs.append(list(contextual_search.get("matches") or []))
         fused = _fuse_matches(*fused_inputs)
-        report["parent_fusion"] = {
-            "method": "rrf_k60",
+        report["legacy_parent_fusion_baseline"] = {
+            "method": "rrf_k60_cross_source_baseline",
             "matches": fused[: args.top_k],
             "decision_applied": False,
         }
-        if cue_passage_rows or fact_event_rows or fact_event_lexical_rows:
-            report["source_balanced_candidate_pool"] = {
-                "limit": 7,
-                "lane_quota": 2,
-                "fact_event_lexical_quota": 1,
-                "matches": _source_balanced_candidate_pool(
-                    cue_passage_matches=cue_passage_rows,
-                    passage_matches=list(search.get("matches") or []),
-                    fact_event_matches=fact_event_rows,
-                    fact_event_lexical_matches=fact_event_lexical_rows,
+        if passage_rows or cue_passage_rows or fact_event_rows or fact_event_lexical_rows:
+            typed_event_rows = [
+                row for row in fact_event_rows if row.get("owner_kind") == "event"
+            ]
+            typed_event_lexical_rows = [
+                row
+                for row in fact_event_lexical_rows
+                if row.get("owner_kind") == "event"
+            ]
+            scene_lane = build_scene_lane(
+                list(scene_passage_search.get("matches") or []),
+                cue_passage_rows,
+                scene_whole_rows,
+            )
+            event_lane = build_event_lane(
+                list(event_passage_search.get("matches") or []),
+                typed_event_rows,
+                typed_event_lexical_rows,
+            )
+            report["typed_candidate_pool"] = {
+                "limit": 6,
+                "lane_quotas": {"scene": 3, "event": 3},
+                "cross_lane_score_comparison": False,
+                "cue_contributes_score": False,
+                "event_eligibility": "all_active",
+                "matches": balanced_typed_pool(
+                    [
+                        ("scene", scene_lane, 3),
+                        ("event", event_lane, 3),
+                    ],
+                    limit=6,
                 ),
                 "decision_applied": False,
             }
         if args.rerank:
             report["body_only_rerank_shadow"] = await _rerank_report(
                 args.query,
-                list(search.get("matches") or []),
+                passage_rows,
                 RerankerEngine(config),
             )
         if args.verify:
@@ -585,7 +624,11 @@ async def run(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="")
-    parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Build in staging and atomically activate only after full success.",
+    )
     parser.add_argument("--refresh-all", action="store_true")
     parser.add_argument("--query", default="")
     parser.add_argument("--previous-turn", default="")
@@ -607,7 +650,7 @@ def main() -> int:
     parser.add_argument(
         "--fact-event",
         action="store_true",
-        help="Build/query importance-filtered Fact/Event body embeddings in shadow.",
+        help="Build/query typed Fact/Event body embeddings; active Events are not importance-gated.",
     )
     args = parser.parse_args()
     args.owner_kind = args.owner_kind or ["scene", "event"]

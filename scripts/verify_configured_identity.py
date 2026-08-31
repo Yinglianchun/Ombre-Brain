@@ -11,12 +11,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server
 from identity import identity_names
+from mcp_surface import DAILY_TOOL_NAMES
 from narrative_rolls import NarrativeRollStore
 
 
 async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
-    assert len(tools) == 16
+    assert set(tools) == set(DAILY_TOOL_NAMES)
+    assert "find_arc" in tools
     assert "narrative_revision_inbox" in tools
     assert "review_narrative_revision" in tools
 
@@ -67,6 +69,8 @@ async def main() -> None:
         "scene",
         "shadow",
         "narrative",
+        "fact",
+        "event",
     ]
     assert set(read_schema["required"]) == {"memory_type", "memory_id"}
     recall_schema = tools["recall_memory"].inputSchema

@@ -6,7 +6,9 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
+import tempfile
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-PASSAGE_SCHEMA_VERSION = 1
+PASSAGE_SCHEMA_VERSION = 4
 _STRONG_BOUNDARIES = frozenset("。！？!?；;\n")
 _SOFT_BOUNDARIES = frozenset("，,：:")
 _CLOSING_MARKS = frozenset("”’」』】）》\"'")
@@ -26,6 +28,7 @@ def _now() -> str:
 
 @dataclass(frozen=True)
 class PassageConfig:
+    min_owner_chars: int = 200
     target_chars: int = 160
     max_chars: int = 240
     min_chars: int = 40
@@ -35,11 +38,18 @@ class PassageConfig:
     def from_config(cls, config: dict[str, Any]) -> "PassageConfig":
         raw = config.get("passage_shadow")
         raw = raw if isinstance(raw, dict) else {}
+        min_owner_chars = _bounded_int(raw.get("min_owner_chars"), 200, 0, 2000)
         target = _bounded_int(raw.get("target_chars"), 160, 80, 400)
         maximum = _bounded_int(raw.get("max_chars"), 240, target, 800)
         minimum = _bounded_int(raw.get("min_chars"), 40, 20, target)
         overlap = _bounded_int(raw.get("overlap_sentences"), 1, 0, 2)
-        return cls(target, maximum, minimum, overlap)
+        return cls(
+            min_owner_chars=min_owner_chars,
+            target_chars=target,
+            max_chars=maximum,
+            min_chars=minimum,
+            overlap_sentences=overlap,
+        )
 
 
 def _bounded_int(value: Any, default: int, low: int, high: int) -> int:
@@ -244,9 +254,15 @@ class PassageShadowIndex:
         self.embedding_concurrency = _bounded_int(
             raw_config.get("embedding_concurrency"), 6, 1, 12
         )
+        self.backfill_embedding_concurrency = _bounded_int(
+            raw_config.get("backfill_embedding_concurrency"), 2, 1, 4
+        )
+        self.backfill_request_delay_ms = _bounded_int(
+            raw_config.get("backfill_request_delay_ms"), 150, 0, 5000
+        )
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+    def _connect(self, db_path: str | None = None) -> sqlite3.Connection:
+        conn = sqlite3.connect(db_path or self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -265,9 +281,10 @@ class PassageShadowIndex:
             return {"status": "unavailable", "reason": "index_unreadable", "error": str(exc)}
         return {"status": "ok"}
 
-    def _init_db(self) -> None:
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        with closing(self._connect()) as conn:
+    def _init_db(self, db_path: str | None = None) -> None:
+        target_path = db_path or self.db_path
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        with closing(self._connect(target_path)) as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS memory_passage_embeddings (
@@ -287,14 +304,30 @@ class PassageShadowIndex:
                 );
                 CREATE INDEX IF NOT EXISTS idx_memory_passages_owner
                 ON memory_passage_embeddings(owner_kind, owner_id);
+
+                CREATE TABLE IF NOT EXISTS memory_passage_owner_state (
+                    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('scene', 'event')),
+                    owner_id TEXT NOT NULL,
+                    source_hash TEXT NOT NULL,
+                    passage_count INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(owner_kind, owner_id)
+                );
                 """
             )
 
-    def _source_hash(self, owner_kind: str, owner_id: str, content: str) -> str:
+    def _source_hash(
+        self,
+        owner_kind: str,
+        owner_id: str,
+        content: str,
+        title: str = "",
+    ) -> str:
         profile = {
             "schema": PASSAGE_SCHEMA_VERSION,
             "owner_kind": owner_kind,
             "owner_id": owner_id,
+            "title": title,
             "content": content,
             "model": str(getattr(self.embedding_engine, "model", "") or ""),
             "document_instruction": str(
@@ -310,18 +343,18 @@ class PassageShadowIndex:
     def _owners(
         scenes: Iterable[dict[str, Any]],
         events: Iterable[dict[str, Any]],
-    ) -> list[tuple[str, str, str]]:
-        owners: list[tuple[str, str, str]] = []
+    ) -> list[tuple[str, str, str, str]]:
+        owners: list[tuple[str, str, str, str]] = []
         for item in scenes:
             owner_id = str(item.get("id") or item.get("scene_id") or "").strip()
             content = str(item.get("content") or item.get("body") or "")
             if owner_id and content.strip():
-                owners.append(("scene", owner_id, content))
+                owners.append(("scene", owner_id, content, ""))
         for item in events:
             owner_id = str(item.get("item_id") or item.get("event_id") or "").strip()
             content = str(item.get("body") or item.get("content") or "")
             if owner_id and content.strip():
-                owners.append(("event", owner_id, content))
+                owners.append(("event", owner_id, content, str(item.get("title") or "").strip()))
         return owners
 
     async def sync(
@@ -331,34 +364,61 @@ class PassageShadowIndex:
         events: Iterable[dict[str, Any]],
         dry_run: bool = False,
         refresh_all: bool = False,
+        embedding_concurrency: int | None = None,
+        request_delay_ms: int = 0,
+        _db_path: str | None = None,
     ) -> dict[str, Any]:
+        target_db_path = _db_path or self.db_path
         owners = self._owners(scenes, events)
         existing: dict[tuple[str, str], list[sqlite3.Row]] = {}
-        if os.path.exists(self.db_path):
-            with closing(self._connect()) as conn:
+        existing_state: dict[tuple[str, str], sqlite3.Row] = {}
+        if os.path.exists(target_db_path):
+            with closing(self._connect(target_db_path)) as conn:
                 for row in conn.execute("SELECT * FROM memory_passage_embeddings"):
                     existing.setdefault(
                         (str(row["owner_kind"]), str(row["owner_id"])), []
                     ).append(row)
+                state_table = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    ("memory_passage_owner_state",),
+                ).fetchone()
+                if state_table:
+                    existing_state = {
+                        (str(row["owner_kind"]), str(row["owner_id"])): row
+                        for row in conn.execute("SELECT * FROM memory_passage_owner_state")
+                    }
 
-        desired_keys = {(kind, owner_id) for kind, owner_id, _content in owners}
-        stale_keys = sorted(set(existing) - desired_keys)
-        plans: list[tuple[str, str, str, str, list[dict[str, Any]], bool]] = []
-        for kind, owner_id, content in owners:
-            source_hash = self._source_hash(kind, owner_id, content)
-            passages = build_verbatim_passages(content, self.passage_config)
-            rows = existing.get((kind, owner_id), [])
-            reusable = bool(rows) and not refresh_all and all(
-                str(row["source_hash"]) == source_hash for row in rows
-            ) and len(rows) == len(passages)
-            plans.append((kind, owner_id, content, source_hash, passages, reusable))
+        desired_keys = {(kind, owner_id) for kind, owner_id, _content, _title in owners}
+        stale_keys = sorted((set(existing) | set(existing_state)) - desired_keys)
+        plans: list[tuple[str, str, str, str, str, list[dict[str, Any]], bool]] = []
+        for kind, owner_id, content, title in owners:
+            source_hash = self._source_hash(kind, owner_id, content, title)
+            passages = (
+                build_verbatim_passages(content, self.passage_config)
+                if len(content.strip()) > self.passage_config.min_owner_chars
+                else []
+            )
+            if len(passages) <= 1:
+                passages = []
+            state = existing_state.get((kind, owner_id))
+            reusable = bool(state) and not refresh_all and (
+                str(state["source_hash"]) == source_hash
+                and int(state["passage_count"] or 0) == len(passages)
+            )
+            plans.append((kind, owner_id, content, title, source_hash, passages, reusable))
 
         kind_counts = {
-            kind: sum(1 for owner_kind, _owner_id, _content in owners if owner_kind == kind)
+            kind: sum(
+                1
+                for owner_kind, _owner_id, _content, _title in owners
+                if owner_kind == kind
+            )
             for kind in ("scene", "event")
         }
-        passage_count = sum(len(plan[4]) for plan in plans)
-        to_embed = sum(len(plan[4]) for plan in plans if not plan[5])
+        passage_count = sum(len(plan[5]) for plan in plans)
+        to_embed = sum(len(plan[5]) for plan in plans if not plan[6])
+        owners_to_refresh = sum(1 for plan in plans if not plan[6])
+        whole_only_owners = sum(1 for plan in plans if not plan[5])
         if dry_run:
             return {
                 "status": "dry_run",
@@ -366,41 +426,55 @@ class PassageShadowIndex:
                 "owner_kinds": kind_counts,
                 "passages": passage_count,
                 "to_embed": to_embed,
+                "owners_to_refresh": owners_to_refresh,
+                "whole_only_owners": whole_only_owners,
                 "stale_owners": len(stale_keys),
                 "passage_config": self.passage_config.__dict__,
             }
-        if not getattr(self.embedding_engine, "enabled", False):
+        pending_plans = [plan for plan in plans if not plan[6]]
+        if pending_plans and not getattr(self.embedding_engine, "enabled", False):
             raise RuntimeError("embedding_engine_disabled")
 
-        self._init_db()
+        self._init_db(target_db_path)
         embedded = 0
         failed: list[str] = []
-        semaphore = asyncio.Semaphore(self.embedding_concurrency)
+        effective_concurrency = _bounded_int(
+            embedding_concurrency,
+            self.embedding_concurrency,
+            1,
+            12,
+        )
+        effective_delay_ms = _bounded_int(request_delay_ms, 0, 0, 5000)
+        semaphore = asyncio.Semaphore(effective_concurrency)
 
         async def embed_plan(
-            plan: tuple[str, str, str, str, list[dict[str, Any]], bool],
+            plan: tuple[str, str, str, str, str, list[dict[str, Any]], bool],
         ) -> tuple[str, str, list[tuple[dict[str, Any], list[float]]]]:
-            kind, owner_id, _content, _source_hash, passages, reusable = plan
+            kind, owner_id, _content, title, _source_hash, passages, reusable = plan
             if reusable:
                 return kind, owner_id, []
             rows_to_write: list[tuple[dict[str, Any], list[float]]] = []
             for passage in passages:
+                embedding_text = (
+                    f"{title}\n{passage['text']}" if kind == "event" and title else passage["text"]
+                )
                 async with semaphore:
-                    vector = await self.embedding_engine.embed_document(passage["text"])
+                    if effective_delay_ms:
+                        await asyncio.sleep(effective_delay_ms / 1000)
+                    vector = await self.embedding_engine.embed_document(embedding_text)
                 if not vector:
                     return kind, owner_id, []
                 rows_to_write.append((passage, vector))
             return kind, owner_id, rows_to_write
 
-        pending_plans = [plan for plan in plans if not plan[5]]
         embedded_plans = await asyncio.gather(
             *(embed_plan(plan) for plan in pending_plans)
         )
         embedded_by_owner = {
             (kind, owner_id): rows for kind, owner_id, rows in embedded_plans
         }
-        with closing(self._connect()) as conn:
-            for kind, owner_id, _content, source_hash, passages, reusable in plans:
+        with closing(self._connect(target_db_path)) as conn:
+            for kind, owner_id, _content, _title, source_hash, passages, reusable in plans:
                 if reusable:
                     continue
                 rows_to_write = embedded_by_owner.get((kind, owner_id), [])
@@ -436,9 +510,25 @@ class PassageShadowIndex:
                         ),
                     )
                     embedded += 1
+                conn.execute(
+                    """
+                    INSERT INTO memory_passage_owner_state(
+                        owner_kind, owner_id, source_hash, passage_count, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(owner_kind, owner_id) DO UPDATE SET
+                        source_hash=excluded.source_hash,
+                        passage_count=excluded.passage_count,
+                        updated_at=excluded.updated_at
+                    """,
+                    (kind, owner_id, source_hash, len(passages), _now()),
+                )
             for kind, owner_id in stale_keys:
                 conn.execute(
                     "DELETE FROM memory_passage_embeddings WHERE owner_kind=? AND owner_id=?",
+                    (kind, owner_id),
+                )
+                conn.execute(
+                    "DELETE FROM memory_passage_owner_state WHERE owner_kind=? AND owner_id=?",
                     (kind, owner_id),
                 )
             conn.commit()
@@ -447,12 +537,70 @@ class PassageShadowIndex:
             "owners": len(owners),
             "owner_kinds": kind_counts,
             "passages": passage_count,
+            "owners_to_refresh": owners_to_refresh,
+            "whole_only_owners": whole_only_owners,
             "embedded": embedded,
-            "reused_owners": sum(1 for plan in plans if plan[5]),
+            "reused_owners": sum(1 for plan in plans if plan[6]),
             "failed_owners": sorted(set(failed)),
             "removed_owners": len(stale_keys),
-            "embedding_concurrency": self.embedding_concurrency,
+            "embedding_concurrency": effective_concurrency,
+            "request_delay_ms": effective_delay_ms,
         }
+
+    async def rebuild_atomic(
+        self,
+        *,
+        scenes: Iterable[dict[str, Any]],
+        events: Iterable[dict[str, Any]],
+        refresh_all: bool = False,
+    ) -> dict[str, Any]:
+        """Build a complete candidate DB and activate it only after full success."""
+
+        scene_rows = list(scenes)
+        event_rows = list(events)
+        plan = await self.sync(
+            scenes=scene_rows,
+            events=event_rows,
+            dry_run=True,
+            refresh_all=refresh_all,
+        )
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        descriptor, staging_path = tempfile.mkstemp(
+            prefix="memory_passage_embeddings-",
+            suffix=".next.sqlite",
+            dir=os.path.dirname(self.db_path),
+        )
+        os.close(descriptor)
+        os.unlink(staging_path)
+        previous_index_available = os.path.exists(self.db_path)
+        if previous_index_available:
+            shutil.copy2(self.db_path, staging_path)
+        try:
+            result = await self.sync(
+                scenes=scene_rows,
+                events=event_rows,
+                refresh_all=refresh_all,
+                embedding_concurrency=self.backfill_embedding_concurrency,
+                request_delay_ms=self.backfill_request_delay_ms,
+                _db_path=staging_path,
+            )
+            if result.get("status") != "ok":
+                return {
+                    **result,
+                    "plan": plan,
+                    "activated": False,
+                    "previous_index_preserved": previous_index_available,
+                }
+            os.replace(staging_path, self.db_path)
+            return {
+                **result,
+                "plan": plan,
+                "activated": True,
+                "previous_index_preserved": False,
+            }
+        finally:
+            if os.path.exists(staging_path):
+                os.unlink(staging_path)
 
     def search_by_embedding(
         self,

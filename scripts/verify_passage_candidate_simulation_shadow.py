@@ -25,53 +25,88 @@ def row(kind: str, item_id: str, score: float) -> dict:
 
 
 class PassageIndex:
-    def search_by_embedding(self, *_args, **_kwargs):
-        return {"status": "ok", "candidate_count": 2, "matches": [
-            row("scene", "scene-a", 0.91),
-            row("scene", "scene-b", 0.89),
-        ]}
+    def search_by_embedding(self, *_args, **kwargs):
+        if tuple(kwargs.get("owner_kinds") or ()) == ("event",):
+            result = {
+                "status": "ok",
+                "candidate_count": 1,
+                "matches": [row("event", "event-a", 0.84)],
+            }
+        else:
+            result = {
+                "status": "ok",
+                "candidate_count": 2,
+                "matches": [
+                    row("scene", "scene-a", 0.91),
+                    row("scene", "scene-b", 0.89),
+                ],
+            }
+        allowed = kwargs.get("allowed_owner_ids")
+        if allowed is not None:
+            result["matches"] = [
+                item
+                for item in result["matches"]
+                if (item["owner_kind"], item["owner_id"]) in allowed
+            ]
+            result["candidate_count"] = len(result["matches"])
+        return result
 
 
 class CuePassageIndex:
-    def search_by_embedding(self, *_args, **_kwargs):
+    def search_by_embedding(self, *_args, **kwargs):
         match = row("scene", "scene-a", 0.95)
         match["matched_cues"] = ["初遇"]
-        return {"status": "ok", "candidate_count": 1, "matches": [match]}
+        matches = [match] if "scene-a" in set(kwargs.get("allowed_scene_ids") or []) else []
+        return {"status": "ok", "candidate_count": len(matches), "matches": matches}
 
 
 class FactSemanticIndex:
     def search_by_embedding(self, *_args, **kwargs):
-        assert kwargs["min_importance"] == 3
-        return {"status": "ok", "candidate_count": 2, "matches": [
-            {"memory_kind": "fact", "memory_id": "fact-a", "score": 0.82, "importance": 4},
+        assert kwargs["memory_kinds"] == ("event",)
+        assert kwargs["min_importance_by_kind"] == {"event": 1}
+        matches = [
             {"memory_kind": "event", "memory_id": "event-a", "score": 0.78, "importance": 3},
-        ]}
+        ]
+        allowed = kwargs.get("allowed_memory_ids")
+        if allowed is not None:
+            matches = [item for item in matches if item["memory_id"] in allowed]
+        return {"status": "ok", "candidate_count": len(matches), "matches": matches}
 
 
 class LexicalIndex:
-    def search(self, *_args, **_kwargs):
-        match = row("fact", "fact-a", 4.2)
+    def search(self, *_args, **kwargs):
+        assert kwargs["memory_kinds"] == ("event",)
+        match = row("event", "event-a", 4.2)
         match.update({
             "importance": 4,
             "candidate_sources": ["fact_event_lexical"],
             "specific_terms": ["初遇"],
         })
-        return {"status": "ok", "candidate_count": 1, "matches": [match]}
+        allowed = kwargs.get("allowed_memory_ids")
+        matches = [match] if allowed is None or "event-a" in allowed else []
+        return {"status": "ok", "candidate_count": len(matches), "matches": matches}
 
 
 service = GatewayService.__new__(GatewayService)
 service.passage_candidate_shadow_enabled = True
 service.passage_shadow_min_fact_event_importance = 3
+service.passage_shadow_min_fact_importance = 3
+service.passage_shadow_min_event_importance = 1
 service.passage_shadow_index = PassageIndex()
 service.cue_passage_shadow_index = CuePassageIndex()
 service.fact_event_semantic_index = FactSemanticIndex()
 service.fact_event_lexical_shadow_index = LexicalIndex()
 service._passage_candidate_shadow_sync = {"status": "ok", "decision_applied": False}
 service._passage_candidate_shadow_catalog = {
-    "scene-a": {"owner_kind": "scene", "title": "A"},
-    "scene-b": {"owner_kind": "scene", "title": "B"},
-    "fact-a": {"owner_kind": "fact", "title": "F", "importance": 4, "body": "fact body"},
-    "event-a": {"owner_kind": "event", "title": "E", "importance": 3, "body": "event body"},
+    "scene-a": {"owner_kind": "scene", "title": "A", "memory_date": "2026-01-01"},
+    "scene-b": {"owner_kind": "scene", "title": "B", "memory_date": "2026-08-30"},
+    "event-a": {
+        "owner_kind": "event",
+        "title": "E",
+        "importance": 3,
+        "body": "event body",
+        "memory_date": "2026-08-20",
+    },
 }
 
 active_scene = {
@@ -96,15 +131,79 @@ assert debug["status"] == "ok"
 assert debug["decision_applied"] is False
 assert debug["live_injection_enabled"] is False
 assert debug["policy"]["duplicate_score_boost"] is False
-assert len(debug["candidates"]) == 4
+assert len(debug["candidates"]) == 3
 scene_a = next(item for item in debug["candidates"] if item["owner_id"] == "scene-a")
-assert scene_a["candidate_lane"] == "cue_passage"
-assert scene_a["candidate_sources"] == ["cue_passage_embedding", "passage_embedding"]
-fact_a = next(item for item in debug["candidates"] if item["owner_id"] == "fact-a")
-assert fact_a["candidate_sources"] == [
-    "fact_event_body_embedding",
-    "fact_event_lexical",
+assert scene_a["candidate_lane"] == "scene"
+assert scene_a["score"] == 0.91
+assert scene_a["candidate_sources"] == [
+    "scene_passage_embedding",
+    "scene_cue_candidate",
 ]
+event_a = next(item for item in debug["candidates"] if item["owner_id"] == "event-a")
+assert event_a["candidate_lane"] == "event"
+assert event_a["score"] == 0.84
+assert debug["policy"]["cross_lane_score_comparison"] is False
+assert debug["policy"]["cue_contributes_score"] is False
+assert debug["policy"]["event_eligibility"] == "all_active"
+assert "fact" not in debug["lanes"]
+
+recent_debug = service._passage_candidate_shadow_debug("最近的初遇", [1.0, 0.0])
+recent_scenes = recent_debug["lanes"]["scene"]["matches"]
+assert [item["owner_id"] for item in recent_scenes[:2]] == ["scene-b", "scene-a"]
+assert recent_scenes[0]["freshness"]["explicit_recent_intent"] is True
+
+
+class ObservedScope:
+    def resolve_query(self, query: str):
+        if query == "阿尼亚":
+            return {"status": "scope_only", "operator": "none", "scope_anchor": {"arc_key": "work:spy"}}
+        if query == "看到哪了":
+            return {"status": "insufficient_scope", "operator": "latest_relevant_member", "scope_anchor": None}
+        if query == "约尔后来怎么发展":
+            return {"status": "ambiguous_scope", "operator": "timeline", "scope_anchor": None}
+        if query == "事情":
+            return {"status": "no_scope", "operator": "none", "scope_anchor": None}
+        return {
+            "status": "scoped_recall",
+            "operator": "latest_relevant_member",
+            "scope_anchor": {"arc_key": "work:spy"},
+        }
+
+    def link_candidates(self, *_args):
+        return []
+
+
+service.observed_entity_shadow_index = ObservedScope()
+service._passage_candidate_shadow_arc_members = {
+    "work:spy": {("scene", "scene-b"), ("event", "event-a")}
+}
+service._passage_candidate_shadow_arc_cards = {
+    "work:spy": {
+        "arc_key": "work:spy",
+        "narrative_id": "narrative_spy",
+        "title": "《间谍过家家》共同观看",
+        "member_count": 2,
+        "narrative_available": True,
+        "read_hint": "可按需读取",
+    }
+}
+scoped = service._passage_candidate_shadow_debug("《间谍过家家》看到哪了", [1.0, 0.0])
+assert {item["owner_id"] for item in scoped["candidates"]} == {"scene-b", "event-a"}, scoped
+assert all(item["arc_cards"][0]["read_hint"] == "可按需读取" for item in scoped["candidates"])
+assert scoped["policy"]["scope_applied_before_candidate_search"] is True, scoped
+assert service._passage_candidate_shadow_debug("阿尼亚", [1.0, 0.0])["reason"] == (
+    "entity_without_recall_intent"
+)
+assert service._passage_candidate_shadow_debug("看到哪了", [1.0, 0.0])["reason"] == (
+    "scope_required_for_deictic_intent"
+)
+assert service._passage_candidate_shadow_debug("约尔后来怎么发展", [1.0, 0.0])[
+    "reason"
+] == "ambiguous_entity_scope"
+assert service._passage_candidate_shadow_debug("事情", [1.0, 0.0])["reason"] == (
+    "global_query_lacks_specific_terms"
+)
+del service.observed_entity_shadow_index
 
 long_query = (
     "可能是一种初恋情结吧...不希望这种人也用ChatGPT，"
@@ -500,8 +599,8 @@ async def verify_mutation_refresh_queue() -> None:
     refresh_service.bucket_mgr = Buckets()
     calls = []
 
-    async def fake_sync(self, buckets):
-        calls.append(buckets)
+    async def fake_sync(self, buckets, *, apply_passage_embeddings=False):
+        calls.append((buckets, apply_passage_embeddings))
         await asyncio.sleep(0)
         return {"status": "ok", "decision_applied": False}
 
@@ -516,6 +615,7 @@ async def verify_mutation_refresh_queue() -> None:
     assert queued["status"] == "queued"
     await refresh_service._passage_shadow_refresh_task
     assert len(calls) == 1
+    assert calls[0][1] is True
     assert refresh_service._passage_candidate_shadow_sync["requested_scene_ids"] == [
         "scene-edited"
     ]
@@ -527,8 +627,131 @@ async def verify_mutation_refresh_queue() -> None:
     )
 
 
+async def verify_warm_plans_and_bounded_refresh_applies() -> None:
+    warm_service = GatewayService.__new__(GatewayService)
+    warm_service.passage_shadow_min_fact_importance = 3
+    warm_service.passage_shadow_min_event_importance = 1
+    warm_service.passage_shadow_auto_refresh_max_passages = 3
+
+    class Store:
+        def list(self, **_kwargs):
+            return {
+                "items": [
+                    {
+                        "item_id": "event-warm",
+                        "item_type": "event",
+                        "title": "warm event",
+                        "body": "event body",
+                        "importance": 1,
+                    }
+                ],
+                "count": 1,
+            }
+
+    class PlannedPassageIndex:
+        def __init__(self):
+            self.to_embed = 40
+            self.calls = []
+
+        async def sync(self, *, scenes, events, dry_run=False):
+            self.calls.append(
+                {
+                    "dry_run": dry_run,
+                    "scenes": len(scenes),
+                    "events": len(events),
+                }
+            )
+            if dry_run:
+                return {
+                    "status": "dry_run",
+                    "owners": len(scenes) + len(events),
+                    "passages": self.to_embed,
+                    "to_embed": self.to_embed,
+                    "stale_owners": 0,
+                }
+            return {
+                "status": "ok",
+                "embedded": self.to_embed,
+                "removed_owners": 0,
+            }
+
+        def passages_for_owners(self, *_args, **_kwargs):
+            return {}
+
+    class PlannedCueIndex:
+        async def sync(self, **_kwargs):
+            return {"status": "dry_run", "to_bind": 4}
+
+    class PlannedLexicalIndex:
+        def sync(self, *_args, **_kwargs):
+            return {"status": "ok"}
+
+    class PlannedSemanticIndex:
+        async def sync(self, *_args, **_kwargs):
+            return {"status": "ok"}
+
+    class PlannedObservedEntityIndex:
+        def __init__(self):
+            self.calls = []
+
+        def sync(self, *, owners, arc_profiles, dry_run=False):
+            self.calls.append(
+                {
+                    "dry_run": dry_run,
+                    "owners": len(owners),
+                    "arcs": len(arc_profiles),
+                }
+            )
+            return {"status": "dry_run" if dry_run else "ok"}
+
+    class EmptyNarrativeStore:
+        def recall_scope_profiles(self):
+            return []
+
+    class EmptySceneEvidenceStore:
+        def list_active_for_scenes(self, _scene_ids):
+            return {}
+
+    passage_index = PlannedPassageIndex()
+    observed_index = PlannedObservedEntityIndex()
+    warm_service.fact_event_store = Store()
+    warm_service.passage_shadow_index = passage_index
+    warm_service.cue_passage_shadow_index = PlannedCueIndex()
+    warm_service.fact_event_lexical_shadow_index = PlannedLexicalIndex()
+    warm_service.fact_event_semantic_index = PlannedSemanticIndex()
+    warm_service.observed_entity_shadow_index = observed_index
+    warm_service.narrative_roll_store = EmptyNarrativeStore()
+    warm_service.scene_evidence_store = EmptySceneEvidenceStore()
+
+    buckets = [
+        {
+            "id": "scene-warm",
+            "content": "scene body",
+            "metadata": {"object_kind": "scene", "active": True},
+        }
+    ]
+    warm = await warm_service._sync_passage_candidate_shadow(buckets)
+    assert passage_index.calls == [{"dry_run": True, "scenes": 1, "events": 1}]
+    assert warm["passage"]["status"] == "stale", warm
+    assert warm["passage"]["reason"] == "explicit_backfill_required", warm
+    assert warm["passage"]["embeddings_applied"] is False, warm
+    assert observed_index.calls == [{"dry_run": True, "owners": 2, "arcs": 0}]
+
+    passage_index.to_embed = 2
+    passage_index.calls.clear()
+    refreshed = await warm_service._sync_passage_candidate_shadow(
+        buckets,
+        apply_passage_embeddings=True,
+    )
+    assert [call["dry_run"] for call in passage_index.calls] == [True, False]
+    assert refreshed["passage"]["embeddings_applied"] is True, refreshed
+    assert refreshed["passage"]["apply_source"] == "bounded_mutation_refresh", refreshed
+    assert observed_index.calls[-1] == {"dry_run": False, "owners": 2, "arcs": 0}
+
+
 asyncio.run(verify_weak_trigger_controls_query_view_execution())
 asyncio.run(verify_full_handler_uses_prefetched_query_vector())
 asyncio.run(verify_mutation_refresh_queue())
+asyncio.run(verify_warm_plans_and_bounded_refresh_applies())
 
 print("PASSAGE_CANDIDATE_SIMULATION_SHADOW_OK")

@@ -243,12 +243,45 @@ class FactEventLexicalShadowIndex:
                 }
         return {}
 
-    def search(self, query: str, *, top_k: int = 10) -> dict[str, Any]:
+    def search(
+        self,
+        query: str,
+        *,
+        top_k: int = 10,
+        memory_kinds: Iterable[str] = ("fact", "event"),
+        min_importance: int = 1,
+        min_importance_by_kind: dict[str, int] | None = None,
+        allowed_memory_ids: Iterable[str] | None = None,
+    ) -> dict[str, Any]:
         query_terms = list(dict.fromkeys(lexical_terms(query)))
         if not query_terms:
             return {"status": "ok", "candidate_count": 0, "matches": []}
         if not os.path.exists(self.db_path):
             return {"status": "unavailable", "reason": "index_missing", "matches": []}
+        kinds = {
+            str(value or "").strip().lower() for value in memory_kinds
+        }.intersection({"fact", "event"})
+        if not kinds:
+            return {"status": "ok", "candidate_count": 0, "matches": []}
+        default_min_importance = max(1, int(min_importance or 1))
+        importance_floor = {
+            kind: max(
+                1,
+                int((min_importance_by_kind or {}).get(kind, default_min_importance) or 1),
+            )
+            for kind in kinds
+        }
+        allowed_ids = (
+            {
+                str(value or "").strip()
+                for value in allowed_memory_ids
+                if str(value or "").strip()
+            }
+            if allowed_memory_ids is not None
+            else None
+        )
+        if allowed_ids is not None and not allowed_ids:
+            return {"status": "ok", "candidate_count": 0, "matches": []}
         placeholders = ",".join("?" for _ in query_terms)
         with closing(self._connect()) as conn:
             corpus = conn.execute(
@@ -276,6 +309,13 @@ class FactEventLexicalShadowIndex:
             ).fetchall()
         by_item: dict[str, dict[str, Any]] = {}
         for row in rows:
+            item_type = str(row["item_type"])
+            if item_type not in kinds:
+                continue
+            if allowed_ids is not None and str(row["item_id"]) not in allowed_ids:
+                continue
+            if int(row["importance"] or 0) < importance_floor[item_type]:
+                continue
             term = str(row["term"])
             df = stats.get(term, n_docs)
             tf = float(row["weighted_tf"] or 0.0)
@@ -334,6 +374,7 @@ class FactEventLexicalShadowIndex:
             "corpus_documents": n_docs,
             "query_terms": query_terms,
             "matches": output,
+            "min_importance_by_kind": importance_floor,
             "candidate_only": True,
             "decision_applied": False,
         }

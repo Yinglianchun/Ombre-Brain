@@ -45,6 +45,9 @@ def main() -> None:
             document=_document(EVENT_A, EVENT_B),
             expected_revision=0,
             title="Event-only test",
+            arc_key="work:event-only-test",
+            title_aliases=["事件长线测试"],
+            primary_entities=["测试角色"],
             source_event_ids=[EVENT_A, EVENT_B],
         )
         assert created["status"] == "created", created
@@ -60,6 +63,24 @@ def main() -> None:
         index = store.list(query="Event-only test")
         assert index["count"] == 1, index
         assert index["items"][0]["linked_event_count"] == 2, index
+
+        exact_card = store.find_arc_cards("事件长线测试")
+        assert exact_card["count"] == 1, exact_card
+        assert exact_card["items"][0]["arc_key"] == "work:event-only-test", exact_card
+        assert exact_card["items"][0]["narrative_available"] is True, exact_card
+        assert exact_card["items"][0]["read_hint"] == "可按需读取", exact_card
+        assert "body" not in exact_card["items"][0], exact_card
+
+        entity_card = store.find_arc_cards("测试角色")
+        assert entity_card["items"][0]["match_reason"] == "exact_entity", entity_card
+
+        fuzzy_card = store.find_arc_cards("事件长线测式")
+        assert fuzzy_card["count"] == 1, fuzzy_card
+        assert fuzzy_card["items"][0]["match_reason"] == "fuzzy_title", fuzzy_card
+        by_key = store.arc_card_by_key("work:event-only-test")
+        assert by_key["status"] == "ok", by_key
+        assert by_key["body_included"] is False, by_key
+        assert "body" not in by_key["item"], by_key
 
         second_parent = store.publish(
             narrative_id="narrative_second_parent_test",

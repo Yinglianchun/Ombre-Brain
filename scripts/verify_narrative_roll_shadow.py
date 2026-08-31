@@ -57,19 +57,45 @@ def verify_shadow_gate() -> None:
         service = GatewayService.__new__(GatewayService)
         service.narrative_roll_store = build_store(temp_dir)
 
+        class ScopeResolver:
+            @staticmethod
+            def resolve_query(query: str) -> dict:
+                if "我们借别人的故事说自己" not in query:
+                    return {
+                        "status": "no_scope",
+                        "scope_anchor": None,
+                        "retrieval_allowed": False,
+                    }
+                return {
+                    "status": "scoped_recall" if "整体" in query else "scope_only",
+                    "scope_anchor": {"arc_key": ""},
+                    "retrieval_allowed": "整体" in query,
+                }
+
+        service.observed_entity_shadow_index = ScopeResolver()
+
         exact_title = service._narrative_roll_shadow_debug(
             "我们借别人的故事说自己",
             [],
             route_allowed=True,
         )
-        assert exact_title["status"] == "shadow_admitted", exact_title
-        assert exact_title["reason"] == "exact_title", exact_title
-        assert exact_title["admitted_narrative_id"] == "narrative_stories_reflect_us"
+        assert exact_title["status"] == "not_admitted", exact_title
+        assert exact_title["reason"] == "scope_intent_conjunction_not_satisfied", exact_title
+        assert exact_title["would_admit_narrative_id"] == "narrative_stories_reflect_us"
+        assert exact_title["admitted_narrative_id"] == ""
         assert exact_title["mode"] == "shadow_only"
         assert exact_title["gateway_live_injection_enabled"] is False
         assert exact_title["visible_injection"] is False
         assert exact_title["available_narrative_count"] == 1
         assert "body" not in exact_title
+
+        scoped_title = service._narrative_roll_shadow_debug(
+            "我们借别人的故事说自己整体讲讲",
+            [],
+            route_allowed=True,
+        )
+        assert scoped_title["status"] == "shadow_admitted", scoped_title
+        assert scoped_title["admitted_narrative_id"] == "narrative_stories_reflect_us"
 
         two_scenes = service._narrative_roll_shadow_debug(
             "这条普通语句没有标题或实体",

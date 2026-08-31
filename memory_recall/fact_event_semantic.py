@@ -242,6 +242,7 @@ class FactEventSemanticIndex:
         top_k: int = 8,
         memory_kinds: Iterable[str] = ("fact", "event"),
         min_importance: int = 1,
+        min_importance_by_kind: dict[str, int] | None = None,
         allowed_memory_ids: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
@@ -255,6 +256,14 @@ class FactEventSemanticIndex:
         kinds &= {"fact", "event"}
         if not kinds:
             return {"status": "ok", "matches": []}
+        default_min_importance = max(1, int(min_importance or 1))
+        importance_floor = {
+            kind: max(
+                1,
+                int((min_importance_by_kind or {}).get(kind, default_min_importance) or 1),
+            )
+            for kind in kinds
+        }
         allowed_ids = (
             {
                 str(value or "").strip()
@@ -289,9 +298,10 @@ class FactEventSemanticIndex:
                     )
         matches: list[dict[str, Any]] = []
         for row in rows:
-            if str(row["item_type"]) not in kinds or str(row["model"]) != model:
+            item_type = str(row["item_type"])
+            if item_type not in kinds or str(row["model"]) != model:
                 continue
-            if int(row["importance"] or 0) < max(1, int(min_importance or 1)):
+            if int(row["importance"] or 0) < importance_floor[item_type]:
                 continue
             try:
                 vector = [float(value) for value in json.loads(row["embedding"])]
@@ -315,6 +325,7 @@ class FactEventSemanticIndex:
             "status": "ok",
             "candidate_count": len(matches),
             "indexed_memory_ids": sorted(str(item["memory_id"]) for item in matches),
-            "min_importance": max(1, int(min_importance or 1)),
+            "min_importance": default_min_importance,
+            "min_importance_by_kind": importance_floor,
             "matches": matches[: max(1, min(30, int(top_k or 8)))],
         }

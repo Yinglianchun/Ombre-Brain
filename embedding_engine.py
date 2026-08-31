@@ -529,6 +529,47 @@ class EmbeddingEngine:
             key=lambda item: (-float(item["score"]), str(item["scene_id"])),
         )[: max(1, int(top_k))]
 
+    def search_scene_whole_by_embedding(
+        self,
+        query_embedding: list[float],
+        *,
+        scene_ids: set[str],
+        top_k: int = 10,
+    ) -> list[dict]:
+        """Score only the canonical whole-Scene vectors, excluding chunk rows."""
+
+        allowed = {str(scene_id) for scene_id in scene_ids if str(scene_id)}
+        if not self.enabled or not query_embedding or not allowed or not os.path.exists(self.db_path):
+            return []
+        rows = []
+        ordered_ids = sorted(allowed)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            for offset in range(0, len(ordered_ids), 900):
+                chunk = ordered_ids[offset : offset + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                rows.extend(
+                    conn.execute(
+                        f"SELECT bucket_id, embedding, model, dimension FROM embeddings "
+                        f"WHERE bucket_id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                )
+        finally:
+            conn.close()
+        matches = []
+        for scene_id, embedding_json, model, dimension in rows:
+            try:
+                stored = json.loads(embedding_json)
+                if not self._row_matches_current_model(model, dimension, stored):
+                    continue
+                score = self._cosine_similarity(query_embedding, stored)
+            except Exception:
+                continue
+            matches.append({"scene_id": str(scene_id), "score": round(score, 4)})
+        matches.sort(key=lambda item: (-float(item["score"]), item["scene_id"]))
+        return matches[: max(1, int(top_k))]
+
     def _prepare_embedding_input(self, text: str, *, kind: str) -> str:
         raw = str(text or "")
         if kind == "query" and self.query_instruction:

@@ -134,6 +134,13 @@ async def main() -> None:
         )
         assert gated_probe["min_importance"] == 3
         assert all(row["memory_id"] != event_id for row in gated_probe["matches"])
+        typed_probe = index.search_by_embedding(
+            [0.0, 1.0, 0.0],
+            top_k=2,
+            min_importance_by_kind={"event": 1, "fact": 3},
+        )
+        assert typed_probe["min_importance_by_kind"] == {"event": 1, "fact": 3}
+        assert any(row["memory_id"] == event_id for row in typed_probe["matches"])
 
         store.set_status(event_id, "archived")
         removed = await index.sync(store)

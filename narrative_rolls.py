@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -319,6 +320,171 @@ class NarrativeRollStore:
                 "integrity_status",
             )
         }
+
+    @staticmethod
+    def _read_card(item: dict[str, Any]) -> dict[str, Any]:
+        publication_status = str(item.get("publication_status") or "reviewed")
+        member_count = sum(
+            int(item.get(field) or 0)
+            for field in (
+                "linked_scene_count",
+                "linked_event_count",
+                "linked_diary_count",
+                "linked_darkroom_count",
+            )
+        )
+        return {
+            "arc_key": str(item.get("arc_key") or ""),
+            "narrative_id": str(item.get("narrative_id") or ""),
+            "title": str(item.get("title") or ""),
+            "publication_status": publication_status,
+            "revision": int(item.get("revision") or 0),
+            "member_count": member_count,
+            "narrative_available": bool(
+                publication_status in {"reviewed", "published"}
+                and int(item.get("body_chars") or 0) > 0
+            ),
+            "read_hint": "可按需读取",
+        }
+
+    @staticmethod
+    def _query_card_match(item: dict[str, Any], query: str) -> tuple[float, str]:
+        query_key = _compact(query)
+        if not query_key:
+            return 0.0, ""
+
+        title_values = [
+            str(item.get("title") or ""),
+            *(str(value or "") for value in item.get("title_aliases", []) or []),
+        ]
+        entity_values = [
+            *(str(value or "") for value in item.get("primary_entities", []) or []),
+            *(str(value or "") for value in item.get("supporting_entities", []) or []),
+        ]
+        title_keys = [key for key in (_compact(value) for value in title_values) if key]
+        entity_keys = [key for key in (_compact(value) for value in entity_values) if key]
+
+        if query_key in title_keys:
+            return 1.0, "exact_title"
+        if any(key in query_key or query_key in key for key in title_keys):
+            return 0.95, "title_contains"
+        if query_key in entity_keys:
+            return 0.9, "exact_entity"
+        if any(key in query_key or query_key in key for key in entity_keys):
+            return 0.84, "entity_contains"
+
+        fuzzy = (
+            max(
+                (SequenceMatcher(None, query_key, key).ratio() for key in title_keys),
+                default=0.0,
+            )
+            if len(query_key) >= 4
+            else 0.0
+        )
+        return (fuzzy, "fuzzy_title") if fuzzy >= 0.62 else (0.0, "")
+
+    def find_arc_cards(self, query: str, limit: int = 5) -> dict[str, Any]:
+        """Find active Arc identities without reading Narrative prose."""
+
+        safe_query = " ".join(str(query or "").split()).strip()
+        safe_limit = max(1, min(int(limit or 5), 10))
+        if not safe_query:
+            return {
+                "status": "invalid",
+                "reason": "query_required",
+                "query": safe_query,
+                "items": [],
+                "count": 0,
+            }
+        matches: list[dict[str, Any]] = []
+        for item in self._load():
+            if item.get("integrity_status") != "ok":
+                continue
+            if str(item.get("lifecycle") or "active") != "active":
+                continue
+            if not str(item.get("arc_key") or ""):
+                continue
+            score, reason = self._query_card_match(item, safe_query)
+            if score <= 0:
+                continue
+            matches.append(
+                {
+                    **self._read_card(item),
+                    "match_reason": reason,
+                    "match_score": round(score, 4),
+                }
+            )
+        matches.sort(
+            key=lambda row: (
+                -float(row.get("match_score") or 0.0),
+                str(row.get("title") or ""),
+                str(row.get("arc_key") or ""),
+            )
+        )
+        return {
+            "status": "ok",
+            "mode": "arc_card_query",
+            "query": safe_query,
+            "count": len(matches),
+            "items": matches[:safe_limit],
+            "body_included": False,
+            "writes_performed": [],
+        }
+
+    def arc_card_by_key(self, arc_key: str) -> dict[str, Any]:
+        safe_key = normalize_arc_key(arc_key)
+        if not safe_key:
+            return {"status": "invalid", "reason": "invalid_arc_key", "arc_key": str(arc_key or "")}
+        matches = [
+            item
+            for item in self._load()
+            if str(item.get("arc_key") or "") == safe_key
+            and str(item.get("lifecycle") or "active") == "active"
+            and item.get("integrity_status") == "ok"
+        ]
+        if not matches:
+            return {"status": "not_found", "arc_key": safe_key}
+        if len(matches) != 1:
+            return {"status": "invalid", "reason": "duplicate_arc_key", "arc_key": safe_key}
+        return {"status": "ok", "item": self._read_card(matches[0]), "body_included": False}
+
+    def recall_scope_profiles(self) -> list[dict[str, Any]]:
+        """Return body-free Arc metadata for rebuildable recall sidecars."""
+
+        profiles: list[dict[str, Any]] = []
+        for item in self._load():
+            if item.get("integrity_status") != "ok":
+                continue
+            if str(item.get("lifecycle") or "active") == "retired":
+                continue
+            arc_key = str(item.get("arc_key") or "").strip()
+            if not arc_key:
+                continue
+            members = [
+                *(
+                    {"owner_kind": "scene", "owner_id": str(scene_id)}
+                    for scene_id in item.get("linked_scene_ids") or []
+                    if str(scene_id or "").strip()
+                ),
+                *(
+                    {"owner_kind": "event", "owner_id": str(event_id)}
+                    for event_id in item.get("linked_event_ids") or []
+                    if str(event_id or "").strip()
+                ),
+            ]
+            profiles.append(
+                {
+                    "arc_key": arc_key,
+                    "narrative_id": str(item.get("narrative_id") or ""),
+                    "title": str(item.get("title") or ""),
+                    "title_aliases": list(item.get("title_aliases") or []),
+                    "primary_entities": list(item.get("primary_entities") or []),
+                    "supporting_entities": list(item.get("supporting_entities") or []),
+                    "members": members,
+                    "card": self._read_card(item),
+                }
+            )
+        return profiles
 
     def list(self, query: str = "", limit: int = 20) -> dict[str, Any]:
         safe_limit = max(1, min(int(limit or 20), 100))
@@ -992,6 +1158,7 @@ class NarrativeRollStore:
             candidates.append(
                 {
                     "narrative_id": item.get("narrative_id"),
+                    "arc_key": item.get("arc_key"),
                     "title": item.get("title"),
                     "score": score,
                     "admission_eligible": admitted,

@@ -1,10 +1,11 @@
 # External Platform Tool Guide
 
-这份文档用于把 Ombre-Brain 接给聊天平台。MCP 只注册十六个日常动作；不要猜测或调用历史工具名。
+这份文档用于把 Ombre-Brain 接给聊天平台。MCP 只注册当前日常动作；不要猜测或调用历史工具名。
 
 ## 当前 MCP 工具
 
 - `recall_memory`：按 query/date 寻找 Scene，或从已知 scene_id 展开关联记忆。
+- `find_arc`：按标题、别名或已确认实体查询 Arc 轻卡；不读取叙事正文。
 - `read_memory`：用明确的 memory_type 与 memory_id 精确读取一个对象，不做联想。
 - `write_scene`：用你的第一人称原样保存一件具体、长期有用的 Scene。
 - `edit_scene`：先精确读取，再带版本修订一条 Scene。
@@ -30,6 +31,7 @@
 
 读取：
 - 需要寻找过去的具体经历时，用 recall_memory(query=..., date=..., include_related=true)。
+- 不知道 Narrative ID 时，先用 find_arc(query=...) 按标题、别名或已确认实体取得轻卡；只有当前问题需要长期整体叙事时，才继续精确读取 narrative。
 - 已知一条 Scene，想看关联记忆时，用 recall_memory(scene_id=..., include_related=true)；不要同时传 query/date。
 - 新窗口没有自动连续性时，用 read_memory(memory_type="shadow", memory_id="latest")；最新窗影本身就是交接。
 - 需要完整对象时，用 read_memory(memory_id=..., memory_type="scene|shadow|narrative")。

@@ -8,6 +8,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 DAILY_TOOL_NAMES: tuple[str, ...] = (
     "recall_memory",
+    "find_arc",
     "read_memory",
     "write_scene",
     "bind_scene_evidence",

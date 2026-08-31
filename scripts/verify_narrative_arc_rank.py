@@ -59,7 +59,7 @@ def _seed_event_index(index: FactEventSemanticIndex) -> None:
     index._init_db()
     with closing(sqlite3.connect(index.db_path)) as conn:
         for memory_id, vector in (
-            (EVENT_A, [0.8, 0.2]),
+            (EVENT_A, [1.0, 0.0]),
             (EVENT_OTHER_SAME_TRACK, [1.0, 0.0]),
         ):
             conn.execute(
@@ -77,18 +77,20 @@ def _seed_event_index(index: FactEventSemanticIndex) -> None:
 def _seed_passage_index(index: PassageShadowIndex) -> None:
     index._init_db()
     with closing(sqlite3.connect(index.db_path)) as conn:
-        for owner_id, vector in (
-            (SCENE_A, [0.8, 0.2]),
-            (SCENE_OTHER_ARC, [1.0, 0.0]),
+        for owner_kind, owner_id, vector in (
+            ("event", EVENT_A, [0.8, 0.2]),
+            ("event", EVENT_OTHER_SAME_TRACK, [1.0, 0.0]),
+            ("scene", SCENE_A, [0.8, 0.2]),
+            ("scene", SCENE_OTHER_ARC, [1.0, 0.0]),
         ):
             conn.execute(
                 """
                 INSERT INTO memory_passage_embeddings(
                     owner_kind, owner_id, ordinal, source_hash, content_hash,
                     start_offset, end_offset, text, embedding, model, dimension, updated_at
-                ) VALUES ('scene', ?, 0, 'hash', 'content', 0, 4, 'test', ?, ?, 2, 'now')
+                ) VALUES (?, ?, 0, 'hash', 'content', 0, 4, 'test', ?, ?, 2, 'now')
                 """,
-                (owner_id, json.dumps(vector), index.embedding_engine.model),
+                (owner_kind, owner_id, json.dumps(vector), index.embedding_engine.model),
             )
         conn.commit()
 
@@ -128,6 +130,11 @@ async def main() -> None:
         assert arc_a["parent_narrative_id"] == "narrative_arc_rank_b", arc_a
 
         engine = FakeEmbeddingEngine()
+        engine.search_scene_whole_by_embedding = lambda _vector, *, scene_ids, top_k: (
+            [{"scene_id": SCENE_A, "score": 0.99}]
+            if SCENE_A in scene_ids
+            else []
+        )[:top_k]
         event_index = FactEventSemanticIndex(config, engine)
         passage_index = PassageShadowIndex(config, engine)
         _seed_event_index(event_index)
@@ -156,6 +163,11 @@ async def main() -> None:
             {"memory_kind": "event", "memory_id": EVENT_MISSING},
             {"memory_kind": "scene", "memory_id": SCENE_MISSING},
         ], result
+        assert all(
+            row["selected_embedding_route"] == "whole"
+            for row in result["ranked_members"]
+        ), result
+        assert result["within_owner_embedding_score"] == "max", result
         assert result["membership_changed"] is False, result
         assert result["index_write_attempted"] is False, result
 
@@ -248,7 +260,7 @@ async def main() -> None:
         assert unavailable == {
             "status": "unavailable",
             "lane": "event",
-            "reason": "index_disabled",
+            "reason": "index_missing",
             "arc_key": "work:disabled-event-index",
         }, unavailable
         assert engine.queries == [], engine.queries
