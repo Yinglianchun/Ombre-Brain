@@ -184,3 +184,23 @@ scripts/evaluate_typed_admission_germany_shadow.py
 Run inside the Gateway container. It may call the already-configured remote
 reranker for direct-detail cases, but it installs no model and never applies the
 result to live admission or injection.
+
+## Body-free reading-view receipt
+
+The admission benchmark also emits a deterministic reading receipt. It never
+contains Event/Scene/Narrative body text and never performs the read:
+
+- an admitted Event or Scene produces an owner ref with that object's reading
+  depth; an Arc card is attached only when the owner has a confirmed Arc;
+- owners without a confirmed Arc produce no card;
+- timeline material is bounded and ordered chronologically, and requires a
+  confirmed Arc card;
+- Narrative intent produces only `arc_narrative` plus a body-free card and
+  Narrative ref, or `arc_index` when the Arc has no readable Narrative;
+- exact-evidence intent stays unavailable to automatic Bridge recall and emits
+  `bridge_raw_source_route_disabled` without a card or source query.
+
+Every receipt fixes `content_included`, `narrative_body_included`,
+`raw_source_query_enabled`, `read_applied`, and `live_injection_enabled` to
+false. The receipt is benchmark output only; it is not wired into Gateway live
+admission, rendering, or injection.

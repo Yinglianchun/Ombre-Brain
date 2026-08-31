@@ -22,6 +22,7 @@ from memory_recall.typed_admission_shadow import (
     evaluate_typed_admission_shadow,
     typed_admission_rerank_query,
 )
+from memory_recall.typed_reading_view_shadow import build_typed_reading_view_shadow
 from reranker_engine import RerankerEngine
 from utils import load_config
 
@@ -144,6 +145,7 @@ async def _evaluate_case(
         rerank_scores=rerank_scores,
         direct_threshold=threshold,
     )
+    reading_view = build_typed_reading_view_shadow(scope, candidates, admission)
 
     failures = []
     if admission["mode"] != str(case.get("expected_mode") or ""):
@@ -169,6 +171,25 @@ async def _evaluate_case(
         failures.append(f"unexpected_selected_refs={sorted(selected - expected_selected)}")
     if admission.get("decision_applied") is not False or admission.get("live_injection_enabled") is not False:
         failures.append("shadow_contract_violation")
+    expected_depth = case.get("expected_reading_depth")
+    if expected_depth is not None and reading_view["reading_depth"] != expected_depth:
+        failures.append(
+            f"reading_depth expected={expected_depth!r} actual={reading_view['reading_depth']!r}"
+        )
+    expected_arc_card = case.get("expected_arc_card_attached")
+    if expected_arc_card is not None and reading_view["arc_card_attached"] is not bool(expected_arc_card):
+        failures.append(
+            "arc_card_attached "
+            f"expected={bool(expected_arc_card)!r} actual={reading_view['arc_card_attached']!r}"
+        )
+    if (
+        reading_view.get("read_applied") is not False
+        or reading_view.get("live_injection_enabled") is not False
+        or reading_view.get("content_included") is not False
+        or reading_view.get("narrative_body_included") is not False
+        or reading_view.get("raw_source_query_enabled") is not False
+    ):
+        failures.append("reading_view_shadow_contract_violation")
 
     return {
         "id": str(case.get("id") or ""),
@@ -187,6 +208,7 @@ async def _evaluate_case(
         "candidates": admission["candidates"],
         "decision_applied": admission["decision_applied"],
         "live_injection_enabled": admission["live_injection_enabled"],
+        "reading_view": reading_view,
     }
 
 
@@ -252,6 +274,8 @@ async def run(args: argparse.Namespace) -> int:
             "shadow_contract_violations": sum(
                 row["decision_applied"] is not False
                 or row["live_injection_enabled"] is not False
+                or row["reading_view"]["read_applied"] is not False
+                or row["reading_view"]["live_injection_enabled"] is not False
                 for row in rows
             ),
         },

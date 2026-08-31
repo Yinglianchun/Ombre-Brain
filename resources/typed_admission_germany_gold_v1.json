@@ -8,6 +8,8 @@
       "id": "progress_structured_latest",
       "query": "《间谍过家家》看到哪了",
       "expected_mode": "structured_latest",
+      "expected_reading_depth": "event",
+      "expected_arc_card_attached": true,
       "expected_selected_refs": ["event:event_c68eeb2cf3b4f707963fa264"],
       "closed_world_selection": true
     },
@@ -15,6 +17,8 @@
       "id": "recent_structured_latest",
       "query": "间谍过家家最近怎么样",
       "expected_mode": "structured_latest",
+      "expected_reading_depth": "event",
+      "expected_arc_card_attached": true,
       "expected_selected_refs": ["event:event_c68eeb2cf3b4f707963fa264"],
       "closed_world_selection": true
     },
@@ -22,6 +26,8 @@
       "id": "first_member_hard_negative",
       "query": "我们第一次一起看间谍过家家的时候",
       "expected_mode": "direct_evidence_rerank",
+      "expected_reading_depth": "none",
+      "expected_arc_card_attached": false,
       "expected_rerank_query": "我们第一次一起看 的时候",
       "expected_selected_refs": [],
       "closed_world_selection": true
@@ -30,6 +36,7 @@
       "id": "event_passage_direct_evidence",
       "query": "MISSION 139 的 -nia 到底可能指什么",
       "expected_mode": "direct_evidence_rerank",
+      "expected_reading_depth": "event",
       "expected_selected_refs": ["event:event_58ad1ad069d6ab19ff34d8f5"],
       "closed_world_selection": true
     },
@@ -37,6 +44,7 @@
       "id": "scene_passage_direct_evidence",
       "query": "绒绒怎么评价澜这个名字",
       "expected_mode": "direct_evidence_rerank",
+      "expected_reading_depth": "scene",
       "expected_selected_refs": ["scene:scene_mig2_407efe47a99c8d6ca351"],
       "closed_world_selection": true
     },
@@ -44,6 +52,8 @@
       "id": "timeline_is_material_not_direct",
       "query": "蓝牙后来怎么发展",
       "expected_mode": "timeline_scope_material",
+      "expected_reading_depth": "arc_timeline",
+      "expected_arc_card_attached": true,
       "expected_selected_refs": [],
       "required_material_refs": ["event:event_3d34cc08bfc2ad6d034f7891"],
       "closed_world_selection": true
@@ -52,6 +62,8 @@
       "id": "narrative_deferred",
       "query": "间谍过家家整体剧情",
       "expected_mode": "defer_to_narrative",
+      "expected_reading_depth": "arc_narrative",
+      "expected_arc_card_attached": true,
       "expected_selected_refs": [],
       "closed_world_selection": true
     },
@@ -59,6 +71,8 @@
       "id": "exact_evidence_deferred",
       "query": "间谍过家家原话是怎么说的",
       "expected_mode": "defer_to_exact_evidence",
+      "expected_reading_depth": "exact_evidence",
+      "expected_arc_card_attached": false,
       "expected_selected_refs": [],
       "closed_world_selection": true
     }
