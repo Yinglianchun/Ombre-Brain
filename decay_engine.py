@@ -38,6 +38,7 @@ class DecayEngine:
         self.decay_lambda = decay_cfg.get("lambda", 0.05)
         self.threshold = decay_cfg.get("threshold", 0.3)
         self.check_interval = decay_cfg.get("check_interval_hours", 24)
+        self.auto_archive_enabled = bool(decay_cfg.get("auto_archive_enabled", False))
 
         # Legacy config is retained for compatible config loading only.
         emotion_cfg = decay_cfg.get("emotion_weights", {})
@@ -200,7 +201,7 @@ class DecayEngine:
 
             # --- Below threshold → archive (simulate forgetting) ---
             # --- 低于阈值 → 归档（模拟遗忘）---
-            if score < self.threshold:
+            if self.auto_archive_enabled and score < self.threshold:
                 try:
                     success = await self.bucket_mgr.archive(bucket["id"])
                     if success:

@@ -51,6 +51,11 @@ async def main() -> None:
         assert decay.calculate_score({**shared, "importance": 1}) == decay.calculate_score(
             {**shared, "importance": 10}
         )
+        lifecycle = DecayEngine(
+            {"decay": {"lambda": 0.05, "threshold": 1000}}, manager
+        )
+        cycle = await lifecycle.run_decay_cycle()
+        assert cycle["checked"] == 1 and cycle["archived"] == 0, cycle
 
     print("IMPORTANCE_RETIRED_OK")
 

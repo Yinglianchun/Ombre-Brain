@@ -128,6 +128,7 @@ decay:
   lambda: 0.05                    # Decay rate / 衰减速率（越大遗忘越快）
   threshold: 0.3                  # Archive threshold / 归档阈值
   check_interval_hours: 24        # Check interval (hours) / 衰减检查间隔（小时）
+  auto_archive_enabled: false     # Importance retired: lifecycle changes stay explicit
   emotion_weights:
     base: 1.0                     # legacy compatibility only; ignored by P1 decay
     arousal_boost: 0.0            # legacy compatibility only; arousal never changes retention
