@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "dataset": "typed_recall_germany_shadow_gold_v1",
+  "frozen_from_live_head": "9890ebe",
+  "frozen_at": "2026-08-31",
+  "cases": [
+    {
+      "id": "entity_only_character_veto",
+      "query": "阿尼亚",
+      "expected": {
+        "shadow_status": "not_retrieved",
+        "reason": "entity_without_recall_intent",
+        "scope_status": "scope_only",
+        "intent": "none",
+        "operator": "none",
+        "arc_key": "work:间谍过家家",
+        "candidate_count": 0
+      }
+    },
+    {
+      "id": "bare_progress_veto",
+      "query": "看到哪了",
+      "expected": {
+        "shadow_status": "not_retrieved",
+        "reason": "scope_required_for_deictic_intent",
+        "scope_status": "insufficient_scope",
+        "intent": "progress",
+        "operator": "latest_relevant_member",
+        "arc_key": "",
+        "candidate_count": 0
+      }
+    },
+    {
+      "id": "scoped_progress",
+      "query": "《间谍过家家》看到哪了",
+      "expected": {
+        "shadow_status": "ok",
+        "scope_status": "scoped_recall",
+        "intent": "progress",
+        "operator": "latest_relevant_member",
+        "arc_key": "work:间谍过家家",
+        "required_candidate_refs": ["event:event_c68eeb2cf3b4f707963fa264"],
+        "all_candidates_in_scope": true
+      }
+    },
+    {
+      "id": "scoped_narrative_read",
+      "query": "间谍过家家整体剧情",
+      "expected": {
+        "shadow_status": "ok",
+        "scope_status": "scoped_recall",
+        "intent": "arc_narrative",
+        "operator": "narrative_read",
+        "arc_key": "work:间谍过家家",
+        "all_candidates_in_scope": true
+      }
+    },
+    {
+      "id": "scoped_exact_evidence",
+      "query": "间谍过家家原话是怎么说的",
+      "expected": {
+        "shadow_status": "ok",
+        "scope_status": "scoped_recall",
+        "intent": "exact_evidence",
+        "operator": "exact_evidence",
+        "arc_key": "work:间谍过家家",
+        "all_candidates_in_scope": true
+      }
+    },
+    {
+      "id": "scoped_first_member_search",
+      "query": "我们第一次一起看间谍过家家的时候",
+      "expected": {
+        "shadow_status": "ok",
+        "scope_status": "scoped_recall",
+        "intent": "member_search",
+        "operator": "member_search",
+        "arc_key": "work:间谍过家家",
+        "all_candidates_in_scope": true
+      }
+    },
+    {
+      "id": "scoped_recent_member_search",
+      "query": "间谍过家家最近怎么样",
+      "expected": {
+        "shadow_status": "ok",
+        "scope_status": "scoped_recall",
+        "intent": "member_search",
+        "operator": "member_search",
+        "arc_key": "work:间谍过家家",
+        "all_candidates_in_scope": true
+      }
+    },
+    {
+      "id": "observed_entity_timeline",
+      "query": "蓝牙后来怎么发展",
+      "expected": {
+        "shadow_status": "ok",
+        "scope_status": "scoped_recall",
+        "intent": "timeline",
+        "operator": "timeline",
+        "arc_key": "project:android-companion",
+        "required_candidate_refs": ["event:event_3d34cc08bfc2ad6d034f7891"],
+        "all_candidates_in_scope": true
+      }
+    },
+    {
+      "id": "observed_entity_only_veto",
+      "query": "蓝牙",
+      "expected": {
+        "shadow_status": "not_retrieved",
+        "reason": "entity_without_recall_intent",
+        "scope_status": "scope_only",
+        "intent": "none",
+        "operator": "none",
+        "arc_key": "project:android-companion",
+        "candidate_count": 0
+      }
+    },
+    {
+      "id": "generic_relationship_veto",
+      "query": "哥哥后来怎么发展",
+      "expected": {
+        "shadow_status": "not_retrieved",
+        "reason": "scope_required_for_deictic_intent",
+        "scope_status": "insufficient_scope",
+        "intent": "timeline",
+        "operator": "timeline",
+        "arc_key": "",
+        "candidate_count": 0
+      }
+    },
+    {
+      "id": "single_member_observation_cannot_scope",
+      "query": "奇美拉后来怎么发展",
+      "expected": {
+        "shadow_status": "not_retrieved",
+        "reason": "scope_required_for_deictic_intent",
+        "scope_status": "insufficient_scope",
+        "intent": "timeline",
+        "operator": "timeline",
+        "arc_key": "",
+        "candidate_count": 0
+      }
+    },
+    {
+      "id": "event_passage_detail",
+      "query": "MISSION 139 的 -nia 到底可能指什么",
+      "expected": {
+        "shadow_status": "ok",
+        "scope_status": "no_scope",
+        "required_candidate_refs": ["event:event_58ad1ad069d6ab19ff34d8f5"],
+        "required_candidate_sources": {
+          "event:event_58ad1ad069d6ab19ff34d8f5": "event_passage_embedding"
+        }
+      }
+    },
+    {
+      "id": "scene_passage_detail",
+      "query": "绒绒怎么评价澜这个名字",
+      "expected": {
+        "shadow_status": "ok",
+        "scope_status": "no_scope",
+        "required_candidate_refs": ["scene:scene_mig2_407efe47a99c8d6ca351"],
+        "required_candidate_sources": {
+          "scene:scene_mig2_407efe47a99c8d6ca351": "scene_passage_embedding"
+        }
+      }
+    },
+    {
+      "id": "generic_global_veto",
+      "query": "事情",
+      "expected": {
+        "shadow_status": "not_retrieved",
+        "reason": "global_query_lacks_specific_terms",
+        "scope_status": "no_scope",
+        "intent": "none",
+        "operator": "none",
+        "arc_key": "",
+        "candidate_count": 0
+      }
+    }
+  ]
+}

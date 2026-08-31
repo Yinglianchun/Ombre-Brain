@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover - reduced runtimes may ship jieba without 
     jieba_posseg = None
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 _DYNAMIC_POS = frozenset({"nr", "ns", "nt", "nz", "eng"})
 _QUOTED_WORK = re.compile(r"《([^》]{2,40})》")
 _QUOTED_NAME = re.compile(r"[“「『]([^”」』]{2,24})[”」』]")
@@ -39,6 +39,11 @@ _INTENT_PATTERNS = (
     ("arc_narrative", "narrative_read", re.compile(r"整体|完整(?:剧情|故事|经过)|从头|整条线|讲讲(?:剧情|故事)")),
     ("progress", "latest_relevant_member", re.compile(r"看到哪|读到哪|做到哪|进行到哪|进展(?:到哪|如何|怎么样)|追到哪")),
     ("timeline", "timeline", re.compile(r"后来|后续|之后|怎么发展|如何发展|发展成|演变|时间线")),
+    (
+        "member_search",
+        "member_search",
+        re.compile(r"第(?:一|1)次|初次|最初|刚开始|最近(?:怎么样|如何|发生了什么|有什么)"),
+    ),
     ("member_search", "member_search", re.compile(r"哪一段|那一段|这段|其中一段|某一段|提到.+(?:那段|一段)")),
     ("recall_reference", "arc_index", re.compile(r"还记得|记得|想起|回忆|上次(?:聊|说|看|读|做)")),
 )
@@ -224,16 +229,16 @@ def _entity_surface_shape(
     )
 
 
-def _consistently_embedded_name_fragment(
+def _consistently_embedded_name_surface(
     value: str,
     sources: Iterable[dict[str, Any]],
-) -> bool:
-    """Reject a jieba person-name suffix/prefix that never occurs on its own.
+) -> str:
+    """Recover a proper-name surface that jieba split after one Han character.
 
     A common failure is segmenting ``阿尼亚`` as ``阿`` + ``尼亚``.  If every
-    observed occurrence has the same adjacent Han character, the shorter token
-    is too weak to become an Arc scope anchor.  The observation itself remains
-    available in the audit sidecar.
+    observed occurrence has the same adjacent Han character, the joined surface
+    is a safer scope candidate.  The shorter observation remains auditable but
+    receives no scope authority.
     """
 
     spans: list[tuple[str | None, str | None]] = []
@@ -244,7 +249,7 @@ def _consistently_embedded_name_fragment(
             after = content[end] if end < len(content) else None
             spans.append((before, after))
     if len(spans) < 2:
-        return False
+        return ""
 
     def same_han(values: list[str | None]) -> bool:
         return bool(
@@ -253,9 +258,13 @@ def _consistently_embedded_name_fragment(
             and len(set(values)) == 1
         )
 
-    return same_han([before for before, _ in spans]) or same_han(
-        [after for _, after in spans]
-    )
+    before = [char for char, _ in spans]
+    if same_han(before):
+        return f"{before[0]}{value}"
+    after = [char for _, char in spans]
+    if same_han(after):
+        return f"{value}{after[0]}"
+    return ""
 
 
 def extract_observed_entities(
@@ -298,6 +307,17 @@ def extract_observed_entities(
                 candidates[key] = _surface(value)
             if key:
                 discovery_kinds[key].update(kinds)
+
+    for entity_key, entity_text in list(candidates.items()):
+        kinds = discovery_kinds.get(entity_key) or set()
+        if not kinds.intersection({"jieba_nr", "jieba_ns", "jieba_nt"}):
+            continue
+        recovered = _consistently_embedded_name_surface(entity_text, sources)
+        recovered_key = _key(recovered)
+        if not recovered_key or recovered_key == entity_key:
+            continue
+        candidates.setdefault(recovered_key, recovered)
+        discovery_kinds[recovered_key].add("embedded_proper_name")
 
     rows: list[dict[str, Any]] = []
     for entity_key, entity_text in candidates.items():
@@ -342,14 +362,19 @@ def extract_observed_entities(
         else:
             basis = "known_arc_title"
         kinds = discovery_kinds.get(entity_key) or set()
-        proper_name = bool(kinds.intersection({"jieba_nr", "jieba_ns", "jieba_nt"}))
+        proper_name = bool(
+            kinds.intersection(
+                {"jieba_nr", "jieba_ns", "jieba_nt", "embedded_proper_name"}
+            )
+        )
         fragment_of_known_entity = any(
             entity_key != known_key and entity_key in known_key
             for known_key in known_terms
         )
         embedded_name_fragment = bool(
             proper_name
-            and _consistently_embedded_name_fragment(entity_text, sources)
+            and "embedded_proper_name" not in kinds
+            and _consistently_embedded_name_surface(entity_text, sources)
         )
         quoted_named_term = bool(
             "quoted_name" in kinds

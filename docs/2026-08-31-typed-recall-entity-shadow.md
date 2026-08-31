@@ -1,7 +1,9 @@
 # Event / Scene typed recall and entity scope shadow
 
-Status: local implementation only. No deploy, canonical mutation, Arc mutation,
-cursor advance, live injection, raw query route, or model installation.
+Status: deployed as a simulation-only shadow on the Germany Gateway. Deployment
+does not imply canonical mutation, Arc mutation, cursor advance, live injection,
+raw query route, or model installation; verify the current live HEAD and health
+before relying on this status.
 
 ## Candidate contract
 
@@ -137,3 +139,23 @@ C:\Python313\python.exe scripts\verify_typed_event_scene_entity_shadow.py
 ```
 
 Expected receipt: `TYPED_EVENT_SCENE_ENTITY_SHADOW_OK GOLD=9/9`.
+
+## Germany live shadow benchmark
+
+The fixed Germany fixtures live in
+`resources/typed_recall_germany_shadow_gold_v1.json`. They freeze structural
+scope/veto cases plus known Event and Scene targets from the 2026-08-31 live
+corpus. The corpus may grow, but a missing pinned target or a changed scope
+contract is reported rather than silently relabeled.
+
+Run inside the Gateway container so the existing token remains private:
+
+```bash
+docker exec ombre-gateway \
+  python scripts/evaluate_typed_recall_germany_shadow.py
+```
+
+Every request uses `recall_mode=full`, `simulation=true`, and
+`simulation_scope=full_shadow`. The evaluator fails if a candidate/debug row
+claims an admission decision or live injection. It checks routing and candidate
+generation only; final evidence admission remains a separate benchmark layer.

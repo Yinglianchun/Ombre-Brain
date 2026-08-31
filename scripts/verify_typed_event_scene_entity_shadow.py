@@ -151,8 +151,14 @@ def verify_observed_entities_and_scope() -> None:
         (row for row in fragment_rows if row["entity_text"] == "尼亚"),
         None,
     )
+    recovered = next(
+        (row for row in fragment_rows if row["entity_text"] == "阿尼亚"),
+        None,
+    )
     if fragment is not None:
         assert fragment["scope_eligible"] is False, fragment
+    assert recovered is not None, fragment_rows
+    assert recovered["scope_eligible"] is True, recovered
 
     with tempfile.TemporaryDirectory(prefix="observed-entity-shadow-") as temp_dir:
         config = {
@@ -256,6 +262,16 @@ def verify_observed_entities_and_scope() -> None:
         assert scoped["scope_anchor"]["arc_key"] == "work:spy-family", scoped
         assert scoped["operator"] == "timeline", scoped
         assert scoped["retrieval_allowed"] is True, scoped
+
+        first_time = index.resolve_query("我们第一次一起看间谍过家家的时候")
+        assert first_time["status"] == "scoped_recall", first_time
+        assert first_time["intent"] == "member_search", first_time
+        assert first_time["operator"] == "member_search", first_time
+
+        recent_status = index.resolve_query("间谍过家家最近怎么样")
+        assert recent_status["status"] == "scoped_recall", recent_status
+        assert recent_status["intent"] == "member_search", recent_status
+        assert recent_status["operator"] == "member_search", recent_status
 
         entity_only = index.resolve_query("阿尼亚")
         assert entity_only["status"] == "scope_only", entity_only
