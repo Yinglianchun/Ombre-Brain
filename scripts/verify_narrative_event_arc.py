@@ -81,6 +81,11 @@ def main() -> None:
         assert by_key["status"] == "ok", by_key
         assert by_key["body_included"] is False, by_key
         assert "body" not in by_key["item"], by_key
+        material_profile = store.arc_material_profile_by_key("work:event-only-test")
+        assert material_profile["status"] == "ok", material_profile
+        assert material_profile["linked_event_ids"] == [EVENT_A, EVENT_B], material_profile
+        assert material_profile["body_included"] is False, material_profile
+        assert "body" not in material_profile, material_profile
 
         second_parent = store.publish(
             narrative_id="narrative_second_parent_test",

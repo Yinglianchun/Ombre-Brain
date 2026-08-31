@@ -448,6 +448,43 @@ class NarrativeRollStore:
             return {"status": "invalid", "reason": "duplicate_arc_key", "arc_key": safe_key}
         return {"status": "ok", "item": self._read_card(matches[0]), "body_included": False}
 
+    def arc_material_profile_by_key(self, arc_key: str) -> dict[str, Any]:
+        """Return one Arc's body-free identity and persisted material IDs."""
+
+        safe_key = normalize_arc_key(arc_key)
+        if not safe_key:
+            return {
+                "status": "invalid",
+                "reason": "invalid_arc_key",
+                "arc_key": str(arc_key or "").strip(),
+            }
+        matches = [
+            item
+            for item in self._load()
+            if str(item.get("arc_key") or "") == safe_key
+            and str(item.get("lifecycle") or "active") == "active"
+            and item.get("integrity_status") == "ok"
+        ]
+        if not matches:
+            return {"status": "not_found", "arc_key": safe_key}
+        if len(matches) != 1:
+            return {
+                "status": "invalid",
+                "reason": "duplicate_arc_key",
+                "arc_key": safe_key,
+            }
+        item = matches[0]
+        return {
+            "status": "ok",
+            "arc_key": safe_key,
+            "card": self._read_card(item),
+            "linked_scene_ids": list(item.get("linked_scene_ids") or []),
+            "linked_event_ids": list(item.get("linked_event_ids") or []),
+            "linked_diary_ids": list(item.get("linked_diary_ids") or []),
+            "linked_darkroom_count": len(item.get("linked_darkroom_ids") or []),
+            "body_included": False,
+        }
+
     def recall_scope_profiles(self) -> list[dict[str, Any]]:
         """Return body-free Arc metadata for rebuildable recall sidecars."""
 

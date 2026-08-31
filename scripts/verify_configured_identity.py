@@ -19,6 +19,7 @@ async def main() -> None:
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
     assert set(tools) == set(DAILY_TOOL_NAMES)
     assert "find_arc" in tools
+    assert "read_arc_materials" in tools
     assert "narrative_revision_inbox" in tools
     assert "review_narrative_revision" in tools
 
@@ -73,6 +74,9 @@ async def main() -> None:
         "event",
     ]
     assert set(read_schema["required"]) == {"memory_type", "memory_id"}
+    arc_read_schema = tools["read_arc_materials"].inputSchema
+    assert set(arc_read_schema["required"]) == {"arc_key", "picks"}
+    assert "context" not in arc_read_schema["properties"]
     recall_schema = tools["recall_memory"].inputSchema
     assert {"query", "scene_id", "date", "include_related"} <= set(
         recall_schema["properties"]

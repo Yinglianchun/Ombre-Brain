@@ -119,11 +119,17 @@ revision, member count, Narrative availability, latest member date when known,
 and the fixed hint `可按需读取`. Owners without a confirmed Arc carry no card.
 
 The read-only `find_arc(query, limit)` tool accepts title text, title aliases,
-confirmed registry entities, and bounded fuzzy title matches. It returns only
-light cards. The caller may then use the existing exact
-`read_memory(memory_type="narrative", memory_id=...)` tool when the current
-question genuinely needs the authored Narrative. Neither operation enables
-Gateway Narrative injection.
+confirmed registry entities, and bounded fuzzy title matches. Each result adds
+a body-free numbered materials menu. Narrative is position `0` when available;
+the remaining Event, Scene, and linked Diary materials are chronological. A
+menu over ten items shows Narrative plus the earliest four and latest five,
+while preserving the positions from the full session snapshot.
+
+`read_arc_materials(arc_key, picks)` reads one to five displayed positions in a
+single call by dispatching to the existing exact `read_memory` or `read_diary`
+reader. The five-item limit and displayed-position boundary are enforced by the
+service. Darkroom and raw dialogue are not exposed through this menu. Neither
+tool enables Gateway Narrative injection.
 
 ## Fixed verification
 

@@ -5,8 +5,9 @@
 ## 当前 MCP 工具
 
 - `recall_memory`：按 query/date 寻找 Scene，或从已知 scene_id 展开关联记忆。
-- `find_arc`：按标题、别名或已确认实体查询 Arc 轻卡；不读取叙事正文。
-- `read_memory`：用明确的 memory_type 与 memory_id 精确读取一个对象，不做联想。
+- `find_arc`：按标题、别名或已确认实体找到 Arc，并生成编号 materials 菜单。
+- `read_arc_materials`：按 arc_key 与菜单编号一次读取 1～5 项。
+- `read_memory`：用明确的 memory_type 与 memory_id 精确读取单个对象；Arc 菜单内优先用 read_arc_materials。
 - `write_scene`：用你的第一人称原样保存一件具体、长期有用的 Scene。
 - `edit_scene`：先精确读取，再带版本修订一条 Scene。
 - `set_scene_status`：带版本检查地归档或恢复一条 Scene。
@@ -31,10 +32,11 @@
 
 读取：
 - 需要寻找过去的具体经历时，用 recall_memory(query=..., date=..., include_related=true)。
-- 不知道 Narrative ID 时，先用 find_arc(query=...) 按标题、别名或已确认实体取得轻卡；只有当前问题需要长期整体叙事时，才继续精确读取 narrative。
+- 想主动查看一条长期线时，用 find_arc(query=...) 取得 Arc materials 菜单；按需用 read_arc_materials(arc_key=..., picks=[...]) 一次读取 1～5 个已展示编号。
+- 菜单超过 10 项时只展示叙事卷、最早 4 项与最新 5 项；省略的中段编号不能凭空读取。
 - 已知一条 Scene，想看关联记忆时，用 recall_memory(scene_id=..., include_related=true)；不要同时传 query/date。
 - 新窗口没有自动连续性时，用 read_memory(memory_type="shadow", memory_id="latest")；最新窗影本身就是交接。
-- 需要完整对象时，用 read_memory(memory_id=..., memory_type="scene|shadow|narrative")。
+- 已知精确类型和 ID、且对象不在 Arc 菜单时，用 read_memory(memory_id=..., memory_type="scene|shadow|narrative|fact|event")。
 - memory_type 与 memory_id 都必填；精确读取不做语义搜索或关联扩展，也不从 ID 前缀猜类型。
 - 精确日期没有证据时，不拿相邻日期的语义结果冒充当天内容。
 - Window Shadow 不进入普通 recall；Narrative Roll 是有来源的派生叙事，精确事实继续下钻 Scene。

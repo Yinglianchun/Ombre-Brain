@@ -10,7 +10,8 @@
 | --- | --- |
 | `recall_memory` | 按 query/date 寻找 Scene，或从已知 scene_id 展开关联记忆 |
 | `read_memory` | 用明确的 memory_type 与 memory_id 精确读取一个对象，不做联想 |
-| `find_arc` | 按标题、别名或已确认实体查询 Arc 轻卡，不读取正文 |
+| `find_arc` | 按标题、别名或已确认实体找到 Arc，并生成编号 materials 菜单 |
+| `read_arc_materials` | 按 arc_key 和已展示编号一次读取 1～5 项 |
 | `write_scene` | 用你的第一人称原样保存一件具体、长期有用的 canonical Scene |
 | `edit_scene` | 先精确读取，再带版本修订一条 Scene |
 | `set_scene_status` | 带版本检查地归档或恢复一条 Scene |
@@ -36,7 +37,7 @@ MCP 只注册以上十七个动作。旧桶、旧字段和旧读取投影继续�
 - 提到日期：用 `recall_memory(date="YYYY-MM-DD")`，也可同时填写 query。精确日期没有证据时，不用附近日期代替。
 - 已知一条 Scene，想沿关系边展开时，用 `recall_memory(scene_id=..., include_related=true)`；不要同时传 query/date。
 - 已知对象 ID、需要确定原文时，用 `read_memory(memory_type="scene|shadow|narrative", memory_id=...)`。类型必填，不从 ID 前缀猜。
-- 不知道 Narrative ID 时先用 `find_arc(query=...)`；只有问题明确需要长期整体叙事时，才按返回的 narrative_id 读取正文。普通具体记忆仍走 Scene/Event 召回。
+- 主动查看长期线时先用 `find_arc(query=...)` 取得菜单，再用 `read_arc_materials(arc_key=..., picks=[...])` 一次读取最多 5 个已展示编号。普通具体记忆仍走 Scene/Event 召回。
 - Portrait 也从同一入口读取：`read_memory(memory_type="portrait", memory_id="user|relationship|all")`。
 - Narrative Roll 是有来源的派生叙事；核对日期、原句或细节时继续下钻 Scene。
 - Window Shadow 不进入普通召回，只用于最新窗影交接和明确回看。

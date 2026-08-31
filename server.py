@@ -11,9 +11,9 @@
 #   - Initialize canonical authored-memory stores, Diary storage, legacy
 #     read compatibility, indexes, and background maintenance engines.
 #     初始化作者记忆主存储、日记存储、旧数据读取兼容、索引与后台维护引擎。
-#   - Expose the 19-tool daily façade:
-#     暴露 19 把日常工具：
-#       recall / read_memory
+#   - Expose the 21-tool daily façade:
+#     暴露 21 把日常工具：
+#       recall_memory / find_arc / read_arc_materials / read_memory
 #         Recall Scenes or explicitly read handoff; read exact Scene,
 #         Window Shadow, or Narrative Roll objects.
 #         召回 Scene 或显式读取 handoff；精确读取 Scene、窗影或叙事卷。
@@ -72,6 +72,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import Context
 
+from arc_materials import (
+    MAX_ARC_MATERIAL_PICKS,
+    arc_materials_fingerprint,
+    build_arc_materials,
+    displayed_arc_materials,
+    normalize_arc_material_picks,
+)
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
@@ -280,6 +287,8 @@ legacy_memory_lifecycle_publisher = LegacyMemoryLifecyclePublisher(
     config,
     legacy_memory_review_store,
 ) # Explicit admin-only archive publisher; never part of daily MCP
+
+_arc_material_menu_snapshots: dict[tuple[str, str], dict[str, Any]] = {}
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -8698,9 +8707,176 @@ async def narrative_rolls(query: str = "", limit: int = 20) -> dict:
     return narrative_roll_store.list(query=query, limit=limit)
 
 
+def _arc_material_session_key(context: Context | None) -> str:
+    if context is None:
+        return "direct"
+    try:
+        return f"mcp:{id(context.session)}"
+    except (AttributeError, LookupError):
+        return "direct"
+
+
+def _store_arc_material_snapshot(
+    arc_key: str,
+    menu: dict[str, Any],
+    context: Context | None,
+) -> None:
+    snapshot = {
+        **menu,
+        "visible_indexes": [
+            int(row.get("index"))
+            for row in menu.get("materials") or []
+            if isinstance(row, dict) and row.get("index") is not None
+        ],
+        "materials": [dict(row) for row in menu.get("all_materials") or []],
+    }
+    snapshot.pop("all_materials", None)
+    _arc_material_menu_snapshots[(_arc_material_session_key(context), arc_key)] = snapshot
+    _arc_material_menu_snapshots[("latest", arc_key)] = snapshot
+    while len(_arc_material_menu_snapshots) > 128:
+        _arc_material_menu_snapshots.pop(next(iter(_arc_material_menu_snapshots)))
+
+
+def _arc_material_snapshot(
+    arc_key: str,
+    context: Context | None,
+) -> dict[str, Any] | None:
+    return _arc_material_menu_snapshots.get(
+        (_arc_material_session_key(context), arc_key)
+    ) or _arc_material_menu_snapshots.get(("latest", arc_key))
+
+
+def _date_text(*values: Any) -> str:
+    return next(
+        (
+            str(value).strip()[:10]
+            for value in values
+            if str(value or "").strip()
+        ),
+        "",
+    )
+
+
+async def _build_arc_material_menu(arc_key: str) -> dict[str, Any]:
+    profile = narrative_roll_store.arc_material_profile_by_key(arc_key)
+    if profile.get("status") != "ok":
+        return profile
+    card = dict(profile.get("card") or {})
+    narrative = None
+    if card.get("narrative_available") and str(card.get("narrative_id") or ""):
+        narrative = {
+            "kind": "narrative",
+            "id": str(card.get("narrative_id") or ""),
+            "title": str(card.get("title") or "叙事卷"),
+            "date": "",
+        }
+
+    materials: list[dict[str, Any]] = []
+    direct_event_ids = [
+        str(value)
+        for value in profile.get("linked_event_ids") or []
+        if str(value or "").strip()
+    ]
+    automatic_event_ids = [
+        str(link.get("event_id") or "")
+        for link in fact_event_store.arc_event_links(arc_key)
+        if str(link.get("event_id") or "").strip()
+    ]
+    automatic_event_count = len(set(automatic_event_ids) - set(direct_event_ids))
+    event_ids = list(dict.fromkeys([*direct_event_ids, *automatic_event_ids]))
+    for event_id in event_ids:
+        try:
+            event = fact_event_store.read(event_id, include_sources=False)
+        except ValueError:
+            event = None
+        if not event or str(event.get("item_type") or "") != "event":
+            continue
+        materials.append(
+            {
+                "kind": "event",
+                "id": event_id,
+                "title": str(event.get("title") or event_id),
+                "date": _date_text(
+                    event.get("local_end_date"),
+                    event.get("local_date"),
+                    event.get("source_ended_at"),
+                ),
+            }
+        )
+
+    scene_ids = [
+        str(value)
+        for value in profile.get("linked_scene_ids") or []
+        if str(value or "").strip()
+    ]
+    scenes = await asyncio.gather(*(bucket_mgr.get(scene_id) for scene_id in scene_ids))
+    for scene_id, scene in zip(scene_ids, scenes):
+        if not isinstance(scene, dict):
+            continue
+        metadata = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
+        materials.append(
+            {
+                "kind": "scene",
+                "id": scene_id,
+                "title": str(metadata.get("name") or scene_id),
+                "date": _date_text(
+                    metadata.get("date"),
+                    metadata.get("event_date"),
+                    metadata.get("created"),
+                ),
+            }
+        )
+
+    for raw_diary_id in profile.get("linked_diary_ids") or []:
+        try:
+            diary_id = int(raw_diary_id)
+            diary = diary_store.read(diary_id=diary_id, limit=1)
+        except (TypeError, ValueError, DiaryNotFoundError, DiaryLockedError):
+            continue
+        rows = list(diary.get("diaries") or [])
+        item = rows[0] if rows and isinstance(rows[0], dict) else diary
+        materials.append(
+            {
+                "kind": "diary",
+                "id": str(diary_id),
+                "title": str(item.get("title") or f"日记 {diary_id}"),
+                "date": _date_text(item.get("date")),
+            }
+        )
+
+    all_materials = build_arc_materials(narrative, materials)
+    visible = displayed_arc_materials(all_materials)
+    first_index = int(visible[0]["index"]) if visible else 0
+    omitted_darkroom_count = int(profile.get("linked_darkroom_count") or 0)
+    return {
+        "status": "ok",
+        "arc_key": str(profile.get("arc_key") or arc_key),
+        "title": str(card.get("title") or ""),
+        "materials": visible,
+        "all_materials": all_materials,
+        "material_count": len(all_materials),
+        "member_count": len(all_materials) - (1 if narrative else 0) + omitted_darkroom_count,
+        "automatic_linked_event_count": automatic_event_count,
+        "menu_truncated": len(visible) < len(all_materials),
+        "menu_fingerprint": arc_materials_fingerprint(all_materials),
+        "omitted_darkroom_count": omitted_darkroom_count,
+        "read_instruction": (
+            f'read_arc_materials(arc_key="{arc_key}", picks=[{first_index}])'
+            if visible
+            else ""
+        ),
+        "body_included": False,
+        "writes_performed": [],
+    }
+
+
 @mcp.tool()
-async def find_arc(query: str, limit: int = 5) -> dict:
-    """按 Arc 标题、别名或已确认实体查询轻卡，不读取叙事正文。返回 narrative_id 后，可按需用 read_memory 精确读取 narrative。"""
+async def find_arc(
+    query: str,
+    limit: int = 5,
+    context: Context | None = None,
+) -> dict:
+    """按标题、别名或已确认实体找到 Arc，并返回编号 materials 菜单。"""
     result = narrative_roll_store.find_arc_cards(query=query, limit=limit)
     if result.get("status") != "ok":
         return result
@@ -8731,20 +8907,26 @@ async def find_arc(query: str, limit: int = 5) -> dict:
     items = []
     for item in result.get("items") or []:
         arc_key = str(item.get("arc_key") or "")
-        arc = narrative_roll_store.read_by_arc_key(arc_key)
-        direct_event_ids = set(arc.get("linked_event_ids") or [])
-        automatic_count = sum(
-            1
-            for link in fact_event_store.arc_event_links(arc_key)
-            if str(link.get("event_id") or "") not in direct_event_ids
-        )
-        items.append(
-            {
-                **item,
-                "automatic_linked_event_count": automatic_count,
-                "member_count": int(item.get("member_count") or 0) + automatic_count,
+        menu = await _build_arc_material_menu(arc_key)
+        if menu.get("status") == "ok":
+            _store_arc_material_snapshot(arc_key, menu, context)
+        public_menu = {
+            key: value
+            for key, value in menu.items()
+            if key
+            in {
+                "materials",
+                "material_count",
+                "member_count",
+                "automatic_linked_event_count",
+                "menu_truncated",
+                "menu_fingerprint",
+                "read_instruction",
+                "body_included",
+                "writes_performed",
             }
-        )
+        }
+        items.append({**item, **public_menu})
     return {**result, "items": items}
 
 
@@ -12133,6 +12315,80 @@ async def read_memory(
             include_content=include_content,
         )
     return await _read_scene_memory(safe_id)
+
+
+@mcp.tool()
+async def read_arc_materials(
+    arc_key: str,
+    picks: list[int],
+    context: Context | None = None,
+) -> dict:
+    """读取当前 Arc materials 菜单中的一个或多个编号；一次最多五项。"""
+
+    safe_key = str(arc_key or "").strip()
+    if not safe_key:
+        return {"status": "invalid", "reason": "arc_key_required"}
+    try:
+        selected_indexes = normalize_arc_material_picks(picks)
+    except ValueError as exc:
+        return {
+            "status": "invalid",
+            "reason": str(exc),
+            "max_picks": MAX_ARC_MATERIAL_PICKS,
+        }
+    snapshot = _arc_material_snapshot(safe_key, context)
+    if not snapshot:
+        return {
+            "status": "menu_required",
+            "reason": "find_arc_first",
+            "arc_key": safe_key,
+        }
+    by_index = {
+        int(row.get("index")): row
+        for row in snapshot.get("materials") or []
+        if isinstance(row, dict) and row.get("index") is not None
+    }
+    visible_indexes = [int(value) for value in snapshot.get("visible_indexes") or []]
+    missing = [index for index in selected_indexes if index not in visible_indexes]
+    if missing:
+        return {
+            "status": "invalid",
+            "reason": "material_index_not_in_menu",
+            "arc_key": safe_key,
+            "missing_picks": missing,
+            "visible_indexes": visible_indexes,
+        }
+
+    reads = []
+    for index in selected_indexes:
+        material = dict(by_index[index])
+        kind = str(material.get("kind") or "")
+        material_id = str(material.get("id") or "")
+        if kind == "diary":
+            try:
+                result = await read_diary(diary_id=int(material_id), limit=1)
+            except (TypeError, ValueError):
+                result = {"status": "invalid", "reason": "invalid_diary_id"}
+        else:
+            result = await read_memory(
+                memory_type=kind,
+                memory_id=material_id,
+                include_content=True,
+            )
+        reads.append({**material, "read": result})
+
+    return {
+        "status": "ok",
+        "mode": "arc_materials_exact_read",
+        "arc_key": safe_key,
+        "menu_fingerprint": str(snapshot.get("menu_fingerprint") or ""),
+        "picks": selected_indexes,
+        "count": len(reads),
+        "materials": reads,
+        "max_picks": MAX_ARC_MATERIAL_PICKS,
+        "ordinary_recall": False,
+        "writes_performed": [],
+    }
 
 
 async def _list_handoff_scenes(limit: int = 500) -> dict:
