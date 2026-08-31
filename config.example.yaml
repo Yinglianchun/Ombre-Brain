@@ -162,10 +162,11 @@ embedding:
   #   OMBRE_EMBEDDING_QUERY_INSTRUCTION
 
 # --- Rebuildable passage projections / 可重建局部证据 ---
-# These stores are used only by the explicit simulator path and its rebuild
-# scripts. They never admit or inject a memory or become canonical objects.
+# These stores begin as simulator/rebuild projections. They become candidate
+# inputs for typed Event/Scene recall only when typed_recall is explicitly on;
+# they never become canonical objects.
 passage_shadow:
-  simulation_enabled: true       # explicit simulator only; never changes admission or injection
+  simulation_enabled: true       # build/search the rebuildable typed candidate sidecars
   min_owner_chars: 200           # <= 200 chars stay whole-only; longer owners may split
   target_chars: 160
   max_chars: 240
@@ -176,6 +177,13 @@ passage_shadow:
   backfill_embedding_concurrency: 2
   backfill_request_delay_ms: 150  # explicit atomic backfill only
   min_fact_event_importance: 3   # legacy Fact floor; every active Event remains shadow-eligible
+
+# --- Typed Event / Scene recall cutover ---
+# Uses the rebuildable passage/entity projections above. Arc prose and raw
+# dialogue remain pull-only even when this is enabled.
+typed_recall:
+  live_injection_enabled: false
+  max_cards: 2
 
 cue_passage_shadow:
   concurrency: 4                  # changed Scenes bound in parallel during an explicit rebuild

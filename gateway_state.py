@@ -86,6 +86,17 @@ class GatewayStateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS arc_material_menu_injections (
+                session_id TEXT NOT NULL,
+                arc_key TEXT NOT NULL,
+                menu_fingerprint TEXT NOT NULL DEFAULT '',
+                injected_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, arc_key)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS conversation_turns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 profile_id TEXT NOT NULL,
@@ -778,6 +789,54 @@ class GatewayStateStore:
             for row in rows
             if str(row["bucket_id"] or "").strip()
         }
+
+    def arc_material_menu_was_injected(self, session_id: str, arc_key: str) -> bool:
+        safe_session_id = str(session_id or "").strip()
+        safe_arc_key = str(arc_key or "").strip()
+        if not safe_session_id or not safe_arc_key:
+            return False
+        conn = self._connect()
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM arc_material_menu_injections
+            WHERE session_id = ? AND arc_key = ?
+            LIMIT 1
+            """,
+            (safe_session_id, safe_arc_key),
+        ).fetchone()
+        conn.close()
+        return row is not None
+
+    def record_arc_material_menu_injection(
+        self,
+        session_id: str,
+        arc_key: str,
+        *,
+        menu_fingerprint: str = "",
+    ) -> bool:
+        safe_session_id = str(session_id or "").strip()
+        safe_arc_key = str(arc_key or "").strip()
+        if not safe_session_id or not safe_arc_key:
+            return False
+        conn = self._connect()
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO arc_material_menu_injections (
+                session_id, arc_key, menu_fingerprint, injected_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                safe_session_id,
+                safe_arc_key,
+                str(menu_fingerprint or "").strip(),
+                self._utc_now(),
+            ),
+        )
+        conn.commit()
+        inserted = int(cursor.rowcount or 0) > 0
+        conn.close()
+        return inserted
 
     def get_last_injected_at(self, session_id: str, bucket_id: str) -> datetime | None:
         conn = self._connect()

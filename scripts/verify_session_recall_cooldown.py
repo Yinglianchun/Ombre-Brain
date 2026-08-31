@@ -21,6 +21,15 @@ with tempfile.TemporaryDirectory() as directory:
 
     assert store.get_session_bucket_ids("session-a") == {"seen-card"}
     assert store.get_session_bucket_ids("session-b") == {"other-card"}
+    assert store.arc_material_menu_was_injected("session-a", "work:spy") is False
+    assert store.record_arc_material_menu_injection(
+        "session-a",
+        "work:spy",
+        menu_fingerprint="menu-v1",
+    ) is True
+    assert store.arc_material_menu_was_injected("session-a", "work:spy") is True
+    assert store.arc_material_menu_was_injected("session-b", "work:spy") is False
+    assert store.record_arc_material_menu_injection("session-a", "work:spy") is False
 
     service = GatewayService.__new__(GatewayService)
     service.state_store = store

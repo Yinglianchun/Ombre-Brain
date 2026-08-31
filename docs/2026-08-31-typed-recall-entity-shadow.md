@@ -127,9 +127,11 @@ while preserving the positions from the full session snapshot.
 
 `read_arc_materials(arc_key, picks)` reads one to five displayed positions in a
 single call by dispatching to the existing exact `read_memory` or `read_diary`
-reader. The five-item limit and displayed-position boundary are enforced by the
-service. Darkroom and raw dialogue are not exposed through this menu. Neither
-tool enables Gateway Narrative injection.
+reader. A known `arc_key` can be used directly: when the current MCP session has
+no saved menu, the service rebuilds the same body-free menu before validating
+the requested positions. The five-item limit and displayed-position boundary
+are enforced by the service. Darkroom and raw dialogue are not exposed through
+this menu. Neither tool enables Gateway Narrative injection.
 
 ## Fixed verification
 
@@ -210,3 +212,23 @@ Every receipt fixes `content_included`, `narrative_body_included`,
 `raw_source_query_enabled`, `read_applied`, and `live_injection_enabled` to
 false. The receipt is benchmark output only; it is not wired into Gateway live
 admission, rendering, or injection.
+
+## Explicit typed live cutover
+
+`typed_recall.live_injection_enabled` is false by default. When explicitly
+enabled, the full Hook route reuses the frozen typed candidate and admission
+contracts to add admitted Event/Scene bodies to the private model context.
+Scene bodies already present in ordinary Gateway recall are not duplicated.
+
+An admitted owner with no uniquely confirmed Arc carries only the fixed hint
+`可能是你的相关记忆，若无关可忽略`. An admitted owner with a unique Arc carries
+`Arc: <title> (key=<arc_key>) [可按需读取]`. The first such hit for an Arc in one
+Gateway session also carries the body-free numbered materials menu; later hits
+in the same session keep returning admitted Event/Scene bodies but suppress only
+that menu. The cooldown is persisted in `gateway_state.db` by `(session_id,
+arc_key)`.
+
+This cutover never injects Narrative prose and never creates a raw-dialogue
+query route. Narrative requests receive at most the pull-based Arc menu. The
+explicit simulation route continues to force typed live injection off even when
+the runtime flag is enabled.

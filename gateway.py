@@ -24,7 +24,13 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from bucket_manager import BucketManager
+from arc_materials import (
+    arc_materials_fingerprint,
+    build_arc_materials,
+    displayed_arc_materials,
+)
 from dehydrator import Dehydrator
+from diary_store import DiaryLockedError, DiaryNotFoundError, DiaryStore
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
 from favorite_tags import has_favorite_memory_tag, is_flavor_tag
@@ -123,6 +129,10 @@ from memory_recall.typed_candidate_shadow import (
     build_event_lane,
     build_scene_lane,
     rerank_lane_with_freshness,
+)
+from memory_recall.typed_admission_shadow import (
+    evaluate_typed_admission_shadow,
+    typed_admission_rerank_query,
 )
 from narrative_rolls import NarrativeRollStore
 from persona_engine import PersonaStateEngine
@@ -441,6 +451,16 @@ class GatewayService:
         self.passage_shadow_min_fact_event_importance = (
             self.passage_shadow_min_fact_importance
         )
+        typed_recall_cfg = config.get("typed_recall")
+        typed_recall_cfg = typed_recall_cfg if isinstance(typed_recall_cfg, dict) else {}
+        self.typed_event_scene_live_enabled = self._bool_config_value(
+            typed_recall_cfg.get("live_injection_enabled"),
+            False,
+        )
+        self.typed_event_scene_live_max_cards = max(
+            1,
+            min(5, int(typed_recall_cfg.get("max_cards") or 2)),
+        )
         self.passage_shadow_index = PassageShadowIndex(config, self.embedding_engine)
         self.cue_passage_shadow_index = CuePassageShadowIndex(config, self.embedding_engine)
         self.fact_event_lexical_shadow_index = FactEventLexicalShadowIndex(config)
@@ -482,6 +502,7 @@ class GatewayService:
         self.raw_event_store = raw_event_store or RawEventStore(config)
         self.reminder_store = ReminderStore(config)
         self.narrative_roll_store = NarrativeRollStore(config)
+        self.diary_store = DiaryStore(config) if self.typed_event_scene_live_enabled else None
         self.persona_engine = persona_engine or PersonaStateEngine(config)
         self.dream_engine = dream_engine or DreamEngine(config)
         self.dream_cfg = config.get("dream", {}) if isinstance(config.get("dream", {}), dict) else {}
@@ -1023,6 +1044,12 @@ class GatewayService:
                     "mode": "shadow_only",
                     "available_count": int(narrative_index.get("count") or 0),
                     "gateway_live_injection_enabled": False,
+                },
+                "typed_event_scene_recall": {
+                    "live_injection_enabled": self.typed_event_scene_live_enabled,
+                    "max_cards": self.typed_event_scene_live_max_cards,
+                    "arc_narrative_body_injection_enabled": False,
+                    "raw_source_query_enabled": False,
                 },
                 "date_persona_trace_enabled": self.date_persona_trace_enabled,
                 "date_persona_trace_budget": self.date_persona_trace_budget,
@@ -2571,6 +2598,7 @@ class GatewayService:
                 semantic_recall_result=(semantic_recall_debug, semantic_query_vector),
                 passage_query_view_shadow_enabled=passage_query_view_shadow_requested,
                 record_hook_injection=record_hook_injection,
+                typed_live_allowed=not simulation_probe,
             )
 
         try:
@@ -2734,6 +2762,7 @@ class GatewayService:
         semantic_recall_result: tuple[dict[str, Any], list[float] | None] | None = None,
         passage_query_view_shadow_enabled: bool = False,
         record_hook_injection: bool = False,
+        typed_live_allowed: bool = True,
     ) -> JSONResponse:
         """Run the normal Gateway recall pipeline without forwarding upstream."""
         try:
@@ -2760,15 +2789,49 @@ class GatewayService:
             max_chars=max_chars,
             include_diffused=include_diffused,
         )
-        dynamic_context = self._clip_text(
+        recalled_ids = list(recalled_ids or debug_payload.get("injected_bucket_ids") or [])
+        typed_live = (
+            await self._typed_event_scene_live_context(
+                query,
+                session_id,
+                (semantic_recall_result[1] or []) if semantic_recall_result else [],
+                excluded_scene_ids=set(recalled_ids),
+                body_char_limit=max_chars,
+            )
+            if typed_live_allowed
+            else {
+                "status": "simulation_disabled",
+                "context": "",
+                "cards": [],
+                "selected_refs": [],
+                "menus_included": [],
+                "menus_suppressed": [],
+            }
+        )
+        cards.extend(list(typed_live.get("cards") or []))
+        dynamic_parts = [
+            str(typed_live.get("context") or ""),
             self._hook_recall_full_dynamic_context(
                 debug_payload,
                 include_diffused=include_diffused,
             ),
+        ]
+        dynamic_context = self._clip_text(
+            "\n\n".join(part for part in dynamic_parts if str(part or "").strip()),
             max_context_chars,
         )
+        if record_hook_injection:
+            for arc_key in typed_live.get("menus_included") or []:
+                if f"[arc_materials key={arc_key}]" not in dynamic_context:
+                    continue
+                self.state_store.record_arc_material_menu_injection(
+                    session_id,
+                    str(arc_key),
+                    menu_fingerprint=str(
+                        (typed_live.get("menu_fingerprints") or {}).get(arc_key) or ""
+                    ),
+                )
         additional_context = self._render_hook_recall_full_additional_context(dynamic_context)
-        recalled_ids = list(recalled_ids or debug_payload.get("injected_bucket_ids") or [])
         minimal_debug = {
             "mode": "full_gateway",
             "query": query,
@@ -2779,6 +2842,11 @@ class GatewayService:
             "just_now_context_injected": bool(debug_payload.get("just_now_context_injected")),
             "date_recall_injected": bool(debug_payload.get("date_recall_injected")),
             "prepare_timing_debug": dict(debug_payload.get("prepare_timing_debug") or {}),
+            "typed_event_scene_live": {
+                key: value
+                for key, value in typed_live.items()
+                if key not in {"context", "cards"}
+            },
         }
         semantic_debug = debug_payload.get("semantic_recall_debug")
         semantic_query_vector = (
@@ -14530,6 +14598,358 @@ class GatewayService:
             "entity_scope": entity_scope,
             "candidate_count": len(pool),
             "candidates": pool,
+        }
+
+    @staticmethod
+    def _typed_owner_ref(row: dict[str, Any]) -> str:
+        kind = str(row.get("owner_kind") or "").strip().lower()
+        owner_id = str(row.get("owner_id") or "").strip()
+        return f"{kind}:{owner_id}" if kind and owner_id else ""
+
+    @staticmethod
+    def _typed_reranker_document(row: dict[str, Any]) -> str:
+        title = str(row.get("title") or "").strip()
+        passages = [
+            str(passage.get("text") or "").strip()
+            for passage in row.get("passages") or []
+            if isinstance(passage, dict) and str(passage.get("text") or "").strip()
+        ]
+        return f"title: {title}\nbody: {'\n'.join(passages[:2])}"[:4000]
+
+    @staticmethod
+    def _typed_memory_date(*values: Any) -> str:
+        return next(
+            (
+                str(value).strip()[:10]
+                for value in values
+                if str(value or "").strip()
+            ),
+            "",
+        )
+
+    async def _typed_arc_material_menu(self, arc_key: str) -> dict[str, Any]:
+        profile = self.narrative_roll_store.arc_material_profile_by_key(arc_key)
+        if profile.get("status") != "ok":
+            return profile
+        card = dict(profile.get("card") or {})
+        narrative = None
+        if card.get("narrative_available") and str(card.get("narrative_id") or ""):
+            narrative = {
+                "kind": "narrative",
+                "id": str(card.get("narrative_id") or ""),
+                "title": str(card.get("title") or "叙事卷"),
+                "date": "",
+            }
+
+        materials: list[dict[str, Any]] = []
+        direct_event_ids = [
+            str(value)
+            for value in profile.get("linked_event_ids") or []
+            if str(value or "").strip()
+        ]
+        automatic_event_ids = [
+            str(link.get("event_id") or "")
+            for link in self.fact_event_store.arc_event_links(arc_key)
+            if str(link.get("event_id") or "").strip()
+        ]
+        event_ids = list(dict.fromkeys([*direct_event_ids, *automatic_event_ids]))
+        for event_id in event_ids:
+            try:
+                event = self.fact_event_store.read(event_id, include_sources=False)
+            except ValueError:
+                event = None
+            if not event or str(event.get("item_type") or "") != "event":
+                continue
+            materials.append(
+                {
+                    "kind": "event",
+                    "id": event_id,
+                    "title": str(event.get("title") or event_id),
+                    "date": self._typed_memory_date(
+                        event.get("local_end_date"),
+                        event.get("local_date"),
+                        event.get("source_ended_at"),
+                    ),
+                }
+            )
+
+        scene_ids = [
+            str(value)
+            for value in profile.get("linked_scene_ids") or []
+            if str(value or "").strip()
+        ]
+        scenes = await asyncio.gather(*(self.bucket_mgr.get(scene_id) for scene_id in scene_ids))
+        for scene_id, scene in zip(scene_ids, scenes):
+            if not isinstance(scene, dict):
+                continue
+            metadata = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
+            materials.append(
+                {
+                    "kind": "scene",
+                    "id": scene_id,
+                    "title": str(metadata.get("name") or scene_id),
+                    "date": self._typed_memory_date(
+                        metadata.get("date"),
+                        metadata.get("event_date"),
+                        metadata.get("created"),
+                    ),
+                }
+            )
+
+        if getattr(self, "diary_store", None) is not None:
+            for raw_diary_id in profile.get("linked_diary_ids") or []:
+                try:
+                    diary_id = int(raw_diary_id)
+                    diary = self.diary_store.read(diary_id=diary_id, limit=1)
+                except (TypeError, ValueError, DiaryNotFoundError, DiaryLockedError):
+                    continue
+                diary_rows = list(diary.get("diaries") or [])
+                item = diary_rows[0] if diary_rows and isinstance(diary_rows[0], dict) else diary
+                materials.append(
+                    {
+                        "kind": "diary",
+                        "id": str(diary_id),
+                        "title": str(item.get("title") or f"日记 {diary_id}"),
+                        "date": self._typed_memory_date(item.get("date")),
+                    }
+                )
+
+        all_materials = build_arc_materials(narrative, materials)
+        visible = displayed_arc_materials(all_materials)
+        return {
+            "status": "ok",
+            "arc_key": str(profile.get("arc_key") or arc_key),
+            "title": str(card.get("title") or arc_key),
+            "materials": visible,
+            "material_count": len(all_materials),
+            "menu_truncated": len(visible) < len(all_materials),
+            "menu_fingerprint": arc_materials_fingerprint(all_materials),
+            "body_included": False,
+        }
+
+    @staticmethod
+    def _typed_arc_card_for_row(
+        row: dict[str, Any],
+        *,
+        scope_arc_key: str = "",
+    ) -> dict[str, Any] | None:
+        cards = [
+            dict(card)
+            for card in row.get("arc_cards") or []
+            if isinstance(card, dict) and str(card.get("arc_key") or "").strip()
+        ]
+        if scope_arc_key:
+            return next(
+                (
+                    card
+                    for card in cards
+                    if str(card.get("arc_key") or "") == scope_arc_key
+                ),
+                None,
+            )
+        return cards[0] if len(cards) == 1 else None
+
+    async def _typed_event_scene_live_context(
+        self,
+        query: str,
+        session_id: str,
+        query_embedding: list[float],
+        *,
+        excluded_scene_ids: set[str] | None = None,
+        body_char_limit: int = 1200,
+    ) -> dict[str, Any]:
+        empty = {
+            "status": "disabled",
+            "context": "",
+            "cards": [],
+            "selected_refs": [],
+            "menus_included": [],
+            "menus_suppressed": [],
+        }
+        if not getattr(self, "typed_event_scene_live_enabled", False):
+            return empty
+        live_max_cards = max(
+            1,
+            min(5, int(getattr(self, "typed_event_scene_live_max_cards", 2) or 2)),
+        )
+        candidate_result = self._passage_candidate_shadow_debug(query, query_embedding)
+        if candidate_result.get("status") != "ok":
+            return {
+                **empty,
+                "status": str(candidate_result.get("status") or "not_retrieved"),
+                "reason": str(candidate_result.get("reason") or "candidate_search_unavailable"),
+                "entity_scope": candidate_result.get("entity_scope") or {},
+            }
+
+        scope = (
+            candidate_result.get("entity_scope")
+            if isinstance(candidate_result.get("entity_scope"), dict)
+            else {}
+        )
+        candidates = [
+            dict(row)
+            for row in candidate_result.get("candidates") or []
+            if isinstance(row, dict) and self._typed_owner_ref(row)
+        ]
+        admission = evaluate_typed_admission_shadow(query, scope, candidates)
+        if admission.get("mode") == "direct_evidence_rerank" and candidates:
+            documents = [self._typed_reranker_document(row) for row in candidates]
+            results = await self.reranker_engine.rerank(
+                typed_admission_rerank_query(query, scope),
+                documents,
+                top_n=len(documents),
+            )
+            rerank_scores = {
+                self._typed_owner_ref(candidates[result.index]): float(result.score)
+                for result in results
+                if 0 <= int(result.index) < len(candidates)
+            }
+            admission = evaluate_typed_admission_shadow(
+                query,
+                scope,
+                candidates,
+                rerank_scores=rerank_scores,
+            )
+
+        selected_refs = list(admission.get("selected_refs") or [])
+        if admission.get("mode") == "timeline_scope_material":
+            material_set = set(admission.get("material_refs") or [])
+            selected_rows = sorted(
+                (
+                    row
+                    for row in candidates
+                    if self._typed_owner_ref(row) in material_set
+                ),
+                key=lambda row: (
+                    str(row.get("memory_date") or ""),
+                    self._typed_owner_ref(row),
+                ),
+            )[-live_max_cards:]
+            selected_refs = [self._typed_owner_ref(row) for row in selected_rows]
+        else:
+            selected_set = set(selected_refs)
+            selected_rows = [
+                row for row in candidates if self._typed_owner_ref(row) in selected_set
+            ][:live_max_cards]
+        excluded = {str(value) for value in (excluded_scene_ids or set()) if str(value)}
+        scope_arc_key = str((scope.get("scope_anchor") or {}).get("arc_key") or "")
+
+        arc_cards: dict[str, dict[str, Any]] = {}
+        for row in selected_rows:
+            card = self._typed_arc_card_for_row(row, scope_arc_key=scope_arc_key)
+            if card:
+                arc_cards.setdefault(str(card.get("arc_key") or ""), card)
+        if not arc_cards and scope_arc_key and admission.get("mode") in {
+            "defer_to_narrative",
+            "timeline_scope_material",
+        }:
+            card_result = self.narrative_roll_store.arc_card_by_key(scope_arc_key)
+            card = dict(card_result.get("item") or {})
+            if card:
+                arc_cards[scope_arc_key] = card
+
+        context_parts: list[str] = []
+        cards: list[dict[str, Any]] = []
+        for row in selected_rows:
+            kind = str(row.get("owner_kind") or "").strip().lower()
+            owner_id = str(row.get("owner_id") or "").strip()
+            row_card = self._typed_arc_card_for_row(row, scope_arc_key=scope_arc_key)
+            if kind == "scene" and owner_id in excluded:
+                lines = [f"[typed_memory_ref ref=scene:{owner_id}]"]
+                if row_card:
+                    lines.append(
+                        f"Arc: {row_card.get('title') or row_card.get('arc_key')} "
+                        f"(key={row_card.get('arc_key')}) [可按需读取]"
+                    )
+                else:
+                    lines.append("可能是你的相关记忆，若无关可忽略")
+                lines.append("[/typed_memory_ref]")
+                context_parts.append("\n".join(lines))
+                continue
+            item = self._passage_candidate_shadow_catalog.get(owner_id) or {}
+            body = self._clip_text(
+                str(item.get("body") or "").strip(),
+                max(160, min(2400, int(body_char_limit or 1200))),
+            )
+            if not body:
+                continue
+            title = str(item.get("title") or row.get("title") or owner_id).strip()
+            date = str(item.get("memory_date") or row.get("memory_date") or "").strip()
+            ref = f"{kind}:{owner_id}"
+            lines = [f"[typed_memory ref={ref}]", f"title: {title}"]
+            if date:
+                lines.append(f"date: {date}")
+            if row_card:
+                lines.append(
+                    f"Arc: {row_card.get('title') or row_card.get('arc_key')} "
+                    f"(key={row_card.get('arc_key')}) [可按需读取]"
+                )
+            else:
+                lines.append("可能是你的相关记忆，若无关可忽略")
+            lines.extend(["text: |", *(f"  {line}" for line in body.splitlines())])
+            lines.append("[/typed_memory]")
+            context_parts.append("\n".join(lines))
+            cards.append(
+                {
+                    "id": ref,
+                    "source": "ombre",
+                    "source_kind": kind,
+                    "title": title,
+                    "text": body,
+                    "score": round(float(row.get("score") or 0.0), 4),
+                    "render_shape": "typed_memory",
+                }
+            )
+
+        menus_included: list[str] = []
+        menus_suppressed: list[str] = []
+        menu_fingerprints: dict[str, str] = {}
+        for arc_key, card in arc_cards.items():
+            if self.state_store.arc_material_menu_was_injected(session_id, arc_key):
+                menus_suppressed.append(arc_key)
+                continue
+            menu = await self._typed_arc_material_menu(arc_key)
+            if menu.get("status") != "ok":
+                continue
+            menu_lines = [
+                f"[arc_materials key={arc_key}]",
+                f"Arc: {card.get('title') or menu.get('title') or arc_key} [可按需读取]",
+                f"material_count: {menu.get('material_count') or 0}",
+            ]
+            for material in menu.get("materials") or []:
+                date = f" {material.get('date')}" if material.get("date") else ""
+                menu_lines.append(
+                    f"[{material.get('index')}] {material.get('kind')}: "
+                    f"{material.get('title')}{date} (id={material.get('id')})"
+                )
+            if menu.get("menu_truncated"):
+                menu_lines.append("menu_truncated: true")
+            menu_lines.append(
+                f'使用 read_arc_materials(arc_key="{arc_key}", picks=[编号]) 一次读取最多5项。'
+            )
+            menu_lines.append("[/arc_materials]")
+            context_parts.append("\n".join(menu_lines))
+            menus_included.append(arc_key)
+            menu_fingerprints[arc_key] = str(menu.get("menu_fingerprint") or "")
+
+        applied = bool(context_parts)
+        return {
+            "status": "injected" if applied else "not_admitted",
+            "context": "\n\n".join(context_parts),
+            "cards": cards,
+            "selected_refs": selected_refs,
+            "menus_included": menus_included,
+            "menus_suppressed": menus_suppressed,
+            "menu_fingerprints": menu_fingerprints,
+            "admission": {
+                **admission,
+                "decision_applied": applied,
+                "live_injection_enabled": applied,
+            },
+            "entity_scope": scope,
+            "candidate_count": len(candidates),
+            "narrative_body_included": False,
+            "raw_source_query_enabled": False,
         }
 
     @staticmethod

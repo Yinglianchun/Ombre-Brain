@@ -12338,9 +12338,15 @@ async def read_arc_materials(
         }
     snapshot = _arc_material_snapshot(safe_key, context)
     if not snapshot:
+        menu = await _build_arc_material_menu(safe_key)
+        if menu.get("status") != "ok":
+            return menu
+        _store_arc_material_snapshot(safe_key, menu, context)
+        snapshot = _arc_material_snapshot(safe_key, context)
+    if not snapshot:
         return {
-            "status": "menu_required",
-            "reason": "find_arc_first",
+            "status": "unavailable",
+            "reason": "arc_material_menu_unavailable",
             "arc_key": safe_key,
         }
     by_index = {

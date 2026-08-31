@@ -163,6 +163,7 @@ async def main() -> None:
 
         server.read_memory = fake_read_memory
         server.read_diary = fake_read_diary
+        server._arc_material_menu_snapshots.clear()
         read = await server.read_arc_materials(ARC_KEY, [0, 2, 13])
         assert read["status"] == "ok", read
         assert read["picks"] == [0, 2, 13], read
