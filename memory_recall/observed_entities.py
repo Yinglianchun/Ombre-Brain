@@ -27,8 +27,9 @@ except Exception:  # pragma: no cover - reduced runtimes may ship jieba without 
     jieba_posseg = None
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 _DYNAMIC_POS = frozenset({"nr", "ns", "nt", "nz", "eng"})
+_EMBEDDED_NAME_PREFIX_STOP = frozenset("的了在和与就又把被是这那有个")
 _QUOTED_WORK = re.compile(r"《([^》]{2,40})》")
 _QUOTED_NAME = re.compile(r"[“「『]([^”」』]{2,24})[”」』]")
 _LATIN_NAME = re.compile(
@@ -229,17 +230,11 @@ def _entity_surface_shape(
     )
 
 
-def _consistently_embedded_name_surface(
+def _consistent_embedded_name_prefix(
     value: str,
     sources: Iterable[dict[str, Any]],
 ) -> str:
-    """Recover a proper-name surface that jieba split after one Han character.
-
-    A common failure is segmenting ``阿尼亚`` as ``阿`` + ``尼亚``.  If every
-    observed occurrence has the same adjacent Han character, the joined surface
-    is a safer scope candidate.  The shorter observation remains auditable but
-    receives no scope authority.
-    """
+    """Return a stable one-Han prefix when a jieba name never stands alone."""
 
     spans: list[tuple[str | None, str | None]] = []
     for source in sources:
@@ -259,12 +254,25 @@ def _consistently_embedded_name_surface(
         )
 
     before = [char for char, _ in spans]
-    if same_han(before):
-        return f"{before[0]}{value}"
-    after = [char for _, char in spans]
-    if same_han(after):
-        return f"{value}{after[0]}"
-    return ""
+    return str(before[0]) if same_han(before) else ""
+
+
+def _consistently_embedded_name_surface(
+    value: str,
+    sources: Iterable[dict[str, Any]],
+) -> str:
+    """Recover ``阿尼亚`` from a stable ``阿`` + ``尼亚`` split.
+
+    Suffix completion is intentionally excluded: a token such as ``设得兰``
+    followed by ``群岛`` is already a useful entity, while adding one suffix
+    character produces an incomplete new surface.  Function-word prefixes mark
+    a fragment but never become part of a recovered entity.
+    """
+
+    prefix = _consistent_embedded_name_prefix(value, sources)
+    if not prefix or prefix in _EMBEDDED_NAME_PREFIX_STOP:
+        return ""
+    return f"{prefix}{value}"
 
 
 def extract_observed_entities(
@@ -374,7 +382,7 @@ def extract_observed_entities(
         embedded_name_fragment = bool(
             proper_name
             and "embedded_proper_name" not in kinds
-            and _consistently_embedded_name_surface(entity_text, sources)
+            and _consistent_embedded_name_prefix(entity_text, sources)
         )
         quoted_named_term = bool(
             "quoted_name" in kinds
@@ -449,6 +457,7 @@ class ObservedEntityShadowIndex:
             "小雨",
             "Haven",
             "事情",
+            "东西",
             "内容",
             "记忆",
             "片段",

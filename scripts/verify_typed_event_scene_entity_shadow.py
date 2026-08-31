@@ -166,6 +166,7 @@ def verify_observed_entities_and_scope() -> None:
             "buckets_dir": str(Path(temp_dir) / "buckets"),
         }
         index = ObservedEntityShadowIndex(config)
+        assert "东西" in index.stop_keys
         arcs = [
             {
                 "arc_key": "work:spy-family",
