@@ -2777,6 +2777,12 @@ class GatewayService:
                 query,
                 session_id,
                 (semantic_recall_result[1] or []) if semantic_recall_result else [],
+                semantic_recall_debug=(
+                    semantic_recall_result[0]
+                    if semantic_recall_result
+                    and isinstance(semantic_recall_result[0], dict)
+                    else debug_payload.get("semantic_recall_debug")
+                ),
                 excluded_scene_ids=set(recalled_ids),
                 body_char_limit=max_chars,
             )
@@ -14700,12 +14706,86 @@ class GatewayService:
             )
         return cards[0] if len(cards) == 1 else None
 
+    def _typed_surface_reranker_gate(
+        self,
+        query: str,
+        scope: dict[str, Any],
+        semantic_recall_debug: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        semantic_debug = (
+            semantic_recall_debug
+            if isinstance(semantic_recall_debug, dict)
+            else {}
+        )
+        route = str(semantic_debug.get("route") or "").strip()
+        route_action = str(
+            semantic_debug.get("route_action") or "recall"
+        ).strip().lower()
+        scope_anchor = (
+            scope.get("scope_anchor")
+            if isinstance(scope.get("scope_anchor"), dict)
+            else {}
+        )
+        has_arc_scope = bool(
+            str(scope_anchor.get("arc_key") or "").strip()
+            or str(scope.get("status") or "") == "scoped_recall"
+        )
+
+        retrieval_budget = semantic_debug.get("retrieval_budget")
+        if not isinstance(retrieval_budget, dict):
+            retrieval_budget = build_retrieval_budget(
+                query,
+                route=route,
+                route_action=route_action,
+                semantic_debug=semantic_debug,
+            )
+        query_facets = [
+            facet
+            for facet in retrieval_budget.get("query_facets") or []
+            if isinstance(facet, dict)
+        ]
+        has_anchor = bool(
+            retrieval_budget.get("anchor_override")
+            or any(
+                str(facet.get("kind") or "")
+                in {"entity", "protected_phrase", "exact_anchor", "reference_entity"}
+                for facet in query_facets
+            )
+        )
+        has_explicit_recall = bool(
+            self._query_has_explicit_recall_structure(query)
+            or retrieval_budget.get("recall_markers")
+            or retrieval_budget.get("deep_recall_markers")
+            or retrieval_budget.get("explicit_deep_reasons")
+        )
+        applied = bool(
+            route in {"present_chitchat", "present_reality"}
+            and route_action == "skip"
+            and not has_arc_scope
+            and not has_anchor
+            and not has_explicit_recall
+        )
+        return {
+            "applied": applied,
+            "route": route,
+            "route_action": route_action,
+            "has_arc_scope": has_arc_scope,
+            "has_anchor": has_anchor,
+            "has_explicit_recall": has_explicit_recall,
+            "reason": (
+                "daily_surface_without_memory_intent"
+                if applied
+                else "typed_retrieval_allowed"
+            ),
+        }
+
     async def _typed_event_scene_live_context(
         self,
         query: str,
         session_id: str,
         query_embedding: list[float],
         *,
+        semantic_recall_debug: dict[str, Any] | None = None,
         excluded_scene_ids: set[str] | None = None,
         body_char_limit: int = 1200,
     ) -> dict[str, Any]:
@@ -14737,6 +14817,22 @@ class GatewayService:
             if isinstance(candidate_result.get("entity_scope"), dict)
             else {}
         )
+        surface_gate = self._typed_surface_reranker_gate(
+            query,
+            scope,
+            semantic_recall_debug,
+        )
+        if surface_gate.get("applied"):
+            return {
+                **empty,
+                "status": "not_retrieved",
+                "reason": "daily_surface_without_memory_intent",
+                "entity_scope": scope,
+                "surface_reranker_gate": surface_gate,
+                "candidate_count": len(candidate_result.get("candidates") or []),
+                "narrative_body_included": False,
+                "raw_source_query_enabled": False,
+            }
         candidates = [
             dict(row)
             for row in candidate_result.get("candidates") or []
@@ -14913,6 +15009,7 @@ class GatewayService:
                 "live_injection_enabled": applied,
             },
             "entity_scope": scope,
+            "surface_reranker_gate": surface_gate,
             "candidate_count": len(candidates),
             "excluded_event_refs_by_recallable": excluded_event_refs_by_recallable,
             "narrative_body_included": False,

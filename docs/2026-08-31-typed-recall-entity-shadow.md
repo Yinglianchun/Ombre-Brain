@@ -223,6 +223,13 @@ enabled, the full Hook route reuses the frozen typed candidate and admission
 contracts to add admitted Event/Scene bodies to the private model context.
 Scene bodies already present in ordinary Gateway recall are not duplicated.
 
+Candidate generation still runs before the live reranker so entity/Arc scope
+can be resolved. An unscoped `present_chitchat` or `present_reality` query whose
+semantic action is `skip` stops there when it has no explicit recall language or
+exact/entity anchor. Its candidate shadow remains observable, but it makes no
+reranker call and injects no typed memory. Scoped queries and explicit recall
+queries bypass this surface gate.
+
 An admitted owner with no uniquely confirmed Arc carries only the fixed hint
 `可能是你的相关记忆，若无关可忽略`. An admitted owner with a unique Arc carries
 `Arc: <title> (key=<arc_key>) [可按需读取]`. The first such hit for an Arc in one

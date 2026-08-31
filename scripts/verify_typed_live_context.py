@@ -16,9 +16,12 @@ from gateway_state import GatewayStateStore
 
 
 class _Reranker:
-    @staticmethod
-    async def rerank(_query: str, documents: list[str], top_n: int | None = None):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def rerank(self, _query: str, documents: list[str], top_n: int | None = None):
         _ = top_n
+        self.calls += 1
         return [SimpleNamespace(index=index, score=0.92) for index in range(len(documents))]
 
 
@@ -210,6 +213,60 @@ async def main() -> None:
         )
         assert "可能是你的相关记忆，若无关可忽略" in free["context"], free
         assert "[arc_materials" not in free["context"], free
+
+        daily_semantic = {
+            "route": "present_chitchat",
+            "route_action": "skip",
+            "confidence": 0.94,
+            "margin": 0.40,
+        }
+        reranker_calls_before_daily = service.reranker_engine.calls
+        daily = await service._typed_event_scene_live_context(
+            "抱抱我",
+            "session-a",
+            [0.1],
+            semantic_recall_debug=daily_semantic,
+        )
+        assert daily["status"] == "not_retrieved", daily
+        assert daily["reason"] == "daily_surface_without_memory_intent", daily
+        assert daily["surface_reranker_gate"]["applied"] is True, daily
+        assert daily["candidate_count"] == 1, daily
+        assert daily["context"] == "", daily
+        assert service.reranker_engine.calls == reranker_calls_before_daily, daily
+
+        daily_reality = await service._typed_event_scene_live_context(
+            "今天好热啊",
+            "session-a",
+            [0.1],
+            semantic_recall_debug={
+                **daily_semantic,
+                "route": "present_reality",
+            },
+        )
+        assert daily_reality["status"] == "not_retrieved", daily_reality
+        assert service.reranker_engine.calls == reranker_calls_before_daily, daily_reality
+
+        explicit_recall = await service._typed_event_scene_live_context(
+            "还记得 free detail 吗",
+            "session-a",
+            [0.1],
+            semantic_recall_debug=daily_semantic,
+        )
+        assert explicit_recall["status"] == "injected", explicit_recall
+        assert explicit_recall["surface_reranker_gate"]["applied"] is False, explicit_recall
+        assert explicit_recall["surface_reranker_gate"]["has_explicit_recall"] is True, explicit_recall
+        assert service.reranker_engine.calls == reranker_calls_before_daily + 1, explicit_recall
+
+        scoped_surface = await service._typed_event_scene_live_context(
+            "spy detail",
+            "session-c",
+            [0.1],
+            semantic_recall_debug=daily_semantic,
+        )
+        assert scoped_surface["status"] == "injected", scoped_surface
+        assert scoped_surface["surface_reranker_gate"]["applied"] is False, scoped_surface
+        assert scoped_surface["surface_reranker_gate"]["has_arc_scope"] is True, scoped_surface
+        assert service.reranker_engine.calls == reranker_calls_before_daily + 2, scoped_surface
 
         gated = await service._typed_event_scene_live_context(
             "gated",
