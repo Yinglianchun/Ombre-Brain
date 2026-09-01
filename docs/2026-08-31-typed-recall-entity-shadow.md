@@ -226,11 +226,15 @@ Scene bodies already present in ordinary Gateway recall are not duplicated.
 Candidate generation still runs before the live reranker so entity/Arc scope
 can be resolved. An unscoped `present_chitchat` or `present_reality` query whose
 semantic action is `skip` stops there when it has no explicit recall language or
-exact/entity anchor. Its candidate shadow remains observable, but it makes no
+confirmed Arc scope/explicit anchor. Its candidate shadow remains observable, but it makes no
 reranker call and injects no typed memory. Scoped queries and explicit recall
 queries bypass this surface gate. One unconfirmed planner entity is not enough
-to bypass it; a confirmed Arc scope, an explicit phrase/exact/reference anchor,
-or at least two planner entity facets is required.
+to bypass it, regardless of how many locatable terms the planner guesses. A
+confirmed Arc scope or explicit phrase/exact/reference anchor can bypass the
+gate directly. An unscoped detail question can bypass it only when a returned
+owner also has a memory-side handle: an observed entity match, an authored cue
+candidate, or an Event lexical candidate. These handles never add to cosine or
+reranker scores.
 
 An admitted owner with no uniquely confirmed Arc carries only the fixed hint
 `可能是你的相关记忆，若无关可忽略`. An admitted owner with a unique Arc carries

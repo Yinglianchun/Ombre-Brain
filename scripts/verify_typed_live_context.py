@@ -126,6 +126,23 @@ async def main() -> None:
                 "event-spy" if scoped else "scene-free",
                 with_arc=scoped,
             )
+            if query.startswith("绒绒"):
+                row["candidate_sources"] = [
+                    "scene_whole_embedding",
+                    "scene_cue_candidate",
+                ]
+            owner_entity_matches = (
+                [
+                    {
+                        "owner_kind": "scene",
+                        "owner_id": "scene-free",
+                        "entity": "阿尼亚",
+                        "source_kind": "observed_entity",
+                    }
+                ]
+                if query.startswith("阿尼亚说过什么")
+                else []
+            )
             return {
                 "status": "ok",
                 "entity_scope": (
@@ -139,6 +156,7 @@ async def main() -> None:
                     if scoped
                     else {"status": "global_recall", "operator": "none", "intent": "none"}
                 ),
+                "owner_entity_matches": owner_entity_matches,
                 "candidates": [row],
             }
 
@@ -259,13 +277,37 @@ async def main() -> None:
                             "kind": "entity",
                             "value": "晚安",
                             "source": "query_planner.locatable_terms",
-                        }
+                        },
+                        {
+                            "kind": "entity",
+                            "value": "老公",
+                            "source": "query_planner.locatable_terms",
+                        },
                     ],
                 },
             },
         )
         assert noisy_single_entity["status"] == "not_retrieved", noisy_single_entity
         assert service.reranker_engine.calls == reranker_calls_before_daily, noisy_single_entity
+
+        planner_only_detail = await service._typed_event_scene_live_context(
+            "路人怎么评价这件事",
+            "session-a",
+            [0.1],
+            semantic_recall_debug={
+                **daily_semantic,
+                "retrieval_budget": {
+                    "anchor_override": True,
+                    "query_facets": [
+                        {"kind": "entity", "value": "路人"},
+                        {"kind": "entity", "value": "评价"},
+                    ],
+                },
+            },
+        )
+        assert planner_only_detail["status"] == "not_retrieved", planner_only_detail
+        assert planner_only_detail["surface_reranker_gate"]["has_memory_backed_detail"] is False, planner_only_detail
+        assert service.reranker_engine.calls == reranker_calls_before_daily, planner_only_detail
 
         named_detail = await service._typed_event_scene_live_context(
             "绒绒怎么评价澜这个名字",
@@ -283,8 +325,23 @@ async def main() -> None:
             },
         )
         assert named_detail["status"] == "injected", named_detail
-        assert named_detail["surface_reranker_gate"]["has_anchor"] is True, named_detail
+        assert named_detail["surface_reranker_gate"]["has_anchor"] is False, named_detail
+        assert named_detail["surface_reranker_gate"]["has_memory_backed_detail"] is True, named_detail
+        assert named_detail["surface_reranker_gate"]["matched_candidate_sources"] == [
+            "scene_cue_candidate"
+        ], named_detail
         assert service.reranker_engine.calls == reranker_calls_before_daily + 1, named_detail
+
+        observed_detail = await service._typed_event_scene_live_context(
+            "阿尼亚说过什么",
+            "session-a",
+            [0.1],
+            semantic_recall_debug=daily_semantic,
+        )
+        assert observed_detail["status"] == "injected", observed_detail
+        assert observed_detail["surface_reranker_gate"]["has_memory_backed_detail"] is True, observed_detail
+        assert observed_detail["surface_reranker_gate"]["owner_entity_matches"], observed_detail
+        assert service.reranker_engine.calls == reranker_calls_before_daily + 2, observed_detail
 
         explicit_recall = await service._typed_event_scene_live_context(
             "还记得 free detail 吗",
@@ -295,7 +352,7 @@ async def main() -> None:
         assert explicit_recall["status"] == "injected", explicit_recall
         assert explicit_recall["surface_reranker_gate"]["applied"] is False, explicit_recall
         assert explicit_recall["surface_reranker_gate"]["has_explicit_recall"] is True, explicit_recall
-        assert service.reranker_engine.calls == reranker_calls_before_daily + 2, explicit_recall
+        assert service.reranker_engine.calls == reranker_calls_before_daily + 3, explicit_recall
 
         scoped_surface = await service._typed_event_scene_live_context(
             "spy detail",
@@ -306,7 +363,7 @@ async def main() -> None:
         assert scoped_surface["status"] == "injected", scoped_surface
         assert scoped_surface["surface_reranker_gate"]["applied"] is False, scoped_surface
         assert scoped_surface["surface_reranker_gate"]["has_arc_scope"] is True, scoped_surface
-        assert service.reranker_engine.calls == reranker_calls_before_daily + 3, scoped_surface
+        assert service.reranker_engine.calls == reranker_calls_before_daily + 4, scoped_surface
 
         gated = await service._typed_event_scene_live_context(
             "gated",

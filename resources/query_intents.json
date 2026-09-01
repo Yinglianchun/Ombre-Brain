@@ -206,6 +206,24 @@
       "讲到"
     ]
   },
+  "typed_recall": {
+    "detail_question_markers": [
+      "怎么评价",
+      "如何评价",
+      "怎么看待",
+      "说过什么",
+      "说了什么",
+      "怎么说的",
+      "提到过什么",
+      "聊过什么",
+      "当时发生",
+      "那次发生",
+      "指什么",
+      "是什么意思",
+      "哪一段",
+      "哪个片段"
+    ]
+  },
   "dialogue_intent": {
     "conflict": ["冲突", "吵架", "争吵", "矛盾", "误会", "生气", "闹别扭", "conflict", "fight", "argument", "angry", "upset"],
     "repair": ["修复", "和好", "道歉", "解释", "哪里不对", "为什么", "怎么会", "repair", "resolve", "apolog", "what happened", "why did"],

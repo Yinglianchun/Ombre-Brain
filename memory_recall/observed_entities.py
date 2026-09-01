@@ -1042,6 +1042,95 @@ class ObservedEntityShadowIndex:
             for row in rows
         ]
 
+    def owner_query_matches(
+        self,
+        query: str,
+        *,
+        owner_keys: Iterable[tuple[str, str]] | None = None,
+        limit: int = 24,
+    ) -> list[dict[str, Any]]:
+        text = str(query or "").strip()
+        if not text or not os.path.exists(self.db_path):
+            return []
+        allowed = (
+            {
+                (str(kind or "").strip().lower(), str(owner_id or "").strip())
+                for kind, owner_id in owner_keys
+                if str(kind or "").strip().lower() in {"scene", "event"}
+                and str(owner_id or "").strip()
+            }
+            if owner_keys is not None
+            else None
+        )
+        if allowed is not None and not allowed:
+            return []
+        where_sql = ""
+        params: list[str] = []
+        if allowed is not None:
+            where_sql = " WHERE " + " OR ".join(
+                "(owner_kind=? AND owner_id=?)" for _ in allowed
+            )
+            for kind, owner_id in sorted(allowed):
+                params.extend([kind, owner_id])
+        with closing(self._connect(readonly=True)) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT owner_kind, owner_id, entity_key, entity_text,
+                       occurrence_count, source_count, confidence_basis,
+                       scope_eligible
+                FROM observed_entities
+                {where_sql}
+                ORDER BY LENGTH(entity_text) DESC, source_count DESC,
+                         occurrence_count DESC, entity_key, owner_kind, owner_id
+                """,
+                params,
+            ).fetchall()
+
+        matched_spans: dict[str, tuple[int, int]] = {}
+        rejected_entity_keys: set[str] = set()
+        occupied_spans: list[tuple[int, int]] = []
+        output: list[dict[str, Any]] = []
+        bounded_limit = max(1, min(100, int(limit or 24)))
+        for row in rows:
+            owner_key = (str(row["owner_kind"]), str(row["owner_id"]))
+            if allowed is not None and owner_key not in allowed:
+                continue
+            entity_key = str(row["entity_key"])
+            if entity_key in rejected_entity_keys:
+                continue
+            span = matched_spans.get(entity_key)
+            if span is None:
+                spans = _term_spans(text, str(row["entity_text"]), limit=1)
+                if not spans:
+                    rejected_entity_keys.add(entity_key)
+                    continue
+                span = spans[0]
+                if any(
+                    not (span[1] <= old_start or span[0] >= old_end)
+                    for old_start, old_end in occupied_spans
+                ):
+                    rejected_entity_keys.add(entity_key)
+                    continue
+                matched_spans[entity_key] = span
+                occupied_spans.append(span)
+            output.append(
+                {
+                    "owner_kind": owner_key[0],
+                    "owner_id": owner_key[1],
+                    "entity": text[span[0] : span[1]],
+                    "start_offset": span[0],
+                    "end_offset": span[1],
+                    "occurrence_count": int(row["occurrence_count"]),
+                    "source_count": int(row["source_count"]),
+                    "confidence_basis": str(row["confidence_basis"]),
+                    "scope_eligible": bool(row["scope_eligible"]),
+                    "source_kind": "observed_entity",
+                }
+            )
+            if len(output) >= bounded_limit:
+                break
+        return output
+
     def link_candidates(self, owner_kind: str, owner_id: str) -> list[dict[str, Any]]:
         if not os.path.exists(self.db_path):
             return []

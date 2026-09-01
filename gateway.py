@@ -14470,6 +14470,26 @@ class GatewayService:
             [("scene", scene_lane, 3), ("event", event_lane, 3)],
             limit=6,
         )
+        owner_query_matcher = getattr(
+            getattr(self, "observed_entity_shadow_index", None),
+            "owner_query_matches",
+            None,
+        )
+        owner_entity_matches = (
+            owner_query_matcher(
+                query,
+                owner_keys={
+                    (
+                        str(row.get("owner_kind") or ""),
+                        str(row.get("owner_id") or ""),
+                    )
+                    for row in pool
+                    if self._typed_owner_ref(row)
+                },
+            )
+            if callable(owner_query_matcher)
+            else []
+        )
         member_to_arcs: dict[tuple[str, str], list[str]] = {}
         for arc_key, members in getattr(
             self, "_passage_candidate_shadow_arc_members", {}
@@ -14549,6 +14569,7 @@ class GatewayService:
                 },
             },
             "entity_scope": entity_scope,
+            "owner_entity_matches": owner_entity_matches,
             "candidate_count": len(pool),
             "candidates": pool,
         }
@@ -14711,6 +14732,9 @@ class GatewayService:
         query: str,
         scope: dict[str, Any],
         semantic_recall_debug: dict[str, Any] | None,
+        *,
+        candidates: list[dict[str, Any]] | None = None,
+        owner_entity_matches: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         semantic_debug = (
             semantic_recall_debug
@@ -14744,14 +14768,8 @@ class GatewayService:
             for facet in retrieval_budget.get("query_facets") or []
             if isinstance(facet, dict)
         ]
-        entity_facets = [
-            facet
-            for facet in query_facets
-            if str(facet.get("kind") or "") == "entity"
-        ]
         has_anchor = bool(
-            len(entity_facets) >= 2
-            or any(
+            any(
                 str(facet.get("kind") or "")
                 in {"protected_phrase", "exact_anchor", "reference_entity"}
                 for facet in query_facets
@@ -14763,12 +14781,39 @@ class GatewayService:
             or retrieval_budget.get("deep_recall_markers")
             or retrieval_budget.get("explicit_deep_reasons")
         )
+        detail_markers = query_intent_terms("typed_recall.detail_question_markers")
+        normalized_query = unicodedata.normalize("NFKC", str(query or "")).casefold()
+        matched_detail_markers = [
+            marker
+            for marker in detail_markers
+            if str(marker or "").casefold() in normalized_query
+        ]
+        memory_candidate_sources = {"scene_cue_candidate", "event_lexical_candidate"}
+        matched_candidate_sources = sorted(
+            {
+                str(source)
+                for row in candidates or []
+                if isinstance(row, dict)
+                for source in row.get("candidate_sources") or []
+                if str(source) in memory_candidate_sources
+            }
+        )
+        observed_matches = [
+            dict(row)
+            for row in owner_entity_matches or []
+            if isinstance(row, dict)
+        ]
+        has_memory_side_handle = bool(observed_matches or matched_candidate_sources)
+        has_memory_backed_detail = bool(
+            matched_detail_markers and has_memory_side_handle
+        )
         applied = bool(
             route in {"present_chitchat", "present_reality"}
             and route_action == "skip"
             and not has_arc_scope
             and not has_anchor
             and not has_explicit_recall
+            and not has_memory_backed_detail
         )
         return {
             "applied": applied,
@@ -14777,6 +14822,10 @@ class GatewayService:
             "has_arc_scope": has_arc_scope,
             "has_anchor": has_anchor,
             "has_explicit_recall": has_explicit_recall,
+            "has_memory_backed_detail": has_memory_backed_detail,
+            "matched_detail_markers": matched_detail_markers,
+            "matched_candidate_sources": matched_candidate_sources,
+            "owner_entity_matches": observed_matches,
             "reason": (
                 "daily_surface_without_memory_intent"
                 if applied
@@ -14826,6 +14875,16 @@ class GatewayService:
             query,
             scope,
             semantic_recall_debug,
+            candidates=[
+                dict(row)
+                for row in candidate_result.get("candidates") or []
+                if isinstance(row, dict)
+            ],
+            owner_entity_matches=[
+                dict(row)
+                for row in candidate_result.get("owner_entity_matches") or []
+                if isinstance(row, dict)
+            ],
         )
         if surface_gate.get("applied"):
             return {

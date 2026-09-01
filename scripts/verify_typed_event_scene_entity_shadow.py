@@ -251,6 +251,18 @@ def verify_observed_entities_and_scope() -> None:
         assert by_entity["奇美拉"]["scope_eligible"] is True, observed
         assert by_entity["间谍过家家"]["confidence_basis"] == "explicit_work_title", observed
 
+        owner_matches = index.owner_query_matches(
+            "阿尼亚怎么看奇美拉",
+            owner_keys={("event", "event-new")},
+        )
+        assert {row["entity"] for row in owner_matches} == {"阿尼亚", "奇美拉"}, owner_matches
+        assert {
+            (row["owner_kind"], row["owner_id"])
+            for row in owner_matches
+        } == {("event", "event-new")}, owner_matches
+        assert all(row["source_kind"] == "observed_entity" for row in owner_matches), owner_matches
+        assert index.owner_query_matches("晚安老公") == [], owner_matches
+
         links = index.link_candidates("event", "event-new")
         spy = next(row for row in links if row["arc_key"] == "work:spy-family")
         signal_kinds = {row["kind"] for row in spy["signals"]}
