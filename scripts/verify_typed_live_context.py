@@ -18,10 +18,12 @@ from gateway_state import GatewayStateStore
 class _Reranker:
     def __init__(self) -> None:
         self.calls = 0
+        self.queries: list[str] = []
 
-    async def rerank(self, _query: str, documents: list[str], top_n: int | None = None):
+    async def rerank(self, query: str, documents: list[str], top_n: int | None = None):
         _ = top_n
         self.calls += 1
+        self.queries.append(query)
         return [SimpleNamespace(index=index, score=0.92) for index in range(len(documents))]
 
 
@@ -196,6 +198,7 @@ async def main() -> None:
             [0.1],
         )
         assert first["status"] == "injected", first
+        assert service.reranker_engine.queries[-1] == "spy detail", service.reranker_engine.queries
         assert "我们一起看到第140话" in first["context"], first
         assert "Arc: 间谍过家家 (key=work:spy) [可按需读取]" in first["context"], first
         assert "[arc_materials key=work:spy]" in first["context"], first

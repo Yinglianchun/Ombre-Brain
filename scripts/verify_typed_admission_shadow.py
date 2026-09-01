@@ -80,7 +80,21 @@ member = evaluate_typed_admission_shadow(
     rerank_scores={"event:e139": 0.02, "event:e140": 0.03},
 )
 assert member["selected_refs"] == [], member
-assert member["rerank_query"] == "我们第一次一起看 的时候", member
+assert member["rerank_query"] == "我们第一次一起看间谍过家家的时候", member
+
+entity_detail = evaluate_typed_admission_shadow(
+    "来试试！巧克蕾是谁",
+    {
+        "status": "scoped_recall",
+        "intent": "entity_detail",
+        "operator": "none",
+        "intent_view": "来试试！ 是谁",
+    },
+    events,
+    rerank_scores={"event:e139": 0.91, "event:e140": 0.01},
+)
+assert entity_detail["rerank_query"] == "来试试！巧克蕾是谁", entity_detail
+assert entity_detail["selected_refs"] == ["event:e139"], entity_detail
 
 detail = evaluate_typed_admission_shadow(
     "具体细节",

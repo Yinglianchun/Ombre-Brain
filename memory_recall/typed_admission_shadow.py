@@ -47,12 +47,10 @@ def typed_admission_rerank_query(
     query: str,
     entity_scope: dict[str, Any] | None,
 ) -> str:
-    scope = entity_scope if isinstance(entity_scope, dict) else {}
-    if str(scope.get("status") or "") == "scoped_recall":
-        residue = str(scope.get("intent_view") or "").strip()
-        if residue:
-            cleaned = re.sub(r"[《》“”「」『』]+", " ", residue)
-            return " ".join(cleaned.split())
+    # Entity masking is only a routing aid.  The reranker must see the full
+    # evidence question or an entity-detail query such as “巧克蕾是谁” collapses
+    # into the meaningless residue “谁”.
+    _ = entity_scope
     return str(query or "").strip()
 
 

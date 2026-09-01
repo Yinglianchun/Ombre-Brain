@@ -184,9 +184,10 @@ Typed admission is not one global score threshold:
   evidence.
 - `narrative_read` and `exact_evidence` defer to their pull-based reading views.
 - ordinary global detail and scoped `member_search` use the existing reranker
-  shadow on title plus the best owner passage. Scoped queries remove the Arc
-  entity before reranking, cues are omitted, and `0.65` is only a frozen shadow
-  threshold for direct evidence.
+  shadow on title plus the best owner passage. The reranker keeps the complete
+  user query, including the entity; entity masking is only an intent/scope
+  routing view. Cues are omitted, and `0.65` is only a frozen shadow threshold
+  for direct evidence.
 
 The Germany pair gold and evaluator are:
 
