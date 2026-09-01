@@ -168,6 +168,12 @@ const recallCandidateSourceLabels = {
   passage_query_view_embedding: "分句局部原文 embedding",
   fact_event_body_embedding: "Fact / Event 正文 embedding",
   fact_event_lexical: "Fact / Event 词语命中",
+  scene_whole_embedding: "Scene 整体 embedding",
+  scene_passage_embedding: "Scene passage embedding",
+  scene_cue_candidate: "Scene cue 候选",
+  event_whole_embedding: "Event 整体 embedding",
+  event_passage_embedding: "Event passage embedding",
+  event_lexical_candidate: "Event 词语候选",
 };
 
 const passageCandidateLaneLabels = {
@@ -224,6 +230,26 @@ const candidateRelevanceOptions = [
   { value: "weak", label: "弱相关" },
   { value: "irrelevant", label: "无关" },
 ];
+
+const typedAdmissionModeLabels = {
+  direct_evidence_rerank: "直接证据 rerank",
+  structured_latest: "取最新相关成员",
+  timeline_scope_material: "Arc 时间线材料",
+  defer_to_narrative: "交给叙事卷",
+  defer_to_exact_evidence: "等待精确证据下钻",
+};
+
+const typedAdmissionReasonLabels = {
+  reranker_direct_evidence: "reranker 通过直接证据门",
+  reranker_below_direct_threshold: "低于直接证据阈值",
+  reranker_score_missing: "reranker 没有返回分数",
+  candidate_without_scored_evidence: "没有可评分正文证据",
+  latest_dated_relevant_member: "最新的相关成员",
+  not_latest_relevant_member: "不是最新相关成员",
+  timeline_candidate_material: "作为时间线候选材料",
+  defer_to_narrative: "本轮应读取叙事卷",
+  defer_to_exact_evidence: "本轮应继续下钻精确证据",
+};
 
 function RecallSimulator() {
   const [query, setQuery] = useState("");
@@ -295,6 +321,18 @@ function RecallSimulator() {
   const passageQueryViewCandidates = Array.isArray(passageQueryViewShadow.candidates)
     ? passageQueryViewShadow.candidates
     : [];
+  const typedPreview = retrievalBudget.typed_event_scene_preview ?? {};
+  const typedScope = typedPreview.entity_scope ?? {};
+  const typedSurfaceGate = typedPreview.surface_reranker_gate ?? {};
+  const typedAdmission = typedPreview.admission ?? {};
+  const typedAdmissionCandidates = Array.isArray(typedAdmission.candidates)
+    ? typedAdmission.candidates
+    : [];
+  const typedPreviewCards = Array.isArray(typedPreview.cards) ? typedPreview.cards : [];
+  const passageCandidateByRef = new Map(passageCandidates.map((candidate) => [
+    `${candidate.owner_kind}:${candidate.owner_id}`,
+    candidate,
+  ]));
   const episodeVerifier = retrievalBudget.episode_verifier ?? {};
   const ablationDebug = retrievalBudget.recall_ablation ?? semantic.recall_ablation ?? {
     mode: recallAblation,
@@ -355,7 +393,7 @@ function RecallSimulator() {
         <div>
           <span className="basement-kicker">真实 Gateway 路径</span>
           <h2 id="recall-simulator-title">召回模拟</h2>
-          <p>输入原句，查看 Router 决定、候选记忆与最终注入。测试不会留下正式注入记录。</p>
+          <p>输入原句，对照当前 live 注入与 typed Event / Scene 的预计注入。测试不会留下正式注入记录。</p>
         </div>
         <div className="basement-live-note">
           <i aria-hidden="true" />
@@ -455,7 +493,7 @@ function RecallSimulator() {
             <dl className="recall-decision__facts">
               <div><dt>置信度</dt><dd>{percent(semantic.confidence)}</dd></div>
               <div><dt>候选记忆</dt><dd>{debug.candidate_count ?? 0}</dd></div>
-              <div><dt>最终注入</dt><dd>{debug.injected_bucket_ids?.length ?? result.recalled_ids?.length ?? 0}</dd></div>
+              <div><dt>当前 live 注入</dt><dd>{debug.injected_bucket_ids?.length ?? result.recalled_ids?.length ?? 0}</dd></div>
               <div><dt>原因</dt><dd>{reasonLabels[semantic.reason] || semantic.reason || "继续按证据判断"}</dd></div>
               <div><dt>模拟范围</dt><dd>{resultSimulationScope === "full_shadow" ? "完整 shadow 诊断" : "live mirror"}</dd></div>
             </dl>
@@ -559,6 +597,69 @@ function RecallSimulator() {
             <p className="recall-evidence-decomposition__note">
               各路原始候选数：cue 绑定 {passageCandidateLanes.cue_passage?.candidate_count ?? 0} · passage {passageCandidateLanes.passage?.candidate_count ?? 0} · Fact/Event 正文 {passageCandidateLanes.fact_event_body?.candidate_count ?? 0} · Fact/Event 词语 {passageCandidateLanes.fact_event_lexical?.candidate_count ?? 0}。
             </p>
+          </section>
+          )}
+
+          {resultSimulationScope === "full_shadow" && (
+          <section className="recall-result-section recall-evidence-decomposition typed-recall-preview">
+            <div className="recall-result-section__heading">
+              <h3>Event / Scene 预计注入</h3>
+              <span>{typedPreview.status === "would_inject" ? `${typedPreviewCards.length} 张卡 · 仅模拟` : typedPreview.reason || typedPreview.status || "未运行"}</span>
+            </div>
+            <p className="recall-evidence-decomposition__note">
+              这里复用 typed live 的 scope、recallable、surface gate、reranker 与 admission；只返回反事实预览，不写 injection，不消耗 Arc 菜单冷却。
+            </p>
+            <dl className="recall-decision__facts">
+              <div><dt>scope</dt><dd>{typedScope.scope_anchor?.arc_key || typedScope.status || "无 Arc"}</dd></div>
+              <div><dt>intent / operator</dt><dd>{typedScope.intent || "none"} / {typedScope.operator || "none"}</dd></div>
+              <div><dt>surface gate</dt><dd>{typedSurfaceGate.applied ? typedSurfaceGate.reason || "已拦截" : typedSurfaceGate.reason || "允许进入"}</dd></div>
+              <div><dt>admission</dt><dd>{typedAdmissionModeLabels[typedAdmission.mode] || typedAdmission.mode || "未进入"}</dd></div>
+              <div><dt>预计选择</dt><dd>{typedPreview.selected_refs?.length ?? 0} / {typedPreview.candidate_count ?? passageCandidates.length}</dd></div>
+              <div><dt>耗时</dt><dd>{typedPreview.timing_ms == null ? "—" : `${typedPreview.timing_ms} ms`}</dd></div>
+            </dl>
+            {(typedPreview.excluded_event_refs_by_recallable?.length > 0) && (
+              <p className="recall-evidence-decomposition__note">
+                recallable 已排除：{typedPreview.excluded_event_refs_by_recallable.join(" · ")}
+              </p>
+            )}
+            {typedAdmissionCandidates.length ? (
+              <div className="recall-evidence-list">
+                {typedAdmissionCandidates.map((candidate) => {
+                  const source = passageCandidateByRef.get(candidate.ref) || {};
+                  const accepted = (typedPreview.selected_refs || []).includes(candidate.ref)
+                    || (typedAdmission.material_refs || []).includes(candidate.ref);
+                  return (
+                    <article className={`recall-evidence-row ${accepted ? "is-qualified" : "is-suppressed"}`} key={candidate.ref}>
+                      <header>
+                        <strong>{source.title || candidate.ref}</strong>
+                        <span>{passageCandidateKindLabels[candidate.owner_kind] || candidate.owner_kind} · {candidate.disposition}</span>
+                      </header>
+                      <dl>
+                        <div><dt>候选分数</dt><dd>{candidate.candidate_score == null ? "—" : percent(candidate.candidate_score)}</dd></div>
+                        <div><dt>reranker</dt><dd>{candidate.rerank_score == null ? "未调用" : `${percent(candidate.rerank_score)} / ${percent(typedAdmission.direct_threshold)}`}</dd></div>
+                        <div><dt>admission</dt><dd>{typedAdmissionReasonLabels[candidate.reason] || candidate.reason || "未判断"}</dd></div>
+                        <div><dt>发现来源</dt><dd>{(source.candidate_sources || []).map((item) => recallCandidateSourceLabels[item] || item).join(" · ") || "未记录"}</dd></div>
+                      </dl>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : <p className="recall-none">{typedPreview.reason || "没有 Event / Scene 进入 admission。"}</p>}
+            <div className="recall-result-section__heading typed-recall-preview__cards-heading">
+              <h3>如果开启 live，将交给 Haven</h3>
+              <span>{typedPreviewCards.length} 张记忆卡{typedPreview.menus_included?.length ? ` · ${typedPreview.menus_included.length} 个 Arc 菜单` : ""}</span>
+            </div>
+            {typedPreviewCards.length ? (
+              <div className="recall-card-list">
+                {typedPreviewCards.map((item) => (
+                  <article className="recall-card" key={item.id}>
+                    <div><strong>{item.title || item.id}</strong><span>{passageCandidateKindLabels[item.source_kind] || item.source_kind}</span></div>
+                    {item.text && <p>{item.text}</p>}
+                    <small>{item.id}</small>
+                  </article>
+                ))}
+              </div>
+            ) : <p className="recall-none">本轮不会自动注入 Event / Scene 卡；叙事卷或精确证据请求可能只返回按需读取入口。</p>}
           </section>
           )}
 
@@ -666,7 +767,7 @@ function RecallSimulator() {
           )}
 
           <section className="recall-result-section">
-            <div className="recall-result-section__heading"><h3>最终放行</h3><span>{cards.length || injected.length} 条</span></div>
+            <div className="recall-result-section__heading"><h3>当前 live 注入</h3><span>{cards.length || injected.length} 条</span></div>
             {(cards.length || injected.length) ? (
               <div className="recall-card-list">
                 {(cards.length ? cards : injected).map((item, index) => (

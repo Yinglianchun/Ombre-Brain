@@ -2517,6 +2517,42 @@ class GatewayService:
         semantic_recall_debug["applied_action"] = (
             "skip" if semantic_skip else "recall"
         )
+        if full_shadow_probe:
+            retrieval_budget = semantic_recall_debug.get("retrieval_budget")
+            if isinstance(retrieval_budget, dict):
+                preview_started = time.perf_counter()
+                try:
+                    typed_preview = await self._typed_event_scene_live_context(
+                        query,
+                        session_id,
+                        semantic_query_vector or [],
+                        semantic_recall_debug=semantic_recall_debug,
+                        body_char_limit=max_chars,
+                        simulation_only=True,
+                        candidate_result=(
+                            retrieval_budget.get("passage_candidate_shadow")
+                            if isinstance(
+                                retrieval_budget.get("passage_candidate_shadow"),
+                                dict,
+                            )
+                            else None
+                        ),
+                    )
+                except Exception as exc:
+                    typed_preview = {
+                        "status": "unavailable",
+                        "reason": "typed_simulation_preview_failed",
+                        "error": type(exc).__name__,
+                        "decision_applied": False,
+                        "live_injection_enabled": False,
+                        "cards": [],
+                        "selected_refs": [],
+                    }
+                typed_preview["timing_ms"] = max(
+                    0,
+                    int((time.perf_counter() - preview_started) * 1000),
+                )
+                retrieval_budget["typed_event_scene_preview"] = typed_preview
         if semantic_skip:
             await self._apply_passage_weak_candidate_query_view_shadow(
                 query,
@@ -14842,6 +14878,8 @@ class GatewayService:
         semantic_recall_debug: dict[str, Any] | None = None,
         excluded_scene_ids: set[str] | None = None,
         body_char_limit: int = 1200,
+        simulation_only: bool = False,
+        candidate_result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         empty = {
             "status": "disabled",
@@ -14850,14 +14888,24 @@ class GatewayService:
             "selected_refs": [],
             "menus_included": [],
             "menus_suppressed": [],
+            "simulation_only": simulation_only,
+            "decision_applied": False,
+            "live_injection_enabled": False,
         }
-        if not getattr(self, "typed_event_scene_live_enabled", False):
+        if (
+            not simulation_only
+            and not getattr(self, "typed_event_scene_live_enabled", False)
+        ):
             return empty
         live_max_cards = max(
             1,
             min(5, int(getattr(self, "typed_event_scene_live_max_cards", 2) or 2)),
         )
-        candidate_result = self._passage_candidate_shadow_debug(query, query_embedding)
+        candidate_result = (
+            candidate_result
+            if isinstance(candidate_result, dict)
+            else self._passage_candidate_shadow_debug(query, query_embedding)
+        )
         if candidate_result.get("status") != "ok":
             return {
                 **empty,
@@ -15031,7 +15079,10 @@ class GatewayService:
         menus_suppressed: list[str] = []
         menu_fingerprints: dict[str, str] = {}
         for arc_key, card in arc_cards.items():
-            if self.state_store.arc_material_menu_was_injected(session_id, arc_key):
+            if (
+                not simulation_only
+                and self.state_store.arc_material_menu_was_injected(session_id, arc_key)
+            ):
                 menus_suppressed.append(arc_key)
                 continue
             menu = await self._typed_arc_material_menu(arc_key)
@@ -15060,7 +15111,13 @@ class GatewayService:
 
         applied = bool(context_parts)
         return {
-            "status": "injected" if applied else "not_admitted",
+            "status": (
+                "would_inject"
+                if applied and simulation_only
+                else "injected"
+                if applied
+                else "not_admitted"
+            ),
             "context": "\n\n".join(context_parts),
             "cards": cards,
             "selected_refs": selected_refs,
@@ -15069,8 +15126,8 @@ class GatewayService:
             "menu_fingerprints": menu_fingerprints,
             "admission": {
                 **admission,
-                "decision_applied": applied,
-                "live_injection_enabled": applied,
+                "decision_applied": bool(applied and not simulation_only),
+                "live_injection_enabled": bool(applied and not simulation_only),
             },
             "entity_scope": scope,
             "surface_reranker_gate": surface_gate,
@@ -15078,6 +15135,9 @@ class GatewayService:
             "excluded_event_refs_by_recallable": excluded_event_refs_by_recallable,
             "narrative_body_included": False,
             "raw_source_query_enabled": False,
+            "simulation_only": simulation_only,
+            "decision_applied": bool(applied and not simulation_only),
+            "live_injection_enabled": bool(applied and not simulation_only),
         }
 
     @staticmethod

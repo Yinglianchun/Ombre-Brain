@@ -224,6 +224,26 @@ async def main() -> None:
         )
         assert other_session["menus_included"] == ["work:spy"], other_session
 
+        service.typed_event_scene_live_enabled = False
+        simulation_preview = await service._typed_event_scene_live_context(
+            "spy detail",
+            "session-simulation",
+            [0.1],
+            simulation_only=True,
+        )
+        assert simulation_preview["status"] == "would_inject", simulation_preview
+        assert simulation_preview["selected_refs"] == ["event:event-spy"], simulation_preview
+        assert simulation_preview["menus_included"] == ["work:spy"], simulation_preview
+        assert simulation_preview["simulation_only"] is True, simulation_preview
+        assert simulation_preview["decision_applied"] is False, simulation_preview
+        assert simulation_preview["live_injection_enabled"] is False, simulation_preview
+        assert simulation_preview["admission"]["decision_applied"] is False, simulation_preview
+        assert not service.state_store.arc_material_menu_was_injected(
+            "session-simulation",
+            "work:spy",
+        ), simulation_preview
+        service.typed_event_scene_live_enabled = True
+
         free = await service._typed_event_scene_live_context(
             "free detail",
             "session-a",

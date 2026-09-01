@@ -5392,6 +5392,8 @@ label:has(input:focus-visible) {
 .recall-ablation-control__options small { color: #929c98; font-family: var(--font-editorial-cjk); font-size: 9px; line-height: 1.5; }
 .recall-ablation-control p { margin: 0; color: #8b9691; font-family: var(--font-editorial-cjk); font-size: 10px; line-height: 1.6; }
 .recall-evidence-decomposition__note { max-width: 700px; margin: -5px 0 18px; color: #89938f; font-family: var(--font-editorial-cjk); font-size: 10px; line-height: 1.7; }
+.typed-recall-preview { background: rgba(239, 244, 242, 0.22); }
+.typed-recall-preview__cards-heading { margin-top: 28px; padding-top: 24px; border-top: 1px solid rgba(67, 85, 79, 0.1); }
 .recall-evidence-list { display: grid; gap: 8px; }
 .recall-evidence-row { padding: 14px 16px; border: 1px solid rgba(65, 84, 77, 0.12); border-radius: 6px; background: rgba(255, 255, 255, 0.54); }
 .recall-evidence-row.is-qualified { border-left: 3px solid rgba(74, 116, 99, 0.62); }

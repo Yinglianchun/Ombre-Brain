@@ -152,7 +152,7 @@ Run:
 C:\Python313\python.exe scripts\verify_typed_event_scene_entity_shadow.py
 ```
 
-Expected receipt: `TYPED_EVENT_SCENE_ENTITY_SHADOW_OK GOLD=9/9`.
+Expected receipt: `TYPED_EVENT_SCENE_ENTITY_SHADOW_OK GOLD=10/10`.
 
 ## Germany live shadow benchmark
 
@@ -251,3 +251,20 @@ This cutover never injects Narrative prose and never creates a raw-dialogue
 query route. Narrative requests receive at most the pull-based Arc menu. The
 explicit simulation route continues to force typed live injection off even when
 the runtime flag is enabled.
+
+## Serein typed simulation preview
+
+An explicit `full_shadow` simulation also attaches
+`retrieval_budget.typed_event_scene_preview`. It reuses the same typed scope,
+recallable filter, surface gate, reranker, admission, card rendering, and Arc
+materials projection as live typed recall while keeping
+`simulation_only=true`, `decision_applied=false`, and
+`live_injection_enabled=false`. It does not record an injection or consume the
+per-session Arc menu cooldown.
+
+Serein renders the ordinary result as `当前 live 注入` and the counterfactual
+typed result separately as `Event / Scene 预计注入`. Candidate discovery remains
+visible above the preview, while the preview shows recallable exclusions,
+surface-gate outcome, admission dispositions, reranker scores, selected refs,
+and the exact Event/Scene cards that would be handed to Haven if typed live were
+enabled. Narrative prose and raw source text remain outside this route.
