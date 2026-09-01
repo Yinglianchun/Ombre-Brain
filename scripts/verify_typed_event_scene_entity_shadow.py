@@ -290,6 +290,12 @@ def verify_observed_entities_and_scope() -> None:
         assert entity_only["status"] == "scope_only", entity_only
         assert entity_only["retrieval_allowed"] is False, entity_only
 
+        entity_detail = index.resolve_query("阿尼亚是谁")
+        assert entity_detail["status"] == "scoped_recall", entity_detail
+        assert entity_detail["intent"] == "entity_detail", entity_detail
+        assert entity_detail["operator"] == "none", entity_detail
+        assert entity_detail["retrieval_allowed"] is True, entity_detail
+
         no_entity = index.resolve_query("看到哪了")
         assert no_entity["status"] == "insufficient_scope", no_entity
         assert no_entity["operator"] == "latest_relevant_member", no_entity
@@ -412,4 +418,11 @@ if __name__ == "__main__":
     verify_lexical_kind_floor()
     verify_observed_entities_and_scope()
     verify_legacy_owner_cleanup()
-    print("TYPED_EVENT_SCENE_ENTITY_SHADOW_OK GOLD=9/9")
+    gold_count = len(
+        json.loads(
+            (ROOT / "resources" / "typed_recall_scope_gold_v1.json").read_text(
+                encoding="utf-8"
+            )
+        )["cases"]
+    )
+    print(f"TYPED_EVENT_SCENE_ENTITY_SHADOW_OK GOLD={gold_count}/{gold_count}")

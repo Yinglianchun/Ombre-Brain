@@ -38,6 +38,11 @@ _LATIN_NAME = re.compile(
 _INTENT_PATTERNS = (
     ("exact_evidence", "exact_evidence", re.compile(r"原话|逐字|哪天|哪一[天次]|什么时候|具体日期|怎么说的")),
     ("arc_narrative", "narrative_read", re.compile(r"整体|完整(?:剧情|故事|经过)|从头|整条线|讲讲(?:剧情|故事)")),
+    (
+        "entity_detail",
+        "none",
+        re.compile(r"是谁|是什么人|什么来头|指的是谁|是哪位"),
+    ),
     ("progress", "latest_relevant_member", re.compile(r"看到哪|读到哪|做到哪|进行到哪|进展(?:到哪|如何|怎么样)|追到哪")),
     ("timeline", "timeline", re.compile(r"后来|后续|之后|怎么发展|如何发展|发展成|演变|时间线")),
     (

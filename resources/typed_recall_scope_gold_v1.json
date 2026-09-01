@@ -12,6 +12,15 @@
       "expected_retrieval_allowed": false
     },
     {
+      "id": "scoped_entity_detail",
+      "query": "阿尼亚是谁",
+      "expected_status": "scoped_recall",
+      "expected_intent": "entity_detail",
+      "expected_operator": "none",
+      "expected_arc_key": "work:spy-family",
+      "expected_retrieval_allowed": true
+    },
+    {
       "id": "scoped_progress",
       "query": "阿尼亚看到哪了",
       "expected_status": "scoped_recall",

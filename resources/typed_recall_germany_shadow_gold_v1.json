@@ -18,6 +18,22 @@
       }
     },
     {
+      "id": "scoped_chocolate_entity_detail",
+      "query": "来试试！巧克蕾是谁",
+      "expected": {
+        "shadow_status": "ok",
+        "scope_status": "scoped_recall",
+        "intent": "entity_detail",
+        "operator": "none",
+        "arc_key": "topic:scripted-ai-romance-controversy",
+        "required_candidate_refs": [
+          "event:event_952ba2a03993f572881917fd",
+          "event:event_ef294dab0278846c8d02d331"
+        ],
+        "all_candidates_in_scope": true
+      }
+    },
+    {
       "id": "bare_progress_veto",
       "query": "看到哪了",
       "expected": {

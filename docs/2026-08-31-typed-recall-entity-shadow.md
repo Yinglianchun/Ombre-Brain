@@ -99,6 +99,9 @@ Broader repeated
 Entity resolution and retrieval intent form a hard conjunction:
 
 - entity only -> `scope_only`, no retrieval;
+- entity definition (`是谁` / `是什么人` / `什么来头`) -> `entity_detail`;
+  a unique Arc scopes the search, while an unscoped query must still earn a
+  memory-side handle before admission;
 - scoped progress/timeline/narrative/evidence intent -> `scoped_recall`;
 - deictic intent such as `看到哪了` without scope -> `insufficient_scope`;
 - ambiguous entity -> `ambiguous_scope`, no global fallback.
