@@ -929,6 +929,22 @@ class GatewayStateStore:
         conn.close()
         return debug_id
 
+    def update_injection_debug_payload(
+        self,
+        debug_id: int,
+        payload: dict[str, Any],
+    ) -> bool:
+        body = json.dumps(payload, ensure_ascii=False)
+        conn = self._connect()
+        cursor = conn.execute(
+            "UPDATE injection_debug SET payload_json = ? WHERE id = ?",
+            (body, int(debug_id)),
+        )
+        conn.commit()
+        updated = int(cursor.rowcount or 0) > 0
+        conn.close()
+        return updated
+
     def record_conversation_turn(
         self,
         *,

@@ -137,9 +137,9 @@ const threeStateTelemetry = normalizeSimulationTelemetrySnapshot({
     typed_candidate_id: "event-postcard",
     typed_candidate_kind: "event",
     typed_candidate_score: 0.73,
-    fact_event_probe: {
+    event_probe: {
       status: "ok",
-      candidate_count: 2,
+      candidate_count: 1,
       matches: [
         {
           memory_id: "event-postcard",
@@ -149,16 +149,6 @@ const threeStateTelemetry = normalizeSimulationTelemetrySnapshot({
           local_date: "2026-08-08",
           local_start_time: "20:17",
           covered_by_scene_id: "",
-        },
-        {
-          memory_id: "fact-private-body",
-          memory_kind: "fact",
-          score: 0.61,
-          importance: 3,
-          local_date: "2026-08-08",
-          local_start_time: "18:01",
-          covered_by_scene_id: "scene-private-body",
-          body: "不得导出的 Fact 正文",
         },
       ],
     },
@@ -183,9 +173,8 @@ const threeStateTelemetry = normalizeSimulationTelemetrySnapshot({
 assert.equal(threeStateTelemetry.budget.initialBudget, "shallow");
 assert.equal(threeStateTelemetry.budget.finalBudget, "deep");
 assert.equal(threeStateTelemetry.budget.escalationReason, "event_candidate_over_rescue_floor");
-assert.equal(threeStateTelemetry.budget.factEventProbe.matches[0].memoryKind, "event");
-assert.equal(threeStateTelemetry.budget.factEventProbe.matches[1].coveredBySceneId, "scene-private-body");
-assert.equal(Object.hasOwn(threeStateTelemetry.budget.factEventProbe.matches[1], "body"), false);
+assert.equal(threeStateTelemetry.budget.eventProbe.matches[0].memoryKind, "event");
+assert.equal(Object.hasOwn(threeStateTelemetry.budget.eventProbe.matches[0], "body"), false);
 assert.equal(threeStateTelemetry.budget.episodeVerifier.called, true);
 assert.equal(threeStateTelemetry.budget.episodeVerifier.decisions[0].verdict, "same_topic_only");
 assert.equal(threeStateTelemetry.budget.episodeVerifier.decisions[0].decisionApplied, true);

@@ -245,6 +245,51 @@ async def main() -> None:
             "session-simulation",
             "work:spy",
         ), simulation_preview
+
+        observation_semantic = {
+            "route": "memory_specific",
+            "route_action": "recall",
+            "applied_action": "recall",
+        }
+        service.passage_candidate_shadow_enabled = True
+        service._seed_typed_event_scene_observation(
+            "spy detail",
+            [0.1],
+            observation_semantic,
+        )
+        candidate_snapshot = observation_semantic.pop(
+            "_typed_event_scene_observation_candidate"
+        )
+        assert observation_semantic["typed_event_scene_observation"]["status"] == "pending"
+        observation_payload = {
+            "semantic_recall_debug": observation_semantic,
+            "injected_bucket_ids": ["legacy-scene"],
+        }
+        observation_id = service.state_store.record_injection_debug(
+            "session-observation",
+            1,
+            observation_payload,
+        )
+        await service._complete_typed_event_scene_observation(
+            debug_id=observation_id,
+            query="spy detail",
+            session_id="session-observation",
+            injection_debug=observation_payload,
+            candidate_result=candidate_snapshot,
+        )
+        stored_observation = service.state_store.list_injection_debug(
+            limit=1,
+            ids=[observation_id],
+        )[0]["payload"]["semantic_recall_debug"]["typed_event_scene_observation"]
+        assert stored_observation["status"] == "would_inject", stored_observation
+        assert stored_observation["selected_refs"] == ["event:event-spy"], stored_observation
+        assert stored_observation["candidate_summaries"][0]["title"] == "title event-spy"
+        assert stored_observation["context"] == ""
+        assert all("text" not in card for card in stored_observation["cards"])
+        assert stored_observation["actual_injected_ids"] == ["legacy-scene"]
+        assert stored_observation["runs_after_response"] is True
+        assert stored_observation["decision_applied"] is False
+        assert stored_observation["live_injection_enabled"] is False
         service.typed_event_scene_live_enabled = True
 
         free = await service._typed_event_scene_live_context(

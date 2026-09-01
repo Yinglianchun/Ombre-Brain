@@ -269,3 +269,23 @@ visible above the preview, while the preview shows recallable exclusions,
 surface-gate outcome, admission dispositions, reranker scores, selected refs,
 and the exact Event/Scene cards that would be handed to Haven if typed live were
 enabled. Narrative prose and raw source text remain outside this route.
+
+## Serein live recall observation
+
+Successful real Gateway turns freeze a typed Event/Scene candidate snapshot
+using the query embedding already produced for that turn. The snapshot timing is
+recorded separately. After the assistant response is available, the remote
+reranker and typed admission run in a background task and update the same
+`injection_debug` row with `typed_event_scene_observation`.
+
+The stored observation keeps candidate titles, IDs, scores, and dispositions,
+but strips the rendered Event/Scene body and generated context from this debug
+receipt.
+
+The observation is simulation-only: it does not alter the response, actual
+injected IDs, Arc menu cooldown, or the typed live flag. Serein defaults the
+Recall Observation workbench to the Gateway/all view and renders actual
+injection above the typed shadow. A separate `Event / Scene 预计` filter selects
+turns whose background admission produced at least one expected Event/Scene
+card. Pending observations remain visible until a refresh reads the completed
+row.

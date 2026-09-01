@@ -468,6 +468,7 @@ class GatewayService:
         self._passage_shadow_refresh_scene_ids: set[str] = set()
         self._passage_shadow_refresh_fact_event_ids: set[str] = set()
         self._passage_shadow_refresh_task: asyncio.Task | None = None
+        self._typed_observation_tasks: set[asyncio.Task] = set()
         self.domain_recall_policy = DomainRecallPolicy(config)
         self.reranker_engine = reranker_engine or RerankerEngine(config)
         self.scene_evidence_store = scene_evidence_store or SceneEvidenceStore(config)
@@ -3311,6 +3312,11 @@ class GatewayService:
             semantic_recall_debug["applied_action"] = (
                 "skip" if semantic_skip_broad else "recall"
             )
+            self._seed_typed_event_scene_observation(
+                current_user_query,
+                semantic_recall_query_vector or [],
+                semantic_recall_debug,
+            )
             skip_broad_dynamic_recall = (
                 skip_for_targeted_detail
                 or needs_handoff_first
@@ -4474,9 +4480,28 @@ class GatewayService:
                     reminder_id,
                     exc,
                 )
+        typed_candidate_result = None
         if injection_debug is not None:
+            semantic_debug = injection_debug.get("semantic_recall_debug")
+            if isinstance(semantic_debug, dict):
+                typed_candidate_result = semantic_debug.pop(
+                    "_typed_event_scene_observation_candidate",
+                    None,
+                )
             try:
-                self.state_store.record_injection_debug(session_id, round_id, injection_debug)
+                debug_id = self.state_store.record_injection_debug(
+                    session_id,
+                    round_id,
+                    injection_debug,
+                )
+                if isinstance(typed_candidate_result, dict):
+                    self._schedule_typed_event_scene_observation(
+                        debug_id=debug_id,
+                        query=user_message,
+                        session_id=session_id,
+                        injection_debug=injection_debug,
+                        candidate_result=typed_candidate_result,
+                    )
             except Exception as exc:
                 logger.warning(
                     "Gateway injection debug record failed | session=%s round=%s error=%s",
@@ -14868,6 +14893,137 @@ class GatewayService:
                 else "typed_retrieval_allowed"
             ),
         }
+
+    def _seed_typed_event_scene_observation(
+        self,
+        query: str,
+        query_embedding: list[float],
+        semantic_recall_debug: dict[str, Any],
+    ) -> None:
+        """Freeze this turn's typed candidates for post-response admission shadow."""
+        if not getattr(self, "passage_candidate_shadow_enabled", False):
+            return
+        started_at = time.perf_counter()
+        candidate_result = self._passage_candidate_shadow_debug(query, query_embedding)
+        semantic_recall_debug["typed_event_scene_observation"] = {
+            "schema_version": "typed-event-scene-observation-v1",
+            "status": "pending",
+            "reason": "post_response_admission_pending",
+            "candidate_count": len(candidate_result.get("candidates") or []),
+            "candidate_timing_ms": max(
+                0,
+                int((time.perf_counter() - started_at) * 1000),
+            ),
+            "simulation_only": True,
+            "decision_applied": False,
+            "live_injection_enabled": False,
+            "runs_after_response": True,
+        }
+        semantic_recall_debug["_typed_event_scene_observation_candidate"] = candidate_result
+
+    async def _complete_typed_event_scene_observation(
+        self,
+        *,
+        debug_id: int,
+        query: str,
+        session_id: str,
+        injection_debug: dict[str, Any],
+        candidate_result: dict[str, Any],
+    ) -> None:
+        semantic_debug = (
+            injection_debug.get("semantic_recall_debug")
+            if isinstance(injection_debug.get("semantic_recall_debug"), dict)
+            else {}
+        )
+        pending_observation = (
+            semantic_debug.get("typed_event_scene_observation")
+            if isinstance(semantic_debug.get("typed_event_scene_observation"), dict)
+            else {}
+        )
+        started_at = time.perf_counter()
+        try:
+            preview = await self._typed_event_scene_live_context(
+                query,
+                session_id,
+                [],
+                semantic_recall_debug=semantic_debug,
+                simulation_only=True,
+                candidate_result=candidate_result,
+            )
+        except Exception as exc:
+            preview = {
+                "status": "unavailable",
+                "reason": "typed_observation_failed",
+                "error": type(exc).__name__,
+                "cards": [],
+                "selected_refs": [],
+                "simulation_only": True,
+                "decision_applied": False,
+                "live_injection_enabled": False,
+            }
+        source_by_ref = {
+            self._typed_owner_ref(row): row
+            for row in candidate_result.get("candidates") or []
+            if isinstance(row, dict) and self._typed_owner_ref(row)
+        }
+        candidate_summaries = []
+        for admission_row in (preview.get("admission") or {}).get("candidates") or []:
+            if not isinstance(admission_row, dict):
+                continue
+            ref = str(admission_row.get("ref") or "")
+            source = source_by_ref.get(ref) or {}
+            candidate_summaries.append({
+                **admission_row,
+                "title": str(source.get("title") or ref),
+                "candidate_sources": list(source.get("candidate_sources") or []),
+            })
+        preview["context"] = ""
+        preview["cards"] = [
+            {
+                key: card.get(key)
+                for key in ("id", "source", "source_kind", "title", "score", "render_shape")
+                if card.get(key) is not None
+            }
+            for card in preview.get("cards") or []
+            if isinstance(card, dict)
+        ]
+        preview.update({
+            "schema_version": "typed-event-scene-observation-v1",
+            "candidate_summaries": candidate_summaries,
+            "actual_injected_ids": list(injection_debug.get("injected_bucket_ids") or []),
+            "candidate_timing_ms": pending_observation.get("candidate_timing_ms"),
+            "timing_ms": max(0, int((time.perf_counter() - started_at) * 1000)),
+            "simulation_only": True,
+            "decision_applied": False,
+            "live_injection_enabled": False,
+            "runs_after_response": True,
+        })
+        semantic_debug["typed_event_scene_observation"] = preview
+        injection_debug["semantic_recall_debug"] = semantic_debug
+        self.state_store.update_injection_debug_payload(debug_id, injection_debug)
+
+    def _schedule_typed_event_scene_observation(
+        self,
+        *,
+        debug_id: int,
+        query: str,
+        session_id: str,
+        injection_debug: dict[str, Any],
+        candidate_result: dict[str, Any],
+    ) -> None:
+        task = asyncio.create_task(self._complete_typed_event_scene_observation(
+            debug_id=debug_id,
+            query=query,
+            session_id=session_id,
+            injection_debug=injection_debug,
+            candidate_result=candidate_result,
+        ))
+        tasks = getattr(self, "_typed_observation_tasks", None)
+        if not isinstance(tasks, set):
+            tasks = set()
+            self._typed_observation_tasks = tasks
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
 
     async def _typed_event_scene_live_context(
         self,

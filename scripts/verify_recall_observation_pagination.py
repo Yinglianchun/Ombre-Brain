@@ -49,6 +49,13 @@ with tempfile.TemporaryDirectory() as directory:
     )
     assert [item["id"] for item in reviewed] == [ids[-1], ids[0]]
 
+    assert store.update_injection_debug_payload(
+        ids[-1],
+        {"query": "query-6", "typed_event_scene_observation": {"status": "would_inject"}},
+    ) is True
+    updated = store.list_injection_debug(limit=1, include_context=False, ids=[ids[-1]])
+    assert updated[0]["payload"]["typed_event_scene_observation"]["status"] == "would_inject"
+
     session_page = store.list_injection_debug(
         session_id="session-a",
         limit=10,
