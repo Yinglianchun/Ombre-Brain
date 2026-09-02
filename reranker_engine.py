@@ -18,7 +18,7 @@ class RerankResult:
 class RerankerEngine:
     """Small SiliconFlow-compatible rerank client."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, *, http_client: httpx.AsyncClient | None = None):
         config = config or {}
         embed_cfg = config.get("embedding", {}) or {}
         rerank_cfg = config.get("reranker", {}) or {}
@@ -50,6 +50,22 @@ class RerankerEngine:
         self.timeout = _float_between(rerank_cfg.get("timeout_seconds", 12), 12, 1, 120)
         self.candidate_limit = _int_between(rerank_cfg.get("candidate_limit", 5), 5, 1, 100)
         self.score_weight = _float_between(rerank_cfg.get("score_weight", 0.65), 0.65, 0.0, 1.0)
+        self._http_client = http_client
+        self._owns_http_client = http_client is None
+
+    def _client(self) -> httpx.AsyncClient:
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=self.timeout)
+            self._owns_http_client = True
+        return self._http_client
+
+    async def close(self) -> None:
+        if (
+            self._owns_http_client
+            and self._http_client is not None
+            and not self._http_client.is_closed
+        ):
+            await self._http_client.aclose()
 
     async def rerank(self, query: str, documents: list[str], top_n: int | None = None) -> list[RerankResult]:
         return await self._rerank(
@@ -95,17 +111,17 @@ class RerankerEngine:
             payload["top_n"] = max(1, min(int(top_n), len(documents)))
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    endpoint,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                response.raise_for_status()
-                body = response.json()
+            response = await self._client().post(
+                endpoint,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            body = response.json()
         except Exception as exc:
             logger.warning("Reranker request failed: %s", exc)
             return []

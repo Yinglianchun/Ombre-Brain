@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from datetime import timezone
 from pathlib import Path
 
 
@@ -90,12 +91,12 @@ legacy_shadow = router(None, shadow_enabled=True)
 assert legacy_shadow.mode == "shadow"
 
 route_source = load_route_source(ROOT / "resources" / "semantic_recall_routes.json")
-assert route_source["dataset_version"] == 10
+assert route_source["dataset_version"] == 11
 smoke_fixture = json.loads(
-    (ROOT / "resources" / "semantic_recall_skip_smoke_v10.json").read_text(encoding="utf-8")
+    (ROOT / "resources" / "semantic_recall_skip_smoke_v11.json").read_text(encoding="utf-8")
 )
-assert smoke_fixture["dataset_version"] == 10
-assert len(smoke_fixture["cases"]) == 14
+assert smoke_fixture["dataset_version"] == 11
+assert len(smoke_fixture["cases"]) == 21
 assert {case["expected_action"] for case in smoke_fixture["cases"]} == {"skip", "recall"}
 route_examples = {
     route["name"]: {
@@ -106,6 +107,7 @@ route_examples = {
 }
 route_actions = {route["name"]: route["action"] for route in route_source["routes"]}
 assert route_actions["present_reality"] == "skip"
+assert route_actions["current_context"] == "skip"
 assert route_actions["recall_needed"] == "recall"
 assert next(
     route["threshold"]
@@ -142,12 +144,18 @@ for query in ("今天太阳很大", "我有点头疼", "刚看到一本书"):
     assert query not in route_examples["present_chitchat"]
 for query in ("我到家啦", "刚洗完澡", "我先去吃饭了", "准备睡了，好困", "今天累死了"):
     assert route_examples["present_reality"][query] == "seed"
+for query in ("刚才我们聊到哪了", "上一条你是什么意思", "前一句我没看懂"):
+    assert query in route_examples["current_context"]
 for query in (
     "我上次到家后跟你说了什么",
     "还记得那次洗完澡我们聊了什么吗",
     "以前我说要睡时你都会怎么回",
     "我们之前聊过我总是忘记吃饭吗",
     "还记得我上次累坏了以后发生了什么吗",
+    "上一条提到的那个人，我以前见过吗",
+    "刚才说的项目，我们以前做过什么",
+    "前一句提到的约定，是哪一次定下的",
+    "你为什么叫Haven",
 ):
     assert route_examples["recall_needed"][query] == "hard_negative"
 assert (
@@ -268,6 +276,24 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
     service._apply_semantic_scene_evidence_veto = no_scene_veto
     service._hook_recall_fast_cards = fast_cards
     service._render_hook_recall_additional_context = lambda cards: ""
+    service.gateway_tz = timezone.utc
+    service.identity = {
+        "ai_name": "Haven",
+        "user_name": "Rain",
+        "user_display_name": "小雨",
+        "user_aliases": ["宝宝"],
+    }
+    service.recall_policy = RecallPolicy(ai_reaction_names=["Haven"])
+
+    identity_name = await service.handle_hook_recall(
+        RequestStub({"query": "你为什么叫Haven", "include_debug": True})
+    )
+    identity_name_body = json.loads(identity_name.body)
+    identity_route = identity_name_body["debug"]["semantic_recall_debug"]
+    assert identity_name_body["ok"] is True
+    assert identity_route["direct_skip"]["applied"] is False
+    assert identity_route["identity_name_recall_veto"]["applied"] is True
+
     current_state = await service.handle_hook_recall(
         RequestStub({"query": "回来看看你", "include_debug": True})
     )

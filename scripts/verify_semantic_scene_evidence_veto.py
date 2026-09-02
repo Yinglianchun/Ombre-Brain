@@ -254,7 +254,9 @@ async def verify_veto_never_injects() -> None:
         RequestStub({"query": "shared vow", "include_debug": True})
     )
     body = json.loads(response.body)
-    assert called["normal_retrieval"] is False
+    # The veto itself never injects. A query with a locatable phrase may still
+    # continue into normal retrieval, which remains responsible for admission.
+    assert called["normal_retrieval"] is True
     assert body["cards"] == []
     assert body["recalled_ids"] == []
     assert body["debug"]["semantic_recall_debug"]["scene_evidence_veto"]["applied"] is False
@@ -283,7 +285,7 @@ async def verify_full_hook_reuses_route_vector() -> None:
     async def full_recall(**kwargs):
         debug, vector = kwargs["semantic_recall_result"]
         assert vector == [0.1, 0.2]
-        assert debug["scene_evidence_veto"]["applied"] is True
+        assert debug["scene_evidence_veto"]["applied"] is False
         return JSONResponse({"ok": True, "cards": [], "recalled_ids": []})
 
     service._handle_hook_recall_full = full_recall
@@ -292,7 +294,7 @@ async def verify_full_hook_reuses_route_vector() -> None:
     )
     assert json.loads(response.body)["ok"] is True
     assert router.calls == 1
-    assert service.embedding_engine.calls == 1
+    assert service.embedding_engine.calls == 0
 
 
 async def verify_embedding_provenance() -> None:

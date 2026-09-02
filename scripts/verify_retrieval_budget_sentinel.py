@@ -43,7 +43,8 @@ class Embedding:
 
 class EmptyFactEventIndex:
     @staticmethod
-    def search_by_embedding(_vector, *, top_k):
+    def search_by_embedding(_vector, *, top_k, memory_kinds):
+        assert memory_kinds == ("event",)
         return {"status": "ok", "matches": [], "top_k": top_k}
 
 
