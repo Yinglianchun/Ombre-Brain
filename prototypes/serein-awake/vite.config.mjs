@@ -4,11 +4,15 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   buildSceneEvidenceRefs,
   normalizeEvidenceMessageId,
   normalizeEvidenceSearchQuery,
 } from "./server/sceneEvidenceBridge.mjs";
+import { runNarrativeCodexTask } from "./server/narrativeCodexRunner.mjs";
+
+const narrativeWriterRoleDir = fileURLToPath(new URL("./codex_agents/narrative_writer/", import.meta.url));
 
 const canonicalSceneDomains = new Set([
   "relationship",
@@ -1345,7 +1349,7 @@ function sereinMemoryBridge() {
             response.end(JSON.stringify({ status: "invalid", reason: "invalid_preview_request", writes_performed: [] }));
             return;
           }
-          const upstream = await callOmbreDashboard("/api/narrative-rolls/preview", {
+          const upstream = await callOmbreDashboard("/api/narrative-rolls/preview-input", {
             method: "POST",
             body: {
               narrative_id: narrativeId,
@@ -1354,8 +1358,31 @@ function sereinMemoryBridge() {
               expected_document_sha256: String(body.expectedDocumentSha256 || "").trim(),
             },
           });
-          response.statusCode = upstream.status;
-          response.end(JSON.stringify(upstream.payload));
+          if (!upstream.ok) {
+            response.statusCode = upstream.status;
+            response.end(JSON.stringify(upstream.payload));
+            return;
+          }
+          const input = upstream.payload;
+          const preview = await runNarrativeCodexTask({
+            mode,
+            title: input.title,
+            currentBody: input.current_body,
+            materials: input.materials,
+            roleDir: narrativeWriterRoleDir,
+          });
+          const fingerprint = createHash("sha256")
+            .update(JSON.stringify({ mode, title: input.title, materials: input.materials }))
+            .digest("hex");
+          response.statusCode = 200;
+          response.end(JSON.stringify({
+            ...preview,
+            narrative_id: narrativeId,
+            base_revision: input.base_revision,
+            base_document_sha256: input.base_document_sha256,
+            material_counts: input.material_counts,
+            preview_fingerprint: fingerprint,
+          }));
         } catch (error) {
           console.error("[serein-memory-bridge] Narrative preview failed", error);
           response.statusCode = error?.name === "AbortError" ? 504 : 502;

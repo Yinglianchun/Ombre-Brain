@@ -165,7 +165,6 @@ from window_shadows import (
 )
 from memory_nodes import MemoryNodeStore
 from narrative_rolls import NarrativeRollStore
-from narrative_writer import NarrativeWriter
 from narrative_revision_inbox import NarrativeRevisionInbox
 from persona_engine import PersonaStateEngine
 from persona_event_selection import select_persona_events
@@ -261,10 +260,6 @@ reflection_engine = ReflectionEngine(config)           # Daily/weekly reflection
 diary_source_importer = DiarySourceImporter()          # Lossless diary evidence snapshots / 无损日记证据快照
 metadata_enricher = reflection_engine                  # Proposal-only metadata worker / 只提案、不改正文或权重
 scene_linker = SceneLinker(config)                     # Async Scene-edge proposals / 异步 Scene 边提案
-narrative_writer_service = NarrativeWriter(
-    scene_linker.providers,
-    config.get("narrative_writer", {}) if isinstance(config.get("narrative_writer"), dict) else {},
-)
 dream_engine = DreamEngine(config)                     # Night dream worker / 夜梦
 identity_semantic_store = IdentitySemanticStore(config) # Private relationship alias index / 私有关系语义索引
 word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
@@ -3767,7 +3762,6 @@ async def health_check(request):
                 "api_ready": bool(reflection_engine.api_key),
             },
             "scene_linker": scene_linker.status(),
-            "narrative_writer": narrative_writer_service.status(),
             "diary": diary_store.stats(),
             "fact_events": fact_event_store.stats(),
             "mcp_surface": mcp.surface_status(),
@@ -9097,9 +9091,9 @@ async def api_narrative_rolls(request):
     return JSONResponse(result, status_code=status_code)
 
 
-@mcp.custom_route("/api/narrative-rolls/preview", methods=["POST"])
-async def api_preview_narrative_roll(request):
-    """Generate an update or full rewrite preview without changing the Narrative registry."""
+@mcp.custom_route("/api/narrative-rolls/preview-input", methods=["POST"])
+async def api_narrative_roll_preview_input(request):
+    """Freeze and materialize the exact source-bound input for a host-side Writer preview."""
     from starlette.responses import JSONResponse
 
     err = _require_dashboard_auth(request)
@@ -9142,24 +9136,17 @@ async def api_preview_narrative_roll(request):
     materials = await _materialize_narrative_writer_sources(narrative)
     if materials.get("status") != "ok":
         return JSONResponse({**materials, "writes_performed": []}, status_code=409)
-    try:
-        preview = await narrative_writer_service.preview(
-            mode=mode,
-            title=str(narrative.get("title") or narrative_id),
-            material_payload=materials,
-            current_body=str(narrative.get("body") or ""),
-        )
-    except ValueError as exc:
-        return JSONResponse({"status": "invalid", "reason": str(exc), "writes_performed": []}, status_code=400)
-    except Exception as exc:
-        logger.warning("Narrative Writer preview failed: %s", exc)
-        return JSONResponse({"status": "error", "reason": str(exc), "writes_performed": []}, status_code=502)
     return JSONResponse({
-        **preview,
+        "status": "ready",
         "narrative_id": narrative_id,
+        "mode": mode,
+        "title": str(narrative.get("title") or narrative_id),
+        "current_body": str(narrative.get("body") or ""),
+        "materials": materials,
         "base_revision": current_revision,
         "base_document_sha256": current_hash,
         "material_counts": materials.get("material_counts") or {},
+        "writes_performed": [],
     })
 
 

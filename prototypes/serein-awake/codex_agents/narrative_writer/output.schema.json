@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["evidence_sufficient", "body", "issues", "self_review"],
+  "properties": {
+    "evidence_sufficient": { "type": "boolean" },
+    "body": { "type": "string" },
+    "issues": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "self_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_bound",
+        "final_supported_versions",
+        "no_correction_narration",
+        "material_relevance",
+        "no_new_inference",
+        "no_meta_explanation",
+        "no_forced_closure",
+        "dates_preserved",
+        "identity_correct"
+      ],
+      "properties": {
+        "source_bound": { "type": "boolean" },
+        "final_supported_versions": { "type": "boolean" },
+        "no_correction_narration": { "type": "boolean" },
+        "material_relevance": { "type": "boolean" },
+        "no_new_inference": { "type": "boolean" },
+        "no_meta_explanation": { "type": "boolean" },
+        "no_forced_closure": { "type": "boolean" },
+        "dates_preserved": { "type": "boolean" },
+        "identity_correct": { "type": "boolean" }
+      }
+    }
+  }
+}
+

@@ -12,6 +12,7 @@
     "test:fact-event-time": "node --test scripts/test-fact-event-time.mjs",
     "test:recall-simulation": "node scripts/test-recall-simulation-budget.mjs",
     "test:scene-evidence": "node scripts/test-scene-evidence-bridge.mjs",
+    "test:narrative-writer": "node scripts/test-narrative-codex-runner.mjs",
     "test:sites": "node --test tests/sites-worker.test.mjs"
   },
   "dependencies": {

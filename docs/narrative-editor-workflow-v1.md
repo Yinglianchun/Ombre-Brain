@@ -45,3 +45,7 @@
 ## 当前实现阶段
 
 当前实现已经包含 `update` / `rewrite` 的只读预览，以及正文手改后的 `save-body`：保存会创建新的 Narrative revision，并精确保留当前 membership，不调用 Writer。材料 membership 基线与本地文件上传仍在后续阶段接入；UI 不伪装这些能力已经可用。
+
+Writer 由 Serein 主机上的 Codex 单次任务执行。`update` 使用 `gpt-5.6-terra`，`rewrite` 使用 `gpt-5.6-sol`，两者 reasoning effort 均为 `medium`。角色规则只放在 `prototypes/serein-awake/codex_agents/narrative_writer/AGENTS.md`；动态任务只携带 mode、标题、当前正文（仅 update）和后端冻结的当前绑定材料。任务以 read-only sandbox 运行，不调用工具；完成后立即归档 Codex thread，并删除临时输入输出文件。
+
+这条链不会定时或随材料变化自动生成正文。只有用户点击“更新”或“重写”才会创建一次预览任务；预览仍然不写 Narrative registry。
