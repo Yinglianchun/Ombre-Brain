@@ -184,8 +184,8 @@ passage_shadow:
 typed_recall:
   mode: shadow                    # shadow | guarded_live | full_live
   max_cards: 2
-  hook_deadline_ms: 8000          # fail closed before Bridge's outer timeout
-  reranker_min_remaining_ms: 3500 # reserve a realistic 1-3s remote rerank window
+  hook_deadline_ms: 9000          # cap the whole hook below the old 10s+ tail
+  reranker_min_remaining_ms: 1800 # start rerank when the usual live call still fits
 
 cue_passage_shadow:
   concurrency: 4                  # changed Scenes bound in parallel during an explicit rebuild

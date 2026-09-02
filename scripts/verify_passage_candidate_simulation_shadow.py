@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway import GatewayService
+from recall_policy import RecallPolicy
 
 
 def row(kind: str, item_id: str, score: float) -> dict:
@@ -96,16 +97,6 @@ service.fact_event_lexical_shadow_index = LexicalIndex()
 service._passage_candidate_shadow_sync = {"status": "ok", "decision_applied": False}
 
 
-class RecallPolicy:
-    @staticmethod
-    def specific_query_terms(query: str) -> list[str]:
-        if "Lumos" in query:
-            return ["Lumos"]
-        if "初遇" in query:
-            return ["初遇"]
-        return []
-
-
 service.recall_policy = RecallPolicy()
 service._passage_candidate_shadow_catalog = {
     "scene-a": {"owner_kind": "scene", "title": "A", "memory_date": "2026-01-01"},
@@ -176,6 +167,13 @@ class ObservedScope:
                 "operator": "timeline",
                 "scope_anchor": None,
             }
+        if query == "后来怎么样了":
+            return {
+                "status": "insufficient_scope",
+                "intent": "timeline",
+                "operator": "timeline",
+                "scope_anchor": None,
+            }
         if query == "约尔后来怎么发展":
             return {"status": "ambiguous_scope", "operator": "timeline", "scope_anchor": None}
         if query == "事情":
@@ -221,6 +219,9 @@ assert lumos["entity_scope"]["intent"] == "timeline", lumos
 assert lumos["entity_scope"]["operator"] == "none", lumos
 assert lumos["policy"]["global_named_fallback"] is True, lumos
 assert lumos["candidate_count"] > 0, lumos
+assert service._passage_candidate_shadow_debug("后来怎么样了", [1.0, 0.0])["reason"] == (
+    "scope_required_for_deictic_intent"
+)
 assert service._passage_candidate_shadow_debug("约尔后来怎么发展", [1.0, 0.0])[
     "reason"
 ] == "ambiguous_entity_scope"

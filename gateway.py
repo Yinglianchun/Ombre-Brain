@@ -237,6 +237,28 @@ GENERIC_KEYWORD_MATCH_TERMS = frozenset(
         "现在",
         "玩",
         "玩过",
+        "看到",
+        "看到哪",
+        "读到",
+        "读到哪",
+        "做到",
+        "做到哪",
+        "进行",
+        "进行到哪",
+        "进展",
+        "追到",
+        "追到哪",
+        "哪",
+        "后来",
+        "后续",
+        "之后",
+        "发展",
+        "演变",
+        "时间线",
+        "怎么样",
+        "如何",
+        "发生了什么",
+        "有什么",
     }
 )
 MEMORY_DETAIL_REQUEST_RE = re.compile(
@@ -475,13 +497,13 @@ class GatewayService:
         )
         self.typed_event_scene_hook_deadline_ms = max(
             1000,
-            min(14000, int(typed_recall_cfg.get("hook_deadline_ms") or 8000)),
+            min(14000, int(typed_recall_cfg.get("hook_deadline_ms") or 9000)),
         )
         self.typed_event_scene_reranker_min_remaining_ms = max(
             100,
             min(
                 self.typed_event_scene_hook_deadline_ms,
-                int(typed_recall_cfg.get("reranker_min_remaining_ms") or 3500),
+                int(typed_recall_cfg.get("reranker_min_remaining_ms") or 1800),
             ),
         )
         self.passage_shadow_index = PassageShadowIndex(config, self.embedding_engine)
@@ -2430,7 +2452,7 @@ class GatewayService:
 
         hook_deadline_ms = max(
             1000,
-            int(getattr(self, "typed_event_scene_hook_deadline_ms", 8000) or 8000),
+            int(getattr(self, "typed_event_scene_hook_deadline_ms", 9000) or 9000),
         )
         hook_deadline_at = hook_started_at + (hook_deadline_ms / 1000.0)
         semantic_route_started_at = time.perf_counter()
@@ -2941,9 +2963,9 @@ class GatewayService:
                     getattr(
                         self,
                         "typed_event_scene_reranker_min_remaining_ms",
-                        3500,
+                        1800,
                     )
-                    or 3500
+                    or 1800
                 ),
             )
             try:
