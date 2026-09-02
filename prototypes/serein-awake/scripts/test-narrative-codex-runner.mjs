@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import {
   buildNarrativeTaskPrompt,
   narrativeBodyDiff,
+  narrativeCodexArgs,
   narrativeModelForMode,
   normalizeNarrativeWriterResult,
-  parseCodexThreadId,
 } from "../server/narrativeCodexRunner.mjs";
 
 const review = {
@@ -29,18 +29,32 @@ assert.deepEqual(narrativeModelForMode("rewrite"), {
   reasoningEffort: "medium",
 });
 
+const codexArgs = narrativeCodexArgs({
+  selection: narrativeModelForMode("update"),
+  taskDir: "/tmp/task",
+  schemaPath: "/roles/output.schema.json",
+  outputPath: "/tmp/task/result.json",
+});
+assert.ok(codexArgs.includes("--ephemeral"));
+assert.ok(codexArgs.includes("--ignore-rules"));
+assert.equal(codexArgs[codexArgs.indexOf("--cd") + 1], "/tmp/task");
+assert.ok(!codexArgs.includes("archive"));
+
 const updatePrompt = buildNarrativeTaskPrompt({
   mode: "update",
   title: "归航",
   currentBody: "旧正文",
   materials: { events: [{ event_id: "event_1" }] },
+  roleRules: "只使用绑定材料。",
 });
 assert.match(updatePrompt, /"current_body":"旧正文"/);
+assert.match(updatePrompt, /<narrative_writer_role_rules>\n只使用绑定材料。/);
 const rewritePrompt = buildNarrativeTaskPrompt({
   mode: "rewrite",
   title: "归航",
   currentBody: "旧正文",
   materials: { events: [{ event_id: "event_1" }] },
+  roleRules: "只使用绑定材料。",
 });
 assert.doesNotMatch(rewritePrompt, /current_body/);
 
@@ -59,10 +73,4 @@ assert.equal(normalizeNarrativeWriterResult({
 }).evidence_sufficient, false);
 
 assert.match(narrativeBodyDiff("第一行\n旧行\n末行", "第一行\n新行\n末行"), /-旧行\n\+新行/);
-assert.equal(parseCodexThreadId([
-  JSON.stringify({ type: "thread.started", thread_id: "019d-test" }),
-  JSON.stringify({ type: "turn.completed" }),
-].join("\n")), "019d-test");
-
 console.log("NARRATIVE_CODEX_RUNNER_OK");
-

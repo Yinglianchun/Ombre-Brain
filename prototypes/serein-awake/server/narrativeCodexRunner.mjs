@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -21,7 +22,7 @@ export const narrativeModelForMode = (mode) => (
     : { model: "gpt-5.6-terra", reasoningEffort: "medium" }
 );
 
-export function buildNarrativeTaskPrompt({ mode, title, currentBody, materials }) {
+export function buildNarrativeTaskPrompt({ mode, title, currentBody, materials, roleRules }) {
   if (!new Set(["update", "rewrite"]).has(mode)) throw new Error("invalid_narrative_writer_mode");
   const task = {
     mode,
@@ -29,14 +30,19 @@ export function buildNarrativeTaskPrompt({ mode, title, currentBody, materials }
     materials,
     ...(mode === "update" ? { current_body: String(currentBody || "") } : {}),
   };
-  if (!task.title || !materials || typeof materials !== "object") {
+  const rules = String(roleRules || "").trim();
+  if (!task.title || !materials || typeof materials !== "object" || !rules) {
     throw new Error("invalid_narrative_writer_input");
   }
   return [
     "[Haven Internal]",
     "SYSTEM ACTION MODE: narrative_writer_preview, not user chat.",
-    "按照本目录 AGENTS.md 完成一次叙事卷预览。不要调用工具，不要读写文件。",
+    "The host supplied the complete role rules and frozen material below. Do not call tools or read files.",
     "只返回 output schema 要求的 JSON。",
+    "",
+    "<narrative_writer_role_rules>",
+    rules,
+    "</narrative_writer_role_rules>",
     "",
     "<narrative_writer_input_json>",
     JSON.stringify(task),
@@ -103,20 +109,6 @@ export function narrativeBodyDiff(currentBody, proposedBody) {
   ].join("\n");
 }
 
-export function parseCodexThreadId(stdout) {
-  for (const line of String(stdout || "").split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    try {
-      const event = JSON.parse(line);
-      if (event?.type === "thread.started" && typeof event.thread_id === "string") return event.thread_id;
-      if (event?.type === "thread.started" && typeof event.thread?.id === "string") return event.thread.id;
-    } catch {
-      // Ignore non-JSON diagnostics; the output file remains authoritative.
-    }
-  }
-  return "";
-}
-
 function workerEnvironment() {
   const allowed = new Set([
     "HOME", "LANG", "LC_ALL", "PATH", "SSL_CERT_DIR", "SSL_CERT_FILE", "TMPDIR", "CODEX_HOME",
@@ -154,6 +146,29 @@ function runProcess(command, args, { cwd, input = "", timeoutMs = 300_000 } = {}
   });
 }
 
+export function narrativeCodexArgs({ selection, taskDir, schemaPath, outputPath }) {
+  return [
+    "exec",
+    "--ephemeral",
+    "--disable", "shell_tool",
+    "--disable", "unified_exec",
+    "--disable", "hooks",
+    "--disable", "apps",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--sandbox", "read-only",
+    "--skip-git-repo-check",
+    "--model", selection.model,
+    "-c", `model_reasoning_effort="${selection.reasoningEffort}"`,
+    "-c", 'web_search="disabled"',
+    "--cd", taskDir,
+    "--output-schema", schemaPath,
+    "--output-last-message", outputPath,
+    "--json",
+    "-",
+  ];
+}
+
 export async function runNarrativeCodexTask({
   mode,
   title,
@@ -164,43 +179,27 @@ export async function runNarrativeCodexTask({
   tempRoot = process.env.SEREIN_CODEX_TASK_DIR || join(tmpdir(), "serein-codex-tasks"),
 }) {
   const rolePath = resolve(roleDir);
+  const rulesPath = join(rolePath, "AGENTS.md");
   const schemaPath = join(rolePath, "output.schema.json");
-  if (!existsSync(join(rolePath, "AGENTS.md")) || !existsSync(schemaPath)) {
+  if (!existsSync(rulesPath) || !existsSync(schemaPath)) {
     throw new Error("narrative_writer_role_not_installed");
   }
+  const roleRules = readFileSync(rulesPath, "utf8").trim();
+  if (!roleRules) throw new Error("narrative_writer_role_rules_empty");
+  const roleRulesSha256 = createHash("sha256").update(roleRules, "utf8").digest("hex");
   mkdirSync(tempRoot, { recursive: true, mode: 0o700 });
   const taskDir = mkdtempSync(join(tempRoot, "narrative-writer-"));
   const outputPath = join(taskDir, "result.json");
   const selection = narrativeModelForMode(mode);
-  const prompt = buildNarrativeTaskPrompt({ mode, title, currentBody, materials });
-  let threadId = "";
-  let archived = false;
+  const prompt = buildNarrativeTaskPrompt({ mode, title, currentBody, materials, roleRules });
   let result;
   try {
-    const args = [
-      "exec",
-      "--disable", "shell_tool",
-      "--disable", "unified_exec",
-      "--disable", "hooks",
-      "--disable", "apps",
-      "--ignore-user-config",
-      "--sandbox", "read-only",
-      "--skip-git-repo-check",
-      "--model", selection.model,
-      "-c", `model_reasoning_effort="${selection.reasoningEffort}"`,
-      "-c", 'web_search="disabled"',
-      "--cd", rolePath,
-      "--output-schema", schemaPath,
-      "--output-last-message", outputPath,
-      "--json",
-      "-",
-    ];
+    const args = narrativeCodexArgs({ selection, taskDir, schemaPath, outputPath });
     const run = await runProcess(codexCommand, args, {
-      cwd: rolePath,
+      cwd: taskDir,
       input: prompt,
       timeoutMs: mode === "rewrite" ? 300_000 : 180_000,
     });
-    threadId = parseCodexThreadId(run.stdout);
     if (run.timedOut || run.code !== 0 || !existsSync(outputPath)) {
       throw new Error(run.timedOut ? "narrative_writer_timeout" : `narrative_writer_codex_${run.code}:${run.stderr.trim().slice(0, 300)}`);
     }
@@ -214,15 +213,12 @@ export async function runNarrativeCodexTask({
       diff: narrativeBodyDiff(currentBody, normalized.body),
       publication_status: "not_published",
       writes_performed: [],
+      execution_mode: "ephemeral",
+      session_persisted: false,
+      role_rules_sha256: roleRulesSha256,
     };
   } finally {
-    if (threadId) {
-      const archive = await runProcess(codexCommand, ["archive", threadId], { cwd: rolePath, timeoutMs: 30_000 });
-      archived = archive.code === 0;
-      if (!archived) console.error(`[serein] Failed to archive Narrative Writer thread ${threadId}: ${archive.stderr.trim()}`);
-    }
     rmSync(taskDir, { recursive: true, force: true });
   }
-  if (threadId && !archived) throw new Error("narrative_writer_thread_archive_failed");
-  return { ...result, thread_archived: archived };
+  return result;
 }
