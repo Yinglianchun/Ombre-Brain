@@ -5,8 +5,15 @@ import {
   ArrowRight,
   CaretDown,
   CircleNotch,
+  PencilSimple,
+  X,
 } from "@phosphor-icons/react";
-import { loadNarrativeRolls, readFallbackNarrativeRolls } from "../storage/narrativeStore.js";
+import {
+  loadNarrativeRolls,
+  previewNarrativeRoll,
+  readFallbackNarrativeRolls,
+  saveNarrativeRollBody,
+} from "../storage/narrativeStore.js";
 
 const transitionTo = (update) => {
   if (!document.startViewTransition) {
@@ -47,6 +54,14 @@ export function NarrativePage() {
   const shelfRef = useRef(null);
   const [narrativeRolls, setNarrativeRolls] = useState(readFallbackNarrativeRolls);
   const [selectedRollId, setSelectedRollId] = useState(null);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [previewBody, setPreviewBody] = useState("");
+  const [previewDiff, setPreviewDiff] = useState("");
+  const [previewMode, setPreviewMode] = useState("");
+  const [previewError, setPreviewError] = useState("");
+  const [previewing, setPreviewing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveMessage, setSaveMessage] = useState("");
   const selectedRoll = useMemo(
     () => narrativeRolls.find((roll) => roll.id === selectedRollId) ?? null,
     [narrativeRolls, selectedRollId],
@@ -66,12 +81,16 @@ export function NarrativePage() {
     if (!selectedRoll) return undefined;
     const closeOnEscape = (event) => {
       if (event.key === "Escape") {
-        transitionTo(() => setSelectedRollId(null));
+        if (editorOpen) {
+          setEditorOpen(false);
+        } else {
+          transitionTo(() => setSelectedRollId(null));
+        }
       }
     };
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [selectedRoll]);
+  }, [editorOpen, selectedRoll]);
 
   useEffect(() => {
     const shelf = shelfRef.current;
@@ -85,7 +104,93 @@ export function NarrativePage() {
   };
 
   const closeRoll = () => {
+    setEditorOpen(false);
+    setPreviewBody("");
+    setPreviewDiff("");
+    setPreviewMode("");
+    setPreviewError("");
+    setSaveMessage("");
     transitionTo(() => setSelectedRollId(null));
+  };
+
+  const openEditor = () => {
+    setPreviewBody(selectedRoll?.body || selectedRoll?.paragraphs?.join("\n\n") || "");
+    setPreviewDiff("");
+    setPreviewMode("");
+    setPreviewError("");
+    setSaveMessage("");
+    setEditorOpen(true);
+  };
+
+  const closeEditor = () => {
+    setEditorOpen(false);
+    setPreviewBody("");
+    setPreviewDiff("");
+    setPreviewMode("");
+    setPreviewError("");
+    setSaveMessage("");
+  };
+
+  const generatePreview = async (mode) => {
+    if (!selectedRoll || previewing) return;
+    setEditorOpen(true);
+    setPreviewBody(selectedRoll.body || selectedRoll.paragraphs.join("\n\n"));
+    setPreviewDiff("");
+    setPreviewMode(mode);
+    setPreviewing(true);
+    setPreviewError("");
+    setSaveMessage("");
+    try {
+      const result = await previewNarrativeRoll(selectedRoll, mode);
+      if (result.status === "insufficient") {
+        setPreviewBody(selectedRoll.body || selectedRoll.paragraphs.join("\n\n"));
+        setPreviewDiff("");
+        setPreviewMode(mode);
+        setPreviewError(result.issues?.join("；") || "当前绑定材料不足以生成可信正文。");
+        return;
+      }
+      setPreviewBody(result.body);
+      setPreviewDiff(result.diff || "");
+      setPreviewMode(mode);
+    } catch (error) {
+      setPreviewError(error.message || "没有生成这次预览。");
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  const saveBody = async () => {
+    if (!selectedRoll || saving || previewing || !previewBody.trim()) return;
+    setSaving(true);
+    setPreviewError("");
+    setSaveMessage("");
+    try {
+      const result = await saveNarrativeRollBody(selectedRoll, previewBody);
+      const paragraphs = previewBody
+        .replace(/\r\n?/g, "\n")
+        .trim()
+        .split(/\n\s*\n/)
+        .map((paragraph) => paragraph.trim())
+        .filter(Boolean);
+      setNarrativeRolls((rolls) => rolls.map((roll) => (
+        roll.id === selectedRoll.id
+          ? {
+              ...roll,
+              body: previewBody.trim(),
+              paragraphs,
+              revision: Number(result.revision || roll.revision + 1),
+              documentHash: String(result.document_sha256 || roll.documentHash),
+            }
+          : roll
+      )));
+      setPreviewDiff("");
+      setPreviewMode("");
+      setSaveMessage(`已保存为 revision ${result.revision}`);
+    } catch (error) {
+      setPreviewError(error.message || "这次正文没有保存。");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -160,11 +265,47 @@ export function NarrativePage() {
               <ArrowLeft size={18} weight="light" aria-hidden="true" />
               回到书架
             </button>
-            <span>
-              VOL. {selectedRoll.volume}
-              <i aria-hidden="true">·</i>
-              {selectedRoll.status}
-            </span>
+            <div className="narrative-reader__tools">
+              <span>
+                VOL. {selectedRoll.volume}
+                <i aria-hidden="true">·</i>
+                {selectedRoll.status}
+              </span>
+              <div className="narrative-reader__actions" role="group" aria-label="叙事卷操作">
+                <button
+                  className={editorOpen && !previewMode ? "is-active" : ""}
+                  type="button"
+                  disabled={previewing || saving}
+                  onClick={openEditor}
+                >
+                  <PencilSimple size={15} weight="light" aria-hidden="true" />
+                  编辑
+                </button>
+                <button
+                  className={previewMode === "update" ? "is-active" : ""}
+                  type="button"
+                  disabled={previewing || saving}
+                  onClick={() => generatePreview("update")}
+                >
+                  {previewing && previewMode === "update" ? <CircleNotch className="is-spinning" size={15} aria-hidden="true" /> : null}
+                  更新
+                </button>
+                <button
+                  className={previewMode === "rewrite" ? "is-active" : ""}
+                  type="button"
+                  disabled={previewing || saving}
+                  onClick={() => generatePreview("rewrite")}
+                >
+                  {previewing && previewMode === "rewrite" ? <CircleNotch className="is-spinning" size={15} aria-hidden="true" /> : null}
+                  重写
+                </button>
+                {editorOpen ? (
+                  <button className="is-close" type="button" aria-label="关闭编辑区" onClick={closeEditor}>
+                    <X size={15} weight="light" aria-hidden="true" />
+                  </button>
+                ) : null}
+              </div>
+            </div>
           </nav>
 
           <section
@@ -194,11 +335,62 @@ export function NarrativePage() {
               </dl>
             </header>
 
-            <section className="narrative-manuscript__body" aria-label="叙事正文">
-              {selectedRoll.paragraphs.map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
-            </section>
+            {editorOpen ? (
+              <section className="narrative-editor" aria-label="叙事卷编辑预览">
+                <header>
+                  <div>
+                    <span>{previewMode ? "WRITER PREVIEW" : "BODY EDITOR"}</span>
+                    <h2>{previewMode ? (previewMode === "update" ? "更新预览" : "重写预览") : "手改正文"}</h2>
+                  </div>
+                  <small>{previewMode ? "预览不会自动发布，确认后再保存" : "保存只改正文，不调用 Writer"}</small>
+                </header>
+                <div className="narrative-editor__workspace">
+                  <div className="narrative-editor__paper">
+                    <textarea
+                      aria-label="叙事卷正文预览"
+                      value={previewBody}
+                      onChange={(event) => {
+                        setPreviewBody(event.target.value);
+                        setSaveMessage("");
+                      }}
+                      spellCheck="false"
+                    />
+                    {previewError ? <p className="narrative-editor__error" role="alert">{previewError}</p> : null}
+                    {saveMessage ? <p className="narrative-editor__saved" role="status">{saveMessage}</p> : null}
+                  </div>
+                  <aside className="narrative-editor__materials" aria-label="当前绑定材料">
+                    <span>当前材料</span>
+                    <strong>{selectedRoll.sources?.length || 0} 条</strong>
+                    <ol>
+                      {(selectedRoll.sources || []).map((source) => (
+                        <li key={`editor:${source.type || "scene"}:${source.id}`}>
+                          <em>{source.typeLabel || "Scene"}</em>
+                          <span>{source.title}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  </aside>
+                </div>
+                {previewDiff ? (
+                  <details className="narrative-editor__diff">
+                    <summary>查看与当前正文的差异</summary>
+                    <pre>{previewDiff}</pre>
+                  </details>
+                ) : null}
+                <footer>
+                  <button className="is-primary" type="button" disabled={saving || previewing || !previewBody.trim()} onClick={saveBody}>
+                    {saving ? <CircleNotch className="is-spinning" size={16} aria-hidden="true" /> : null}
+                    保存
+                  </button>
+                </footer>
+              </section>
+            ) : (
+              <section className="narrative-manuscript__body" aria-label="叙事正文">
+                {selectedRoll.paragraphs.map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
+              </section>
+            )}
 
-            {selectedRoll.sources ? (
+            {!editorOpen && selectedRoll.sources ? (
               <details className="narrative-ledger">
                 <summary>
                   <span>
@@ -222,7 +414,7 @@ export function NarrativePage() {
                   ))}
                 </ol>
               </details>
-            ) : (
+            ) : !editorOpen ? (
               <section className="narrative-scenes" aria-labelledby="narrative-scenes-title">
                 <div>
                   <h2 id="narrative-scenes-title">卷中的 Scene</h2>
@@ -232,7 +424,7 @@ export function NarrativePage() {
                   {selectedRoll.sceneNames.map((scene) => <li key={scene}>{scene}</li>)}
                 </ul>
               </section>
-            )}
+            ) : null}
           </section>
         </article>
       )}

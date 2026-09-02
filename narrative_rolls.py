@@ -66,6 +66,22 @@ def _extract_body(document: str) -> str:
     return document[start:end].strip()
 
 
+def replace_narrative_body(document: str, body: str) -> str:
+    """Replace only the authored body section and preserve the source ledger verbatim."""
+
+    exact_document = str(document or "")
+    exact_body = str(body or "").strip()
+    if not exact_body:
+        raise ValueError("Narrative body is required")
+    match = _BODY_HEADING_RE.search(exact_document)
+    if match is None:
+        raise ValueError("Narrative document has no first-person body section")
+    next_heading = _NEXT_HEADING_RE.search(exact_document, match.end())
+    end = next_heading.start() if next_heading is not None else len(exact_document)
+    suffix = exact_document[end:]
+    return exact_document[: match.end()] + "\n\n" + exact_body + "\n\n" + suffix.lstrip("\n")
+
+
 def _query_requests_exact_evidence(query: str) -> bool:
     compact_query = _compact(query)
     return any(_compact(marker) in compact_query for marker in _EXACT_EVIDENCE_MARKERS)
@@ -296,6 +312,7 @@ class NarrativeRollStore:
                 "parent_narrative_id",
                 "revision",
                 "title",
+                "title_aliases",
                 "scope",
                 "publication_status",
                 "lifecycle",
@@ -665,6 +682,75 @@ class NarrativeRollStore:
         if len(matches) != 1:
             return {"status": "invalid", "reason": "duplicate_arc_key", "arc_key": safe_key}
         return self.read(str(matches[0].get("narrative_id") or ""))
+
+    def save_body(
+        self,
+        narrative_id: str,
+        body: str,
+        *,
+        expected_revision: int,
+        expected_document_sha256: str,
+    ) -> dict[str, Any]:
+        """Publish a manual body edit while preserving exact current membership and metadata."""
+
+        current = self.read(str(narrative_id or "").strip())
+        if current.get("status") != "ok":
+            return current
+        try:
+            expected = int(expected_revision)
+        except (TypeError, ValueError):
+            return {"status": "invalid", "reason": "invalid_expected_revision"}
+        if expected != int(current.get("revision") or 0):
+            return {
+                "status": "conflict",
+                "reason": "revision_mismatch",
+                "current_revision": int(current.get("revision") or 0),
+            }
+        expected_hash = str(expected_document_sha256 or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+            return {"status": "invalid", "reason": "invalid_expected_document_sha256"}
+        if expected_hash != str(current.get("document_sha256") or "").strip().lower():
+            return {
+                "status": "conflict",
+                "reason": "document_hash_mismatch",
+                "current_document_sha256": str(current.get("document_sha256") or ""),
+            }
+        try:
+            document = replace_narrative_body(current.get("full_document") or "", body)
+        except ValueError as exc:
+            return {"status": "invalid", "reason": str(exc)}
+
+        result = self.publish(
+            narrative_id=str(current.get("narrative_id") or ""),
+            document=document,
+            expected_revision=expected,
+            title=str(current.get("title") or ""),
+            arc_key=str(current.get("arc_key") or ""),
+            parent_narrative_id=str(current.get("parent_narrative_id") or ""),
+            source_scene_ids=list(current.get("linked_scene_ids") or []),
+            source_event_ids=list(current.get("linked_event_ids") or []),
+            source_diary_ids=list(current.get("linked_diary_ids") or []),
+            source_darkroom_ids=list(current.get("linked_darkroom_ids") or []),
+            title_aliases=list(current.get("title_aliases") or []),
+            primary_entities=list(current.get("primary_entities") or []),
+            supporting_entities=list(current.get("supporting_entities") or []),
+            intent_tags=list(current.get("intent_tags") or []),
+            query_cues=list(current.get("query_cues") or []),
+            time_start=str(current.get("time_start") or ""),
+            time_end=str(current.get("time_end") or ""),
+            current_status_cue=str(current.get("current_status_cue") or ""),
+            publication_status=str(current.get("publication_status") or "reviewed"),
+            lifecycle=str(current.get("lifecycle") or "active"),
+        )
+        if result.get("status") in {"created", "updated"}:
+            result["manual_body_save"] = True
+            result["membership_preserved"] = (
+                list(result.get("linked_scene_ids") or []) == list(current.get("linked_scene_ids") or [])
+                and list(result.get("linked_event_ids") or []) == list(current.get("linked_event_ids") or [])
+                and list(result.get("linked_diary_ids") or []) == list(current.get("linked_diary_ids") or [])
+                and list(result.get("linked_darkroom_ids") or []) == list(current.get("linked_darkroom_ids") or [])
+            )
+        return result
 
     @staticmethod
     def source_scene_ids(document: str, explicit_ids: list[str] | None = None) -> list[str]:

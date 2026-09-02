@@ -137,6 +137,7 @@ function projectLiveRoll(item, index, fallback) {
     projectionStatus: String(item.publication_status || fallback?.projectionStatus || "reviewed"),
     current: String(item.current_status_cue || fallback?.current || ""),
     paragraphs: paragraphs.length ? paragraphs : fallback?.paragraphs || [],
+    body: String(item.body || ""),
     sources,
     sceneNames: sources.length
       ? sources.map((source) => source.title)
@@ -145,6 +146,53 @@ function projectLiveRoll(item, index, fallback) {
     documentHash: String(item.document_sha256 || ""),
     sourceKind: "ombre-narrative-live-readonly",
   };
+}
+
+export async function previewNarrativeRoll(roll, mode) {
+  const response = await fetch("/__serein/narrative-preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      narrativeId: roll.id,
+      mode,
+      expectedRevision: roll.revision,
+      expectedDocumentSha256: roll.documentHash,
+    }),
+  });
+  const payload = await response.json().catch(() => ({
+    status: "error",
+    message: "预览返回了无法读取的内容。",
+    writes_performed: [],
+  }));
+  if (!response.ok || !["ok", "insufficient"].includes(payload?.status)) {
+    const error = new Error(payload?.message || payload?.reason || "没有生成这次预览。");
+    error.payload = payload;
+    throw error;
+  }
+  return payload;
+}
+
+export async function saveNarrativeRollBody(roll, body) {
+  const response = await fetch("/__serein/narrative-save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      narrativeId: roll.id,
+      body,
+      expectedRevision: roll.revision,
+      expectedDocumentSha256: roll.documentHash,
+    }),
+  });
+  const payload = await response.json().catch(() => ({
+    status: "error",
+    message: "保存返回了无法读取的内容。",
+  }));
+  if (!response.ok || !["created", "updated"].includes(payload?.status)) {
+    const error = new Error(payload?.message || payload?.reason || "这次正文没有保存。");
+    error.payload = payload;
+    throw error;
+  }
+  return payload;
 }
 
 export async function loadNarrativeRolls() {

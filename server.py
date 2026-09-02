@@ -165,6 +165,7 @@ from window_shadows import (
 )
 from memory_nodes import MemoryNodeStore
 from narrative_rolls import NarrativeRollStore
+from narrative_writer import NarrativeWriter
 from narrative_revision_inbox import NarrativeRevisionInbox
 from persona_engine import PersonaStateEngine
 from persona_event_selection import select_persona_events
@@ -260,6 +261,10 @@ reflection_engine = ReflectionEngine(config)           # Daily/weekly reflection
 diary_source_importer = DiarySourceImporter()          # Lossless diary evidence snapshots / 无损日记证据快照
 metadata_enricher = reflection_engine                  # Proposal-only metadata worker / 只提案、不改正文或权重
 scene_linker = SceneLinker(config)                     # Async Scene-edge proposals / 异步 Scene 边提案
+narrative_writer_service = NarrativeWriter(
+    scene_linker.providers,
+    config.get("narrative_writer", {}) if isinstance(config.get("narrative_writer"), dict) else {},
+)
 dream_engine = DreamEngine(config)                     # Night dream worker / 夜梦
 identity_semantic_store = IdentitySemanticStore(config) # Private relationship alias index / 私有关系语义索引
 word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
@@ -3762,6 +3767,7 @@ async def health_check(request):
                 "api_ready": bool(reflection_engine.api_key),
             },
             "scene_linker": scene_linker.status(),
+            "narrative_writer": narrative_writer_service.status(),
             "diary": diary_store.stats(),
             "fact_events": fact_event_store.stats(),
             "mcp_surface": mcp.surface_status(),
@@ -8927,6 +8933,144 @@ async def _read_narrative_memory(narrative_id: str) -> dict:
 read_narrative_roll = _read_narrative_memory
 
 
+async def _materialize_narrative_writer_sources(narrative: dict) -> dict:
+    """Read the exact frozen direct membership used by one Writer preview."""
+    events: list[dict] = []
+    scenes: list[dict] = []
+    diaries: list[dict] = []
+    darkrooms: list[dict] = []
+    errors: list[dict] = []
+
+    for event_id in narrative.get("linked_event_ids") or []:
+        event = fact_event_store.read(str(event_id), include_sources=True)
+        if not event:
+            errors.append({"source_type": "event", "source_id": str(event_id), "reason": "not_found"})
+            continue
+        if str(event.get("item_type") or "") != "event" or str(event.get("status") or "") != "active":
+            errors.append({"source_type": "event", "source_id": str(event_id), "reason": "not_active"})
+            continue
+        source_messages = []
+        event_invalid = False
+        for ref in event.get("source_refs") or []:
+            content = str(ref.get("content") or "")
+            expected_hash = str(ref.get("content_sha256") or "").strip().lower()
+            actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            if not content or not expected_hash or actual_hash != expected_hash:
+                errors.append({
+                    "source_type": "event",
+                    "source_id": str(event_id),
+                    "message_id": ref.get("message_id"),
+                    "reason": "source_snapshot_mismatch",
+                })
+                event_invalid = True
+                break
+            source_messages.append({
+                "source_system": str(ref.get("source_system") or ""),
+                "session_id": ref.get("session_id"),
+                "message_id": ref.get("message_id"),
+                "role": str(ref.get("role") or ""),
+                "created_at": str(ref.get("created_at") or ""),
+                "content": content,
+                "content_sha256": expected_hash,
+            })
+        if event_invalid or not source_messages:
+            if not event_invalid:
+                errors.append({"source_type": "event", "source_id": str(event_id), "reason": "no_sources"})
+            continue
+        events.append({
+            "source_type": "event",
+            "event_id": str(event_id),
+            "title": str(event.get("title") or ""),
+            "date": str(event.get("local_date") or ""),
+            "summary": str(event.get("body") or ""),
+            "fingerprint": str(event.get("fingerprint") or ""),
+            "source_messages": source_messages,
+        })
+
+    for scene_id in narrative.get("linked_scene_ids") or []:
+        scene = await bucket_mgr.get(str(scene_id))
+        if not scene:
+            errors.append({"source_type": "scene", "source_id": str(scene_id), "reason": "not_found"})
+            continue
+        meta = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
+        content = strip_wikilinks(str(scene.get("content") or "")).strip()
+        if not content:
+            errors.append({"source_type": "scene", "source_id": str(scene_id), "reason": "empty_content"})
+            continue
+        scenes.append({
+            "source_type": "scene",
+            "scene_id": str(scene_id),
+            "title": str(meta.get("name") or scene_id),
+            "date": str(meta.get("date") or meta.get("event_date") or meta.get("created") or ""),
+            "status": "active" if not (meta.get("active") is False or meta.get("deprecated")) else "legacy",
+            "content": content,
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        })
+
+    def read_diary_source(source_id: int, source_type: str) -> dict | None:
+        result = diary_store.read(diary_id=int(source_id), limit=1, include_archived=True)
+        if result.get("count") != 1 or int(result.get("id") or 0) != int(source_id):
+            errors.append({"source_type": source_type, "source_id": int(source_id), "reason": "not_found"})
+            return None
+        if bool(result.get("locked")) or not bool(result.get("body_available", True)):
+            errors.append({"source_type": source_type, "source_id": int(source_id), "reason": "locked"})
+            return None
+        content = str(result.get("content") or "").strip()
+        if not content:
+            errors.append({"source_type": source_type, "source_id": int(source_id), "reason": "empty_content"})
+            return None
+        return {
+            "source_type": source_type,
+            f"{source_type}_id": int(source_id),
+            "title": str(result.get("title") or f"{source_type} {source_id}"),
+            "date": str(result.get("date") or ""),
+            "revision": int(result.get("revision") or 1),
+            "content": content,
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "comments": [
+                {
+                    "author": str(comment.get("author") or ""),
+                    "created_at": str(comment.get("created_at") or ""),
+                    "content": str(comment.get("content") or ""),
+                }
+                for comment in result.get("comments") or []
+                if str(comment.get("content") or "").strip()
+            ],
+        }
+
+    for diary_id in narrative.get("linked_diary_ids") or []:
+        item = read_diary_source(int(diary_id), "diary")
+        if item:
+            diaries.append(item)
+    for darkroom_id in narrative.get("linked_darkroom_ids") or []:
+        item = read_diary_source(int(darkroom_id), "darkroom")
+        if item:
+            darkrooms.append(item)
+
+    if errors:
+        return {"status": "invalid", "reason": "bound_material_unavailable", "errors": errors}
+    return {
+        "status": "ok",
+        "narrative": {
+            "narrative_id": str(narrative.get("narrative_id") or ""),
+            "title": str(narrative.get("title") or ""),
+            "arc_key": str(narrative.get("arc_key") or ""),
+            "time_start": str(narrative.get("time_start") or ""),
+            "time_end": str(narrative.get("time_end") or ""),
+        },
+        "events": events,
+        "scenes": scenes,
+        "diaries": diaries,
+        "darkrooms": darkrooms,
+        "material_counts": {
+            "events": len(events),
+            "scenes": len(scenes),
+            "diaries": len(diaries),
+            "darkrooms": len(darkrooms),
+        },
+    }
+
+
 @mcp.custom_route("/api/narrative-rolls", methods=["GET"])
 async def api_narrative_rolls(request):
     """Read the lightweight Narrative Roll index or one exact full roll."""
@@ -8948,6 +9092,110 @@ async def api_narrative_rolls(request):
         if result.get("status") == "not_found"
         else 400
         if result.get("status") == "invalid"
+        else 200
+    )
+    return JSONResponse(result, status_code=status_code)
+
+
+@mcp.custom_route("/api/narrative-rolls/preview", methods=["POST"])
+async def api_preview_narrative_roll(request):
+    """Generate an update or full rewrite preview without changing the Narrative registry."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"status": "invalid", "reason": "invalid_json_body", "writes_performed": []}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"status": "invalid", "reason": "request_body_not_object", "writes_performed": []}, status_code=400)
+
+    narrative_id = str(body.get("narrative_id") or "").strip()
+    mode = str(body.get("mode") or "").strip().lower()
+    expected_revision = body.get("expected_revision")
+    expected_hash = str(body.get("expected_document_sha256") or "").strip().lower()
+    if not narrative_id or not MEMORY_ID_RE.fullmatch(narrative_id) or mode not in {"update", "rewrite"}:
+        return JSONResponse({"status": "invalid", "reason": "invalid_preview_request", "writes_performed": []}, status_code=400)
+
+    narrative = narrative_roll_store.read(narrative_id)
+    if narrative.get("status") != "ok":
+        return JSONResponse({"status": "not_found", "reason": "narrative_not_found", "writes_performed": []}, status_code=404)
+    current_revision = int(narrative.get("revision") or 0)
+    current_hash = str(narrative.get("document_sha256") or "").strip().lower()
+    if expected_revision is not None and int(expected_revision) != current_revision:
+        return JSONResponse({
+            "status": "conflict",
+            "reason": "narrative_revision_changed",
+            "current_revision": current_revision,
+            "writes_performed": [],
+        }, status_code=409)
+    if expected_hash and expected_hash != current_hash:
+        return JSONResponse({
+            "status": "conflict",
+            "reason": "narrative_document_changed",
+            "current_document_sha256": current_hash,
+            "writes_performed": [],
+        }, status_code=409)
+
+    materials = await _materialize_narrative_writer_sources(narrative)
+    if materials.get("status") != "ok":
+        return JSONResponse({**materials, "writes_performed": []}, status_code=409)
+    try:
+        preview = await narrative_writer_service.preview(
+            mode=mode,
+            title=str(narrative.get("title") or narrative_id),
+            material_payload=materials,
+            current_body=str(narrative.get("body") or ""),
+        )
+    except ValueError as exc:
+        return JSONResponse({"status": "invalid", "reason": str(exc), "writes_performed": []}, status_code=400)
+    except Exception as exc:
+        logger.warning("Narrative Writer preview failed: %s", exc)
+        return JSONResponse({"status": "error", "reason": str(exc), "writes_performed": []}, status_code=502)
+    return JSONResponse({
+        **preview,
+        "narrative_id": narrative_id,
+        "base_revision": current_revision,
+        "base_document_sha256": current_hash,
+        "material_counts": materials.get("material_counts") or {},
+    })
+
+
+@mcp.custom_route("/api/narrative-rolls/save-body", methods=["POST"])
+async def api_save_narrative_roll_body(request):
+    """Save a manual body edit as one new revision without changing membership."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"status": "invalid", "reason": "invalid_json_body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"status": "invalid", "reason": "request_body_not_object"}, status_code=400)
+    narrative_id = str(body.get("narrative_id") or "").strip()
+    exact_body = str(body.get("body") or "")
+    if not narrative_id or not MEMORY_ID_RE.fullmatch(narrative_id) or not exact_body.strip():
+        return JSONResponse({"status": "invalid", "reason": "invalid_body_save_request"}, status_code=400)
+    result = narrative_roll_store.save_body(
+        narrative_id,
+        exact_body,
+        expected_revision=body.get("expected_revision"),
+        expected_document_sha256=str(body.get("expected_document_sha256") or ""),
+    )
+    status_code = (
+        404
+        if result.get("status") == "not_found"
+        else 409
+        if result.get("status") == "conflict"
+        else 400
+        if result.get("status") == "invalid"
+        else 500
+        if result.get("status") == "error"
         else 200
     )
     return JSONResponse(result, status_code=status_code)

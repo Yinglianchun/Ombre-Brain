@@ -1329,6 +1329,83 @@ function sereinMemoryBridge() {
         }
       });
 
+      server.middlewares.use("/__serein/narrative-preview", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request, 32_000);
+          const narrativeId = String(body.narrativeId || "").trim();
+          const mode = body.mode === "update" ? "update" : body.mode === "rewrite" ? "rewrite" : "";
+          if (!/^[A-Za-z0-9_.:#-]{1,160}$/.test(narrativeId) || !mode) {
+            response.statusCode = 400;
+            response.end(JSON.stringify({ status: "invalid", reason: "invalid_preview_request", writes_performed: [] }));
+            return;
+          }
+          const upstream = await callOmbreDashboard("/api/narrative-rolls/preview", {
+            method: "POST",
+            body: {
+              narrative_id: narrativeId,
+              mode,
+              expected_revision: Number.parseInt(body.expectedRevision, 10) || undefined,
+              expected_document_sha256: String(body.expectedDocumentSha256 || "").trim(),
+            },
+          });
+          response.statusCode = upstream.status;
+          response.end(JSON.stringify(upstream.payload));
+        } catch (error) {
+          console.error("[serein-memory-bridge] Narrative preview failed", error);
+          response.statusCode = error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            status: "error",
+            reason: "narrative_preview_failed",
+            message: error?.name === "AbortError" ? "这次预览生成超时了。" : "暂时没有生成叙事卷预览。",
+            writes_performed: [],
+          }));
+        }
+      });
+
+      server.middlewares.use("/__serein/narrative-save", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request, 260_000);
+          const narrativeId = String(body.narrativeId || "").trim();
+          const narrativeBody = String(body.body || "");
+          if (!/^[A-Za-z0-9_.:#-]{1,160}$/.test(narrativeId) || !narrativeBody.trim()) {
+            response.statusCode = 400;
+            response.end(JSON.stringify({ status: "invalid", reason: "invalid_body_save_request" }));
+            return;
+          }
+          const upstream = await callOmbreDashboard("/api/narrative-rolls/save-body", {
+            method: "POST",
+            body: {
+              narrative_id: narrativeId,
+              body: narrativeBody,
+              expected_revision: Number.parseInt(body.expectedRevision, 10),
+              expected_document_sha256: String(body.expectedDocumentSha256 || "").trim(),
+            },
+          });
+          response.statusCode = upstream.status;
+          response.end(JSON.stringify(upstream.payload));
+        } catch (error) {
+          console.error("[serein-memory-bridge] Narrative body save failed", error);
+          response.statusCode = error?.name === "AbortError" ? 504 : 502;
+          response.end(JSON.stringify({
+            status: "error",
+            reason: "narrative_body_save_failed",
+            message: error?.name === "AbortError" ? "保存正文超时了。" : "这次正文没有保存。",
+          }));
+        }
+      });
+
       server.middlewares.use("/__serein/live/window-shadows", async (request, response) => {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
         if (request.method !== "POST") {
