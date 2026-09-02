@@ -767,7 +767,11 @@ export function BasementRecallObservation() {
                       )}
                       <footer>
                         <span>实际注入仍以上方 Gateway 回执为准</span>
-                        <span>typed live：关闭 · decision applied：否</span>
+                        <span>
+                          typed live：{typed.liveMode}
+                          {typed.guardApplied ? ` · guard：${typed.guardedLiveAllowed ? "放行" : "拦截"}` : ""}
+                          {typed.guardReason ? ` · ${typed.guardReason}` : ""}
+                        </span>
                       </footer>
                     </section>
                   );

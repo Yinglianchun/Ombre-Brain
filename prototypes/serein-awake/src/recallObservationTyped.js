@@ -15,6 +15,9 @@ export function normalizeTypedRecallObservation(semantic) {
   const scopeAnchor = scope.scope_anchor && typeof scope.scope_anchor === "object"
     ? scope.scope_anchor
     : {};
+  const liveModeGate = raw.live_mode_gate && typeof raw.live_mode_gate === "object"
+    ? raw.live_mode_gate
+    : {};
   const selectedRefs = asArray(raw.selected_refs).map(String);
   const selectedSet = new Set(selectedRefs);
   const candidateRows = asArray(raw.candidate_summaries).length
@@ -51,11 +54,16 @@ export function normalizeTypedRecallObservation(semantic) {
     simulationOnly: raw.simulation_only === true,
     decisionApplied: raw.decision_applied === true,
     liveInjectionEnabled: raw.live_injection_enabled === true,
+    liveMode: String(raw.live_mode || liveModeGate.mode || "shadow"),
+    guardApplied: liveModeGate.guard_applied === true,
+    guardedLiveAllowed: liveModeGate.guarded_live_allowed === true,
+    guardReason: String(liveModeGate.reason || ""),
     runsAfterResponse: raw.runs_after_response === true,
   };
 }
 
 export function hasTypedExpectedMatch(item) {
   return item?.typedObservation?.status === "would_inject"
+    && !(item.typedObservation.guardApplied && !item.typedObservation.guardedLiveAllowed)
     && item.typedObservation.selectedRefs.length > 0;
 }

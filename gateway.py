@@ -370,6 +370,7 @@ DIRECT_AUX_CONTEXT_SECTIONS = MOMENT_TEMPERATURE_SECTIONS - {"comment"}
 PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feeling", "comment")
 
 RECALL_ABLATION_MODES = frozenset({"normal", "without_cues", "without_embedding"})
+TYPED_RECALL_MODES = frozenset({"shadow", "guarded_live", "full_live"})
 
 
 def normalize_recall_ablation_mode(value: object) -> str:
@@ -377,6 +378,20 @@ def normalize_recall_ablation_mode(value: object) -> str:
     if mode not in RECALL_ABLATION_MODES:
         allowed = ", ".join(sorted(RECALL_ABLATION_MODES))
         raise ValueError(f"recall_ablation must be one of: {allowed}")
+    return mode
+
+
+def normalize_typed_recall_mode(
+    value: object,
+    *,
+    legacy_live_enabled: bool = False,
+) -> str:
+    if value is None or not str(value).strip():
+        return "full_live" if legacy_live_enabled else "shadow"
+    mode = str(value).strip().lower()
+    if mode not in TYPED_RECALL_MODES:
+        allowed = ", ".join(sorted(TYPED_RECALL_MODES))
+        raise ValueError(f"typed_recall.mode must be one of: {allowed}")
     return mode
 
 
@@ -443,9 +458,16 @@ class GatewayService:
         )
         typed_recall_cfg = config.get("typed_recall")
         typed_recall_cfg = typed_recall_cfg if isinstance(typed_recall_cfg, dict) else {}
-        self.typed_event_scene_live_enabled = self._bool_config_value(
+        legacy_typed_live_enabled = self._bool_config_value(
             typed_recall_cfg.get("live_injection_enabled"),
             False,
+        )
+        self.typed_event_scene_recall_mode = normalize_typed_recall_mode(
+            typed_recall_cfg.get("mode"),
+            legacy_live_enabled=legacy_typed_live_enabled,
+        )
+        self.typed_event_scene_live_enabled = (
+            self.typed_event_scene_recall_mode != "shadow"
         )
         self.typed_event_scene_live_max_cards = max(
             1,
@@ -1036,6 +1058,7 @@ class GatewayService:
                     "gateway_live_injection_enabled": False,
                 },
                 "typed_event_scene_recall": {
+                    "mode": self.typed_event_scene_recall_mode,
                     "live_injection_enabled": self.typed_event_scene_live_enabled,
                     "max_cards": self.typed_event_scene_live_max_cards,
                     "arc_narrative_body_injection_enabled": False,
@@ -14894,6 +14917,63 @@ class GatewayService:
             ),
         }
 
+    def _typed_live_mode_gate(
+        self,
+        scope: dict[str, Any],
+        surface_gate: dict[str, Any],
+    ) -> dict[str, Any]:
+        mode = str(
+            getattr(self, "typed_event_scene_recall_mode", "") or ""
+        ).strip().lower()
+        if mode not in TYPED_RECALL_MODES:
+            mode = (
+                "full_live"
+                if getattr(self, "typed_event_scene_live_enabled", False)
+                else "shadow"
+            )
+
+        intent = str(scope.get("intent") or "none").strip().lower()
+        operator = str(scope.get("operator") or "none").strip().lower()
+        has_arc_scope = bool(surface_gate.get("has_arc_scope"))
+        has_scoped_detail_intent = bool(
+            has_arc_scope
+            and (
+                intent not in {"", "none", "entity_only"}
+                or operator not in {"", "none", "scope_only"}
+                or surface_gate.get("matched_detail_markers")
+            )
+        )
+        has_explicit_recall = bool(surface_gate.get("has_explicit_recall"))
+        has_memory_backed_detail = bool(surface_gate.get("has_memory_backed_detail"))
+        guarded_live_allowed = bool(
+            has_explicit_recall
+            or has_scoped_detail_intent
+            or has_memory_backed_detail
+        )
+        if has_explicit_recall:
+            reason = "explicit_recall"
+        elif has_scoped_detail_intent:
+            reason = "scoped_detail"
+        elif has_memory_backed_detail:
+            reason = "memory_backed_entity_detail"
+        else:
+            reason = "global_semantic_without_guarded_intent"
+        return {
+            "mode": mode,
+            "guard_applied": mode == "guarded_live",
+            "guarded_live_allowed": guarded_live_allowed,
+            "actual_live_allowed": bool(
+                mode == "full_live"
+                or (mode == "guarded_live" and guarded_live_allowed)
+            ),
+            "reason": reason,
+            "has_explicit_recall": has_explicit_recall,
+            "has_scoped_detail_intent": has_scoped_detail_intent,
+            "has_memory_backed_detail": has_memory_backed_detail,
+            "intent": intent,
+            "operator": operator,
+        }
+
     def _seed_typed_event_scene_observation(
         self,
         query: str,
@@ -14917,6 +14997,9 @@ class GatewayService:
             "simulation_only": True,
             "decision_applied": False,
             "live_injection_enabled": False,
+            "live_mode": str(
+                getattr(self, "typed_event_scene_recall_mode", "shadow") or "shadow"
+            ),
             "runs_after_response": True,
         }
         semantic_recall_debug["_typed_event_scene_observation_candidate"] = candidate_result
@@ -15037,6 +15120,15 @@ class GatewayService:
         simulation_only: bool = False,
         candidate_result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        live_mode = str(
+            getattr(self, "typed_event_scene_recall_mode", "") or ""
+        ).strip().lower()
+        if live_mode not in TYPED_RECALL_MODES:
+            live_mode = (
+                "full_live"
+                if getattr(self, "typed_event_scene_live_enabled", False)
+                else "shadow"
+            )
         empty = {
             "status": "disabled",
             "context": "",
@@ -15047,6 +15139,7 @@ class GatewayService:
             "simulation_only": simulation_only,
             "decision_applied": False,
             "live_injection_enabled": False,
+            "live_mode": live_mode,
         }
         if (
             not simulation_only
@@ -15090,6 +15183,7 @@ class GatewayService:
                 if isinstance(row, dict)
             ],
         )
+        live_mode_gate = self._typed_live_mode_gate(scope, surface_gate)
         if surface_gate.get("applied"):
             return {
                 **empty,
@@ -15097,6 +15191,23 @@ class GatewayService:
                 "reason": "daily_surface_without_memory_intent",
                 "entity_scope": scope,
                 "surface_reranker_gate": surface_gate,
+                "live_mode_gate": live_mode_gate,
+                "candidate_count": len(candidate_result.get("candidates") or []),
+                "narrative_body_included": False,
+                "raw_source_query_enabled": False,
+            }
+        if (
+            not simulation_only
+            and live_mode_gate.get("guard_applied")
+            and not live_mode_gate.get("actual_live_allowed")
+        ):
+            return {
+                **empty,
+                "status": "not_retrieved",
+                "reason": "guarded_live_not_allowed",
+                "entity_scope": scope,
+                "surface_reranker_gate": surface_gate,
+                "live_mode_gate": live_mode_gate,
                 "candidate_count": len(candidate_result.get("candidates") or []),
                 "narrative_body_included": False,
                 "raw_source_query_enabled": False,
@@ -15287,6 +15398,7 @@ class GatewayService:
             },
             "entity_scope": scope,
             "surface_reranker_gate": surface_gate,
+            "live_mode_gate": live_mode_gate,
             "candidate_count": len(candidates),
             "excluded_event_refs_by_recallable": excluded_event_refs_by_recallable,
             "narrative_body_included": False,
@@ -15294,6 +15406,7 @@ class GatewayService:
             "simulation_only": simulation_only,
             "decision_applied": bool(applied and not simulation_only),
             "live_injection_enabled": bool(applied and not simulation_only),
+            "live_mode": live_mode,
         }
 
     @staticmethod

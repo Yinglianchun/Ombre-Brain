@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from gateway import GatewayService
+from gateway import GatewayService, normalize_typed_recall_mode
 from gateway_state import GatewayStateStore
 
 
@@ -64,8 +64,12 @@ def candidate(owner_kind: str, owner_id: str, *, with_arc: bool) -> dict:
 
 
 async def main() -> None:
+    assert normalize_typed_recall_mode(None) == "shadow"
+    assert normalize_typed_recall_mode(None, legacy_live_enabled=True) == "full_live"
+    assert normalize_typed_recall_mode("guarded_live") == "guarded_live"
     with tempfile.TemporaryDirectory() as directory:
         service = GatewayService.__new__(GatewayService)
+        service.typed_event_scene_recall_mode = "full_live"
         service.typed_event_scene_live_enabled = True
         service.typed_event_scene_live_max_cards = 2
         service.state_store = GatewayStateStore(str(Path(directory) / "gateway-state.db"))
@@ -228,6 +232,7 @@ async def main() -> None:
         assert other_session["menus_included"] == ["work:spy"], other_session
 
         service.typed_event_scene_live_enabled = False
+        service.typed_event_scene_recall_mode = "shadow"
         simulation_preview = await service._typed_event_scene_live_context(
             "spy detail",
             "session-simulation",
@@ -291,14 +296,19 @@ async def main() -> None:
         assert stored_observation["decision_applied"] is False
         assert stored_observation["live_injection_enabled"] is False
         service.typed_event_scene_live_enabled = True
+        service.typed_event_scene_recall_mode = "guarded_live"
 
+        reranker_calls_before_guarded_free = service.reranker_engine.calls
         free = await service._typed_event_scene_live_context(
             "free detail",
             "session-a",
             [0.1],
         )
-        assert "可能是你的相关记忆，若无关可忽略" in free["context"], free
-        assert "[arc_materials" not in free["context"], free
+        assert free["status"] == "not_retrieved", free
+        assert free["reason"] == "guarded_live_not_allowed", free
+        assert free["live_mode_gate"]["guard_applied"] is True, free
+        assert free["live_mode_gate"]["guarded_live_allowed"] is False, free
+        assert service.reranker_engine.calls == reranker_calls_before_guarded_free, free
 
         daily_semantic = {
             "route": "present_chitchat",
@@ -445,6 +455,7 @@ async def main() -> None:
         assert scoped_surface["surface_reranker_gate"]["has_arc_scope"] is True, scoped_surface
         assert service.reranker_engine.calls == reranker_calls_before_daily + 5, scoped_surface
 
+        service.typed_event_scene_recall_mode = "full_live"
         gated = await service._typed_event_scene_live_context(
             "gated",
             "session-a",

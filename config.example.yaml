@@ -182,7 +182,7 @@ passage_shadow:
 # Uses the rebuildable passage/entity projections above. Arc prose and raw
 # dialogue remain pull-only even when this is enabled.
 typed_recall:
-  live_injection_enabled: false
+  mode: shadow                    # shadow | guarded_live | full_live
   max_cards: 2
 
 cue_passage_shadow:

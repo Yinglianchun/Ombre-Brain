@@ -37,6 +37,13 @@ const normalized = normalizeTypedRecallObservation({
     simulation_only: true,
     decision_applied: false,
     live_injection_enabled: false,
+    live_mode: "guarded_live",
+    live_mode_gate: {
+      mode: "guarded_live",
+      guard_applied: true,
+      guarded_live_allowed: true,
+      reason: "memory_backed_entity_detail",
+    },
     runs_after_response: true,
   },
 });
@@ -47,7 +54,24 @@ assert.equal(normalized.candidates[0].selected, true);
 assert.equal(normalized.candidates[1].selected, false);
 assert.deepEqual(normalized.actualInjectedIds, ["legacy-scene"]);
 assert.equal(normalized.candidateTimingMs, 7);
+assert.equal(normalized.liveMode, "guarded_live");
+assert.equal(normalized.guardApplied, true);
+assert.equal(normalized.guardedLiveAllowed, true);
 assert.equal(hasTypedExpectedMatch({ typedObservation: normalized }), true);
+
+const guardedBlocked = normalizeTypedRecallObservation({
+  typed_event_scene_observation: {
+    status: "would_inject",
+    selected_refs: ["scene:scene_other"],
+    live_mode_gate: {
+      mode: "guarded_live",
+      guard_applied: true,
+      guarded_live_allowed: false,
+      reason: "global_semantic_without_guarded_intent",
+    },
+  },
+});
+assert.equal(hasTypedExpectedMatch({ typedObservation: guardedBlocked }), false);
 
 const pending = normalizeTypedRecallObservation({
   typed_event_scene_observation: {
