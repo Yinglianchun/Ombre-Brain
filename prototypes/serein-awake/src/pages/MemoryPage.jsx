@@ -32,6 +32,7 @@ import {
 import { MarkdownProjection } from "../components/MarkdownProjection.jsx";
 import { SceneCueEditor } from "../components/SceneCueEditor.jsx";
 import { SceneEvidenceEditor } from "../components/SceneEvidenceEditor.jsx";
+import { compareFactEventsByEnd, factEventTimeLabel } from "../utils/factEventTime.js";
 
 const relationLabels = {
   continues: {
@@ -278,9 +279,7 @@ function FactEventDetail({ item, onClose, onRevised, onStatusChanged, onDeleted 
       setMessage(error.message || "永久删除失败");
     }
   };
-  const timeLabel = item.local_start_time === item.local_end_time
-    ? item.local_start_time
-    : `${item.local_start_time}–${item.local_end_time}`;
+  const timeLabel = factEventTimeLabel(item);
 
   return (
     <div className="scene-detail__content fact-event-detail" key={item.item_id}>
@@ -289,7 +288,7 @@ function FactEventDetail({ item, onClose, onRevised, onStatusChanged, onDeleted 
       </button>
       <header className="scene-detail__header">
         <div className="scene-detail__header-top">
-          <time dateTime={item.local_date}>{item.local_date} · {timeLabel}</time>
+          <time dateTime={`${item.local_date}T${item.local_start_time}`}>{timeLabel}</time>
           <div className="scene-detail__edit-actions">
             {editing ? (
               <>
@@ -611,7 +610,7 @@ export function MemoryPage() {
       const matchesView = view === "archived" ? item.status === "archived" : item.status === "active";
       const haystack = `${item.title || ""} ${item.body || ""}`.toLocaleLowerCase("zh-CN");
       return matchesView && (!normalizedQuery || haystack.includes(normalizedQuery));
-    });
+    }).sort(compareFactEventsByEnd);
   }, [factEventSearch, factEvents, memoryType, query, view]);
   const factEventSearchIsCurrent = memoryType !== "scene"
     && Boolean(query.trim())
@@ -1221,14 +1220,12 @@ export function MemoryPage() {
             <ol className="scene-timeline fact-event-timeline">
               {activeFactEvents.map((item, index) => {
                 const isSelected = selectedFactEventId === item.item_id;
-                const timeLabel = item.local_start_time === item.local_end_time
-                  ? item.local_start_time
-                  : `${item.local_start_time}–${item.local_end_time}`;
+                const timeLabel = factEventTimeLabel(item);
                 return (
                   <li className={`scene-entry${isSelected ? " is-selected" : ""}`} key={item.item_id} style={{ "--scene-index": index }}>
                     <span className="scene-entry__marker" aria-hidden="true" />
                     <button className="scene-entry__button" type="button" aria-pressed={isSelected} aria-controls="scene-detail" onClick={() => openFactEvent(item)}>
-                      <time dateTime={item.local_date}>{item.local_date} · {timeLabel}</time>
+                      <time dateTime={`${item.local_date}T${item.local_start_time}`}>{timeLabel}</time>
                       {item.item_type === "event" ? (
                         <span className="scene-entry__title"><strong>{item.title}</strong></span>
                       ) : null}
