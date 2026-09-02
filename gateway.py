@@ -3160,6 +3160,8 @@ class GatewayService:
                 ):
                     debug.pop(key, None)
             response["debug"] = {**debug, **minimal_debug}
+        if record_hook_injection and recalled_ids:
+            self._record_hook_recall_injection(session_id, recalled_ids)
         return JSONResponse(response)
 
     async def handle_recall_eval_debug(self, request: Request) -> JSONResponse:
@@ -10450,6 +10452,21 @@ class GatewayService:
             kept.append(bucket)
         return kept, suppressed
 
+    def _filter_session_injected_typed_rows(
+        self,
+        session_id: str,
+        rows: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        kept: list[dict[str, Any]] = []
+        suppressed_refs: list[str] = []
+        for row in rows or []:
+            ref = self._typed_owner_ref(row)
+            if ref and self._bucket_cooldown_active(session_id, ref):
+                suppressed_refs.append(ref)
+                continue
+            kept.append(row)
+        return kept, suppressed_refs
+
     def _filter_session_hard_excluded_bucket_items(
         self,
         query: str,
@@ -15707,6 +15724,20 @@ class GatewayService:
             selected_rows = [
                 row for row in candidates if self._typed_owner_ref(row) in selected_set
             ][:live_max_cards]
+        pre_cooldown_selected_refs = [
+            self._typed_owner_ref(row)
+            for row in selected_rows
+            if self._typed_owner_ref(row)
+        ]
+        cooldown_suppressed_refs: list[str] = []
+        if not simulation_only:
+            selected_rows, cooldown_suppressed_refs = (
+                self._filter_session_injected_typed_rows(session_id, selected_rows)
+            )
+            suppressed_ref_set = set(cooldown_suppressed_refs)
+            selected_refs = [
+                ref for ref in selected_refs if ref not in suppressed_ref_set
+            ]
         excluded = {str(value) for value in (excluded_scene_ids or set()) if str(value)}
         scope_arc_key = str((scope.get("scope_anchor") or {}).get("arc_key") or "")
 
@@ -15820,14 +15851,24 @@ class GatewayService:
                 if applied
                 else "not_admitted"
             ),
+            "reason": (
+                "session_already_injected"
+                if cooldown_suppressed_refs and not applied
+                else ""
+            ),
             "context": "\n\n".join(context_parts),
             "cards": cards,
             "selected_refs": selected_refs,
+            "pre_cooldown_selected_refs": pre_cooldown_selected_refs,
+            "cooldown_suppressed_refs": cooldown_suppressed_refs,
             "menus_included": menus_included,
             "menus_suppressed": menus_suppressed,
             "menu_fingerprints": menu_fingerprints,
             "admission": {
                 **admission,
+                "selected_refs": selected_refs,
+                "pre_cooldown_selected_refs": pre_cooldown_selected_refs,
+                "cooldown_suppressed_refs": cooldown_suppressed_refs,
                 "decision_applied": bool(applied and not simulation_only),
                 "live_injection_enabled": bool(applied and not simulation_only),
             },

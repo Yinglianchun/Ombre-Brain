@@ -45,6 +45,18 @@ with tempfile.TemporaryDirectory() as directory:
     assert service._bucket_cooldown_active("session-a", "new-card") is False
     assert service._bucket_cooldown_active("session-b", "seen-card") is False
 
+    store.record_success("session-a", ["event:seen-event"])
+    selected_typed = [
+        {"owner_kind": "event", "owner_id": "seen-event"},
+        {"owner_kind": "scene", "owner_id": "new-scene"},
+    ]
+    kept_typed, suppressed_typed = service._filter_session_injected_typed_rows(
+        "session-a",
+        selected_typed,
+    )
+    assert [service._typed_owner_ref(row) for row in kept_typed] == ["scene:new-scene"]
+    assert suppressed_typed == ["event:seen-event"]
+
     async def candidate_items(*_args, **_kwargs):
         return [
             {"bucket": {"id": "seen-card"}},
@@ -68,5 +80,23 @@ with tempfile.TemporaryDirectory() as directory:
     )
     assert [item["id"] for item in selected_after_dedupe] == ["new-card"]
     assert "unrelated-backfill" not in {item["id"] for item in selected_after_dedupe}
+
+with tempfile.TemporaryDirectory() as directory:
+    store = GatewayStateStore(str(Path(directory) / "gateway-state-prune.db"))
+    session_a_ids = [f"event:a-{index}" for index in range(150)]
+    session_b_ids = [f"scene:b-{index}" for index in range(150)]
+    store.record_success("session-a", session_a_ids)
+    store.record_success("session-b", session_b_ids)
+
+    # 300 rows alone are insufficient: at least three sessions must exist.
+    assert store.get_session_bucket_ids("session-a") == set(session_a_ids)
+    assert store.get_session_bucket_ids("session-b") == set(session_b_ids)
+
+    store.record_success("session-c", ["event:current"])
+
+    # Once both limits are met, preserve only the session that triggered the write.
+    assert store.get_session_bucket_ids("session-a") == set()
+    assert store.get_session_bucket_ids("session-b") == set()
+    assert store.get_session_bucket_ids("session-c") == {"event:current"}
 
 print("session recall cooldown verification passed")

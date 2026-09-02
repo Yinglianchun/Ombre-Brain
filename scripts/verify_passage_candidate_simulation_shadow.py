@@ -712,10 +712,12 @@ async def verify_full_handler_uses_only_typed_pool() -> None:
         typed_result: dict,
         *,
         semantic_debug: dict | None = None,
-    ) -> tuple[dict, int]:
+        record_hook_injection: bool = False,
+    ) -> tuple[dict, int, list[tuple[str, list[str]]]]:
         handler = GatewayService.__new__(GatewayService)
         handler.typed_event_scene_live_enabled = True
         candidate_calls = 0
+        recorded_injections: list[tuple[str, list[str]]] = []
 
         def fake_candidates(_query, _vector):
             nonlocal candidate_calls
@@ -743,6 +745,11 @@ async def verify_full_handler_uses_only_typed_pool() -> None:
         handler._render_hook_recall_full_additional_context = lambda context: context
         handler._apply_passage_weak_candidate_query_view_shadow = no_op
         handler._attach_reviewed_scene_onehop_shadow = no_op
+        handler._record_hook_recall_injection = (
+            lambda session_id, recalled_ids: recorded_injections.append(
+                (session_id, list(recalled_ids))
+            )
+        )
 
         response = await handler._handle_hook_recall_full(
             query=query,
@@ -757,10 +764,11 @@ async def verify_full_handler_uses_only_typed_pool() -> None:
             include_debug=True,
             include_recent_context=False,
             semantic_recall_result=(semantic_debug or {}, [0.25, 0.75]),
+            record_hook_injection=record_hook_injection,
         )
-        return json.loads(response.body), candidate_calls
+        return json.loads(response.body), candidate_calls, recorded_injections
 
-    selected, selected_candidate_calls = await run_case(
+    selected, selected_candidate_calls, selected_recorded = await run_case(
         "记得巧克蕾是谁吗",
         {
             "status": "injected",
@@ -777,14 +785,18 @@ async def verify_full_handler_uses_only_typed_pool() -> None:
             "menus_included": [],
             "menus_suppressed": [],
         },
+        record_hook_injection=True,
     )
     assert selected_candidate_calls == 1
     assert selected["recalled_ids"] == ["event:event-a"]
     assert selected["cards"][0]["source_kind"] == "event"
     assert selected["debug"]["injected_bucket_ids"] == ["event:event-a"]
     assert selected["debug"]["hook_timing_debug"]["legacy_pool"] == "removed"
+    assert selected_recorded == [
+        ("typed-first-记得巧克蕾是谁吗", ["event:event-a"])
+    ]
 
-    daily, daily_candidate_calls = await run_case(
+    daily, daily_candidate_calls, daily_recorded = await run_case(
         "晚安老公",
         {
             "status": "not_retrieved",
@@ -807,8 +819,9 @@ async def verify_full_handler_uses_only_typed_pool() -> None:
     assert daily["debug"]["hook_timing_debug"]["legacy_pool"] == "removed"
     assert daily["debug"]["hook_timing_debug"]["steps_ms"]["typed_candidate"] == 0
     assert daily["debug"]["semantic_recall_debug"]["typed_pre_candidate_gate"]["applied"] is True
+    assert daily_recorded == []
 
-    entity_only, entity_candidate_calls = await run_case(
+    entity_only, entity_candidate_calls, entity_only_recorded = await run_case(
         "阿尼亚",
         {
             "status": "not_retrieved",
@@ -823,8 +836,9 @@ async def verify_full_handler_uses_only_typed_pool() -> None:
     assert entity_candidate_calls == 1
     assert entity_only["recalled_ids"] == []
     assert entity_only["debug"]["hook_timing_debug"]["legacy_pool"] == "removed"
+    assert entity_only_recorded == []
 
-    empty, empty_candidate_calls = await run_case(
+    empty, empty_candidate_calls, empty_recorded = await run_case(
         "Lumos后来怎么样了",
         {
             "status": "not_admitted",
@@ -838,6 +852,7 @@ async def verify_full_handler_uses_only_typed_pool() -> None:
     assert empty_candidate_calls == 1
     assert empty["recalled_ids"] == []
     assert empty["debug"]["hook_timing_debug"]["legacy_pool"] == "removed"
+    assert empty_recorded == []
 
 
 async def verify_mutation_refresh_queue() -> None:

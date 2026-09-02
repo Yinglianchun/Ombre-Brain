@@ -12,6 +12,9 @@ class GatewayStateStore:
     per session, so cooldown and recent-round skipping can work.
     """
 
+    INJECTED_BUCKET_PRUNE_THRESHOLD = 300
+    INJECTED_BUCKET_PRUNE_MIN_SESSIONS = 3
+
     def __init__(self, db_path: str):
         self.db_path = db_path
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
@@ -716,9 +719,34 @@ class GatewayStateStore:
                 """,
                 (session_id, next_round, bucket_id, completed_iso),
             )
+        if bucket_ids:
+            self._prune_injected_buckets(conn, keep_session_id=session_id)
         conn.commit()
         conn.close()
         return next_round
+
+    def _prune_injected_buckets(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        keep_session_id: str,
+    ) -> None:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS row_count,
+                   COUNT(DISTINCT session_id) AS session_count
+            FROM injected_buckets
+            """
+        ).fetchone()
+        if (
+            int(row["row_count"] or 0) < self.INJECTED_BUCKET_PRUNE_THRESHOLD
+            or int(row["session_count"] or 0) < self.INJECTED_BUCKET_PRUNE_MIN_SESSIONS
+        ):
+            return
+        conn.execute(
+            "DELETE FROM injected_buckets WHERE session_id <> ?",
+            (keep_session_id,),
+        )
 
     def get_current_round(self, session_id: str) -> int:
         conn = self._connect()

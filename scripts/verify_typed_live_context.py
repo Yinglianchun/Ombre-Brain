@@ -241,6 +241,7 @@ async def main() -> None:
         assert "read_arc_materials" in first["context"], first
         assert first["menus_included"] == ["work:spy"], first
         assert "叙事正文" not in first["context"], first
+        service._record_hook_recall_injection("session-a", first["selected_refs"])
         service.state_store.record_arc_material_menu_injection(
             "session-a",
             "work:spy",
@@ -252,9 +253,15 @@ async def main() -> None:
             "session-a",
             [0.1],
         )
-        assert "我们一起看到第140话" in second["context"], second
+        assert second["status"] == "not_admitted", second
+        assert second["reason"] == "session_already_injected", second
+        assert second["context"] == "", second
+        assert second["cards"] == [], second
+        assert second["selected_refs"] == [], second
+        assert second["pre_cooldown_selected_refs"] == ["event:event-spy"], second
+        assert second["cooldown_suppressed_refs"] == ["event:event-spy"], second
         assert "[arc_materials key=work:spy]" not in second["context"], second
-        assert second["menus_suppressed"] == ["work:spy"], second
+        assert second["menus_suppressed"] == [], second
 
         other_session = await service._typed_event_scene_live_context(
             "spy detail",
@@ -262,6 +269,7 @@ async def main() -> None:
             [0.1],
         )
         assert other_session["menus_included"] == ["work:spy"], other_session
+        assert other_session["selected_refs"] == ["event:event-spy"], other_session
 
         service.typed_event_scene_live_enabled = False
         service.typed_event_scene_recall_mode = "shadow"
@@ -273,6 +281,7 @@ async def main() -> None:
         )
         assert simulation_preview["status"] == "would_inject", simulation_preview
         assert simulation_preview["selected_refs"] == ["event:event-spy"], simulation_preview
+        assert simulation_preview["cooldown_suppressed_refs"] == [], simulation_preview
         assert simulation_preview["menus_included"] == ["work:spy"], simulation_preview
         assert simulation_preview["simulation_only"] is True, simulation_preview
         assert simulation_preview["decision_applied"] is False, simulation_preview
