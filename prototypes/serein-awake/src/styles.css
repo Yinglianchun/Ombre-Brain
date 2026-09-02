@@ -3430,6 +3430,48 @@ label:has(input:focus-visible) {
   font-size: 10px;
   line-height: 1.55;
 }
+.narrative-editor__materials li button,
+.narrative-editor__material-add button {
+  justify-self: start;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: #899590;
+  font-family: var(--font-editorial-cjk);
+  font-size: 9px;
+  cursor: pointer;
+}
+.narrative-editor__material-add {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(67, 84, 78, 0.1);
+}
+.narrative-editor__material-add select,
+.narrative-editor__material-add input {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid rgba(67, 84, 78, 0.16);
+  background: #fff;
+  color: #51605a;
+  font-family: var(--font-editorial-cjk);
+  font-size: 9px;
+}
+.narrative-editor__material-delta {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+  padding: 11px;
+  background: rgba(239, 243, 241, 0.7);
+  color: #66756f;
+  font-family: var(--font-editorial-cjk);
+  font-size: 9px;
+  overflow-wrap: anywhere;
+}
+.narrative-editor__material-delta strong { font-weight: 500; }
+.narrative-editor__material-delta .is-added { color: #557567; }
+.narrative-editor__material-delta .is-removed { color: #956c63; }
 .narrative-editor__diff {
   border-top: 1px solid rgba(67, 84, 78, 0.12);
   border-bottom: 1px solid rgba(67, 84, 78, 0.12);

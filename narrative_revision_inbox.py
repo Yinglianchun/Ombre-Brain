@@ -393,12 +393,15 @@ class NarrativeRevisionInbox:
             }
             for candidate in candidates:
                 event_ids = _string_list(candidate.get("source_event_ids"), limit=40)
+                scene_ids = _string_list(candidate.get("source_scene_ids"), limit=40)
                 title = str(candidate.get("title") or "").strip()
                 reason = str(candidate.get("reason") or "").strip()
-                if len(event_ids) < 2 or not title or not reason:
+                if len(event_ids) + len(scene_ids) < 2 or not title or not reason:
                     continue
-                joined_ids = "\n".join(sorted(event_ids))
-                proposal_id = self._proposal_id("new_roll", "event_group", joined_ids, _sha256(title))
+                joined_ids = "\n".join(
+                    sorted([*(f"event:{value}" for value in event_ids), *(f"scene:{value}" for value in scene_ids)])
+                )
+                proposal_id = self._proposal_id("new_roll", "material_group", joined_ids, _sha256(title))
                 if proposal_id in known:
                     continue
                 candidate_id = f"candidate_{proposal_id[5:]}"
@@ -409,14 +412,17 @@ class NarrativeRevisionInbox:
                     "narrative_title": title,
                     "baseline_revision": 0,
                     "baseline_document_sha256": "",
-                    "source_type": "event_group",
+                    "source_type": "material_group",
                     "source_id": candidate_id,
                     "source_date": str(candidate.get("latest_date") or ""),
                     "source_sha256": _sha256(joined_ids),
                     "source_title": title,
                     "source_excerpt": _excerpt(reason),
-                    "source_scene_ids": [],
+                    "source_scene_ids": scene_ids,
                     "source_event_ids": event_ids,
+                    "seed_source_type": str(candidate.get("seed_source_type") or ""),
+                    "seed_source_id": str(candidate.get("seed_source_id") or ""),
+                    "matched_keywords": _string_list(candidate.get("matched_keywords"), limit=16),
                     "matched_anchors": [
                         {
                             "reason": "external_model_grouping",
@@ -475,6 +481,39 @@ class NarrativeRevisionInbox:
                     and str(item.get("status") or "") == "pending"
                     and str(item.get("narrative_id") or "") not in active
                 ):
+                    removed.append(str(item.get("proposal_id") or ""))
+                    continue
+                kept.append(item)
+            if removed:
+                raw["items"] = kept
+                self._save(raw)
+        return removed
+
+    def reconcile_bound_new_roll_materials(
+        self,
+        *,
+        bound_event_ids: set[str],
+        bound_scene_ids: set[str],
+    ) -> list[str]:
+        """Drop pending new-roll hints as soon as any proposed material is bound."""
+
+        safe_events = {str(value or "").strip() for value in bound_event_ids if str(value or "").strip()}
+        safe_scenes = {str(value or "").strip() for value in bound_scene_ids if str(value or "").strip()}
+        removed: list[str] = []
+        with self._lock:
+            raw = self._load()
+            kept = []
+            for item in raw["items"]:
+                is_bound = (
+                    isinstance(item, dict)
+                    and str(item.get("proposal_kind") or "") == "new_roll_candidate"
+                    and str(item.get("status") or "") == "pending"
+                    and (
+                        bool(safe_events.intersection(_string_list(item.get("source_event_ids"), limit=80)))
+                        or bool(safe_scenes.intersection(_string_list(item.get("source_scene_ids"), limit=80)))
+                    )
+                )
+                if is_bound:
                     removed.append(str(item.get("proposal_id") or ""))
                     continue
                 kept.append(item)

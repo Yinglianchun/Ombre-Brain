@@ -10,7 +10,8 @@ import {
   normalizeEvidenceMessageId,
   normalizeEvidenceSearchQuery,
 } from "./server/sceneEvidenceBridge.mjs";
-import { runNarrativeCodexTask } from "./server/narrativeCodexRunner.mjs";
+import { narrativeBodyDiff, runNarrativeCodexTask } from "./server/narrativeCodexRunner.mjs";
+import { buildNarrativePreviewFingerprint } from "./server/narrativeMaterialPreview.mjs";
 
 const narrativeWriterRoleDir = fileURLToPath(new URL("./codex_agents/narrative_writer/", import.meta.url));
 
@@ -1341,9 +1342,9 @@ function sereinMemoryBridge() {
           return;
         }
         try {
-          const body = await readJsonBody(request, 32_000);
+          const body = await readJsonBody(request, 128_000);
           const narrativeId = String(body.narrativeId || "").trim();
-          const mode = body.mode === "update" ? "update" : body.mode === "rewrite" ? "rewrite" : "";
+          const mode = ["edit", "update", "rewrite"].includes(body.mode) ? body.mode : "";
           if (!/^[A-Za-z0-9_.:#-]{1,160}$/.test(narrativeId) || !mode) {
             response.statusCode = 400;
             response.end(JSON.stringify({ status: "invalid", reason: "invalid_preview_request", writes_performed: [] }));
@@ -1356,6 +1357,7 @@ function sereinMemoryBridge() {
               mode,
               expected_revision: Number.parseInt(body.expectedRevision, 10) || undefined,
               expected_document_sha256: String(body.expectedDocumentSha256 || "").trim(),
+              proposed_material_ids: body.proposedMaterialIds,
             },
           });
           if (!upstream.ok) {
@@ -1364,16 +1366,48 @@ function sereinMemoryBridge() {
             return;
           }
           const input = upstream.payload;
-          const preview = await runNarrativeCodexTask({
-            mode,
-            title: input.title,
-            currentBody: input.current_body,
-            materials: input.materials,
-            roleDir: narrativeWriterRoleDir,
+          const preview = mode === "edit"
+            ? {
+                status: "ok",
+                evidence_sufficient: true,
+                body: String(body.proposedBody || "").trim(),
+                issues: [],
+                diff: narrativeBodyDiff(input.current_body, String(body.proposedBody || "").trim()),
+                mode,
+                provider: "host_validation_only",
+                publication_status: "not_published",
+                writes_performed: [],
+              }
+            : await runNarrativeCodexTask({
+                mode,
+                title: input.title,
+                currentBody: input.current_body,
+                materials: input.materials,
+                roleDir: narrativeWriterRoleDir,
+              });
+          if (!preview.body) {
+            response.statusCode = mode === "edit" ? 400 : 200;
+            response.end(JSON.stringify({
+              ...preview,
+              narrative_id: narrativeId,
+              base_revision: input.base_revision,
+              base_document_sha256: input.base_document_sha256,
+              material_counts: input.material_counts,
+              current_material_ids: input.current_material_ids,
+              proposed_material_ids: input.proposed_material_ids,
+              material_delta: input.material_delta,
+              material_snapshot_sha256: input.material_snapshot_sha256,
+              writes_performed: [],
+            }));
+            return;
+          }
+          const fingerprint = buildNarrativePreviewFingerprint({
+            narrativeId,
+            revision: input.base_revision,
+            documentSha256: input.base_document_sha256,
+            body: preview.body,
+            materialSnapshotSha256: input.material_snapshot_sha256,
           });
-          const fingerprint = createHash("sha256")
-            .update(JSON.stringify({ mode, title: input.title, materials: input.materials }))
-            .digest("hex");
           response.statusCode = 200;
           response.end(JSON.stringify({
             ...preview,
@@ -1381,6 +1415,10 @@ function sereinMemoryBridge() {
             base_revision: input.base_revision,
             base_document_sha256: input.base_document_sha256,
             material_counts: input.material_counts,
+            current_material_ids: input.current_material_ids,
+            proposed_material_ids: input.proposed_material_ids,
+            material_delta: input.material_delta,
+            material_snapshot_sha256: input.material_snapshot_sha256,
             preview_fingerprint: fingerprint,
           }));
         } catch (error) {
@@ -1418,6 +1456,9 @@ function sereinMemoryBridge() {
               body: narrativeBody,
               expected_revision: Number.parseInt(body.expectedRevision, 10),
               expected_document_sha256: String(body.expectedDocumentSha256 || "").trim(),
+              proposed_material_ids: body.proposedMaterialIds,
+              expected_material_snapshot_sha256: String(body.expectedMaterialSnapshotSha256 || "").trim(),
+              preview_fingerprint: String(body.previewFingerprint || "").trim(),
             },
           });
           response.statusCode = upstream.status;

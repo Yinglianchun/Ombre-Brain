@@ -6,17 +6,15 @@
 
 ### 添加材料
 
-- 绑定已有 Event、Scene、Diary、Window Shadow 或补充材料；
-- 支持从用户本地上传文件；
-- 只修改材料目录，不调用 Writer，不改标题与正文；
-- 显示哪些材料尚未进入当前正文 revision。
-
-本地文件保留原文件，并记录稳定 material ID、原文件名、MIME、大小和内容 hash。可可靠提取的文字进入 Writer 阅读材料；无法提取时明确标记，不生成或猜测文件内容。上传文件不取得 Event 或聊天原文 ownership。
+- 编辑器可按精确 ID 增加或移除已有 Event、Scene、Diary、Darkroom；
+- 材料 proposal 与正文一起进入预览，明确显示完整目标 membership 以及 added / removed；
+- 删除只改变 Narrative membership，不删除或改写 canonical Event、Scene、Diary、Darkroom；
+- 本地文件上传仍未接入，UI 不伪装这项能力可用。
 
 ### 保存正文
 
 - 保存用户在编辑器中的手动修改；
-- 不添加或移除材料；
+- 材料选择不变时精确保留原 membership；
 - 不调用 Writer。
 
 ### 更新叙事卷
@@ -35,18 +33,19 @@
 
 - 调用 Writer 前冻结 mode、Narrative revision、材料 membership 与每份材料的 revision、fingerprint 或 content hash；
 - 重要内容优先物化绑定原文，不只把 Event 标题或旧正文摘要交给 Writer；
-- Writer 只能返回正文草稿和证据问题，不提供 membership、Event ownership 或 Arc 边界字段；
+- Writer 只能返回正文草稿和证据问题；membership proposal/delta 由 host 明确附在 preview 外层，不由 Writer 藏进正文；
 - 材料缺失、漂移、冲突或无法读取时停止生成预览；
-- preview 不写线上。用户确认后，才以 CAS 发布新的 Narrative revision；
+- preview 不写线上。用户确认后，才以 expected revision、document hash 与 preview fingerprint CAS 发布新的 Narrative revision；
+- 保存前重新读取目标 membership 的全部材料并核对 active 状态与内容快照；任何缺失、漂移或 fingerprint 不匹配都 fail closed；
 - 发布正文不得隐式添加、移除或替换材料。
 
 按钮、文件上传、diff、CAS、revision、材料核验和发布确认等工作流说明不进入 Writer prompt。
 
 ## 当前实现阶段
 
-当前实现已经包含 `update` / `rewrite` 的只读预览，以及正文手改后的 `save-body`：保存会创建新的 Narrative revision，并精确保留当前 membership，不调用 Writer。材料 membership 基线与本地文件上传仍在后续阶段接入；UI 不伪装这些能力已经可用。
+当前实现已经包含 `edit` / `update` / `rewrite` 的只读预览封印。UI 可为 Event、Scene、Diary、Darkroom 提出精确增删；预览显式返回目标 IDs、delta 与材料 snapshot hash。保存会 fresh-read 全部目标材料、复算 preview fingerprint，并在同一 revision 中写正文与 membership。只改正文时目标 IDs 默认为当前绑定，因此不会意外清空或扩张材料。本地文件上传仍在后续阶段接入。
 
-Writer 由 Serein 主机上的 Codex ephemeral 单次任务执行。`update` 使用 `gpt-5.6-terra`，`rewrite` 使用 `gpt-5.6-sol`，两者 reasoning effort 均为 `medium`。Host 显式读取 `prototypes/serein-awake/codex_agents/narrative_writer/AGENTS.md` 并注入冻结 prompt；动态任务只携带 mode、标题、当前正文（仅 update）和后端冻结的当前绑定材料。任务以 read-only sandbox、空临时目录、`--ignore-rules` 和 `--ephemeral` 运行，不调用工具、不创建或归档持久 Codex thread；完成后删除临时输入输出文件。
+Writer 由 Serein 主机上的 Codex ephemeral 单次任务执行。`update` 与 `rewrite` 都使用 `gpt-5.6-sol`，reasoning effort 为 `medium`。Host 显式读取 `prototypes/serein-awake/codex_agents/narrative_writer/AGENTS.md` 并注入冻结 prompt；动态任务只携带 mode、标题、当前正文（仅 update）和后端冻结的当前绑定材料。任务以 read-only sandbox、空临时目录、`--ignore-rules` 和 `--ephemeral` 运行，不调用工具、不创建或归档持久 Codex thread；完成后删除临时输入输出文件。
 
 这条链不会定时或随材料变化自动生成正文。只有用户点击“更新”或“重写”才会创建一次预览任务；预览仍然不写 Narrative registry。
 

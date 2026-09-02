@@ -175,6 +175,24 @@ def main() -> int:
         assert len(new_rolls) == 1
         assert new_rolls[0]["proposal_kind"] == "new_roll_candidate"
         assert new_rolls[0]["evidence_authority"] is False
+        mixed_rolls = inbox.consider_new_roll_candidates(
+            [{
+                "title": "共同观看",
+                "reason": "Event 与 Scene 共同支持一次观看线。",
+                "source_event_ids": ["event_c"],
+                "source_scene_ids": ["scene_c"],
+                "confidence": "medium",
+                "latest_date": "2026-08-02",
+            }],
+            model="external-test-model",
+        )
+        assert len(mixed_rolls) == 1
+        removed_bound = inbox.reconcile_bound_new_roll_materials(
+            bound_event_ids={"event_c"},
+            bound_scene_ids=set(),
+        )
+        assert removed_bound == [mixed_rolls[0]["proposal_id"]]
+        assert new_rolls[0]["proposal_id"] not in removed_bound
         inbox.record_scan({"external_model": "external-test-model", "narrative_writes_performed": []})
         assert inbox.list(status="all")["scan"]["external_model"] == "external-test-model"
 

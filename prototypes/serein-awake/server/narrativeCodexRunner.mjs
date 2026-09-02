@@ -16,11 +16,10 @@ const reviewKeys = [
   "identity_correct",
 ];
 
-export const narrativeModelForMode = (mode) => (
-  mode === "rewrite"
-    ? { model: "gpt-5.6-sol", reasoningEffort: "medium" }
-    : { model: "gpt-5.6-terra", reasoningEffort: "medium" }
-);
+export const narrativeModelForMode = (mode) => {
+  if (!new Set(["update", "rewrite"]).has(mode)) throw new Error("invalid_narrative_writer_mode");
+  return { model: "gpt-5.6-sol", reasoningEffort: "medium" };
+};
 
 export function buildNarrativeTaskPrompt({ mode, title, currentBody, materials, roleRules }) {
   if (!new Set(["update", "rewrite"]).has(mode)) throw new Error("invalid_narrative_writer_mode");

@@ -21,13 +21,14 @@ const review = {
 };
 
 assert.deepEqual(narrativeModelForMode("update"), {
-  model: "gpt-5.6-terra",
+  model: "gpt-5.6-sol",
   reasoningEffort: "medium",
 });
 assert.deepEqual(narrativeModelForMode("rewrite"), {
   model: "gpt-5.6-sol",
   reasoningEffort: "medium",
 });
+assert.throws(() => narrativeModelForMode("edit"), /invalid_narrative_writer_mode/);
 
 const codexArgs = narrativeCodexArgs({
   selection: narrativeModelForMode("update"),

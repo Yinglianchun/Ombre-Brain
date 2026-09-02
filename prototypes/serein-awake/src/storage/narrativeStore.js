@@ -84,6 +84,22 @@ const sourceTypeLabels = {
   darkroom: "暗房",
 };
 
+function materialIdsFromSources(sources = []) {
+  const ids = { event_ids: [], scene_ids: [], diary_ids: [], darkroom_ids: [] };
+  const keyByType = { event: "event_ids", scene: "scene_ids", diary: "diary_ids", darkroom: "darkroom_ids" };
+  for (const source of sources) {
+    const key = keyByType[source?.type || "scene"];
+    if (!key) continue;
+    const value = ["diary_ids", "darkroom_ids"].includes(key) ? Number(source.id) : String(source.id || "");
+    if (value && !ids[key].some((item) => String(item) === String(value))) ids[key].push(value);
+  }
+  return ids;
+}
+
+function withMaterialIds(roll) {
+  return roll?.materialIds ? roll : { ...roll, materialIds: materialIdsFromSources(roll?.sources) };
+}
+
 function projectSources(item, fallback) {
   const writtenNotes = new Map(parseSourceLedger(item.full_document).map((source) => [source.id, source]));
   const structured = Array.isArray(item.source_ledger) ? item.source_ledger : [];
@@ -139,6 +155,12 @@ function projectLiveRoll(item, index, fallback) {
     paragraphs: paragraphs.length ? paragraphs : fallback?.paragraphs || [],
     body: String(item.body || ""),
     sources,
+    materialIds: {
+      event_ids: (item.direct_linked_event_ids || item.linked_event_ids || []).map(String),
+      scene_ids: (item.linked_scene_ids || []).map(String),
+      diary_ids: (item.linked_diary_ids || []).map(Number),
+      darkroom_ids: (item.linked_darkroom_ids || []).map(Number),
+    },
     sceneNames: sources.length
       ? sources.map((source) => source.title)
       : fallback?.sceneNames || item.linked_scene_ids || [],
@@ -148,7 +170,7 @@ function projectLiveRoll(item, index, fallback) {
   };
 }
 
-export async function previewNarrativeRoll(roll, mode) {
+export async function previewNarrativeRoll(roll, mode, proposedMaterialIds, proposedBody = "") {
   const response = await fetch("/__serein/narrative-preview", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -157,6 +179,8 @@ export async function previewNarrativeRoll(roll, mode) {
       mode,
       expectedRevision: roll.revision,
       expectedDocumentSha256: roll.documentHash,
+      proposedMaterialIds,
+      proposedBody,
     }),
   });
   const payload = await response.json().catch(() => ({
@@ -172,7 +196,7 @@ export async function previewNarrativeRoll(roll, mode) {
   return payload;
 }
 
-export async function saveNarrativeRollBody(roll, body) {
+export async function saveNarrativeRollBody(roll, body, preview) {
   const response = await fetch("/__serein/narrative-save", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -181,6 +205,9 @@ export async function saveNarrativeRollBody(roll, body) {
       body,
       expectedRevision: roll.revision,
       expectedDocumentSha256: roll.documentHash,
+      proposedMaterialIds: preview.proposed_material_ids,
+      expectedMaterialSnapshotSha256: preview.material_snapshot_sha256,
+      previewFingerprint: preview.preview_fingerprint,
     }),
   });
   const payload = await response.json().catch(() => ({
@@ -202,10 +229,10 @@ export async function loadNarrativeRolls() {
       headers: { "Content-Type": "application/json" },
       body: "{}",
     });
-    if (!response.ok) return fallbackNarrativeRolls;
+    if (!response.ok) return fallbackNarrativeRolls.map(withMaterialIds);
     const payload = await response.json();
     if (payload?.status !== "ok" || !Array.isArray(payload.items) || !payload.items.length) {
-      return fallbackNarrativeRolls;
+      return fallbackNarrativeRolls.map(withMaterialIds);
     }
     const fallbackById = new Map(fallbackNarrativeRolls.map((roll) => [roll.id, roll]));
     return payload.items
@@ -214,10 +241,10 @@ export async function loadNarrativeRolls() {
         projectLiveRoll(item, index, fallbackById.get(item.narrative_id))
       ));
   } catch {
-    return fallbackNarrativeRolls;
+    return fallbackNarrativeRolls.map(withMaterialIds);
   }
 }
 
 export function readFallbackNarrativeRolls() {
-  return fallbackNarrativeRolls;
+  return fallbackNarrativeRolls.map(withMaterialIds);
 }

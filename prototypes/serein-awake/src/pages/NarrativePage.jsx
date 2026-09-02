@@ -62,6 +62,10 @@ export function NarrativePage() {
   const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
+  const [materialIds, setMaterialIds] = useState(null);
+  const [materialType, setMaterialType] = useState("event_ids");
+  const [materialIdInput, setMaterialIdInput] = useState("");
+  const [previewSeal, setPreviewSeal] = useState(null);
   const selectedRoll = useMemo(
     () => narrativeRolls.find((roll) => roll.id === selectedRollId) ?? null,
     [narrativeRolls, selectedRollId],
@@ -110,6 +114,8 @@ export function NarrativePage() {
     setPreviewMode("");
     setPreviewError("");
     setSaveMessage("");
+    setMaterialIds(null);
+    setPreviewSeal(null);
     transitionTo(() => setSelectedRollId(null));
   };
 
@@ -119,6 +125,8 @@ export function NarrativePage() {
     setPreviewMode("");
     setPreviewError("");
     setSaveMessage("");
+    setMaterialIds(selectedRoll?.materialIds || null);
+    setPreviewSeal(null);
     setEditorOpen(true);
   };
 
@@ -129,9 +137,11 @@ export function NarrativePage() {
     setPreviewMode("");
     setPreviewError("");
     setSaveMessage("");
+    setMaterialIds(null);
+    setPreviewSeal(null);
   };
 
-  const generatePreview = async (mode, targetRoll = selectedRoll) => {
+  const generatePreview = async (mode, targetRoll = selectedRoll, proposedBody = "") => {
     if (!targetRoll || previewing) return;
     setEditorOpen(true);
     setPreviewBody(targetRoll.body || targetRoll.paragraphs.join("\n\n"));
@@ -140,20 +150,26 @@ export function NarrativePage() {
     setPreviewing(true);
     setPreviewError("");
     setSaveMessage("");
+    setPreviewSeal(null);
     try {
-      const result = await previewNarrativeRoll(targetRoll, mode);
+      const targetMaterialIds = materialIds || targetRoll.materialIds;
+      const result = await previewNarrativeRoll(targetRoll, mode, targetMaterialIds, proposedBody);
       if (result.status === "insufficient") {
         setPreviewBody(targetRoll.body || targetRoll.paragraphs.join("\n\n"));
         setPreviewDiff("");
         setPreviewMode(mode);
         setPreviewError(result.issues?.join("；") || "当前绑定材料不足以生成可信正文。");
-        return;
+        return null;
       }
       setPreviewBody(result.body);
       setPreviewDiff(result.diff || "");
       setPreviewMode(mode);
+      setMaterialIds(result.proposed_material_ids);
+      setPreviewSeal(result);
+      return result;
     } catch (error) {
       setPreviewError(error.message || "没有生成这次预览。");
+      return null;
     } finally {
       setPreviewing(false);
     }
@@ -176,30 +192,34 @@ export function NarrativePage() {
 
   const saveBody = async () => {
     if (!selectedRoll || saving || previewing || !previewBody.trim()) return;
+    if (!previewSeal) {
+      const validation = await generatePreview("edit", selectedRoll, previewBody);
+      if (validation?.preview_fingerprint) {
+        setSaveMessage("正文与材料已经校验；请查看增删项，再确认保存。");
+      }
+      return;
+    }
+    if (!window.confirm("确认把这份正文与材料增删一起保存为新的 revision？")) return;
     setSaving(true);
     setPreviewError("");
     setSaveMessage("");
     try {
-      const result = await saveNarrativeRollBody(selectedRoll, previewBody);
+      const result = await saveNarrativeRollBody(selectedRoll, previewBody, previewSeal);
       const paragraphs = previewBody
         .replace(/\r\n?/g, "\n")
         .trim()
         .split(/\n\s*\n/)
         .map((paragraph) => paragraph.trim())
         .filter(Boolean);
-      setNarrativeRolls((rolls) => rolls.map((roll) => (
+      const refreshed = await loadNarrativeRolls();
+      setNarrativeRolls(refreshed?.length ? refreshed : (rolls) => rolls.map((roll) => (
         roll.id === selectedRoll.id
-          ? {
-              ...roll,
-              body: previewBody.trim(),
-              paragraphs,
-              revision: Number(result.revision || roll.revision + 1),
-              documentHash: String(result.document_sha256 || roll.documentHash),
-            }
+          ? { ...roll, body: previewBody.trim(), paragraphs, revision: Number(result.revision || roll.revision + 1), documentHash: String(result.document_sha256 || roll.documentHash) }
           : roll
       )));
       setPreviewDiff("");
       setPreviewMode("");
+      setPreviewSeal(null);
       setSaveMessage(`已保存为 revision ${result.revision}`);
     } catch (error) {
       setPreviewError(error.message || "这次正文没有保存。");
@@ -207,6 +227,48 @@ export function NarrativePage() {
       setSaving(false);
     }
   };
+
+  const removeMaterial = (key, id) => {
+    setMaterialIds((current) => ({
+      ...(current || selectedRoll.materialIds),
+      [key]: (current?.[key] || selectedRoll.materialIds?.[key] || []).filter((value) => String(value) !== String(id)),
+    }));
+    setPreviewSeal(null);
+    setSaveMessage("");
+  };
+
+  const addMaterial = () => {
+    const raw = materialIdInput.trim();
+    if (!raw) return;
+    const value = ["diary_ids", "darkroom_ids"].includes(materialType) ? Number(raw) : raw;
+    if (["diary_ids", "darkroom_ids"].includes(materialType) && (!Number.isInteger(value) || value <= 0)) {
+      setPreviewError("Diary / Darkroom ID 必须是正整数。");
+      return;
+    }
+    setMaterialIds((current) => {
+      const base = current || selectedRoll.materialIds;
+      const values = base?.[materialType] || [];
+      return { ...base, [materialType]: values.some((item) => String(item) === String(value)) ? values : [...values, value] };
+    });
+    setMaterialIdInput("");
+    setPreviewError("");
+    setPreviewSeal(null);
+    setSaveMessage("");
+  };
+
+  const editableMaterials = useMemo(() => {
+    if (!selectedRoll || !materialIds) return [];
+    const keys = { event: "event_ids", scene: "scene_ids", diary: "diary_ids", darkroom: "darkroom_ids" };
+    const labels = { event_ids: "Event", scene_ids: "Scene", diary_ids: "日记", darkroom_ids: "暗房" };
+    const sourceByKey = new Map((selectedRoll.sources || []).map((source) => [`${source.type}:${source.id}`, source]));
+    return Object.entries(labels).flatMap(([key, typeLabel]) => (
+      (materialIds[key] || []).map((id) => {
+        const type = Object.keys(keys).find((candidate) => keys[candidate] === key);
+        const source = sourceByKey.get(`${type}:${id}`);
+        return { key, id, typeLabel, title: source?.title || String(id) };
+      })
+    ));
+  }, [materialIds, selectedRoll]);
 
   return (
     <div className={`narrative-experience${selectedRoll ? " is-reading" : ""}`}>
@@ -355,7 +417,7 @@ export function NarrativePage() {
                 <header>
                   <div>
                     <span>{previewMode ? "WRITER PREVIEW" : "BODY EDITOR"}</span>
-                    <h2>{previewMode ? (previewMode === "update" ? "更新预览" : "重写预览") : "手改正文"}</h2>
+                    <h2>{previewMode ? (previewMode === "update" ? "更新预览" : previewMode === "rewrite" ? "重写预览" : "保存前校验") : "手改正文"}</h2>
                   </div>
                   <small>{previewMode ? "预览不会自动发布，确认后再保存" : "保存只改正文，不调用 Writer"}</small>
                 </header>
@@ -367,6 +429,7 @@ export function NarrativePage() {
                       onChange={(event) => {
                         setPreviewBody(event.target.value);
                         setSaveMessage("");
+                        setPreviewSeal(null);
                       }}
                       spellCheck="false"
                     />
@@ -374,16 +437,35 @@ export function NarrativePage() {
                     {saveMessage ? <p className="narrative-editor__saved" role="status">{saveMessage}</p> : null}
                   </div>
                   <aside className="narrative-editor__materials" aria-label="当前绑定材料">
-                    <span>当前材料</span>
-                    <strong>{selectedRoll.sources?.length || 0} 条</strong>
+                    <span>拟绑定材料</span>
+                    <strong>{editableMaterials.length} 条</strong>
                     <ol>
-                      {(selectedRoll.sources || []).map((source) => (
-                        <li key={`editor:${source.type || "scene"}:${source.id}`}>
-                          <em>{source.typeLabel || "Scene"}</em>
+                      {editableMaterials.map((source) => (
+                        <li key={`editor:${source.key}:${source.id}`}>
+                          <em>{source.typeLabel}</em>
                           <span>{source.title}</span>
+                          <button type="button" onClick={() => removeMaterial(source.key, source.id)}>移除</button>
                         </li>
                       ))}
                     </ol>
+                    <div className="narrative-editor__material-add">
+                      <select value={materialType} onChange={(event) => setMaterialType(event.target.value)} aria-label="材料类型">
+                        <option value="event_ids">Event</option>
+                        <option value="scene_ids">Scene</option>
+                        <option value="diary_ids">日记</option>
+                        <option value="darkroom_ids">暗房</option>
+                      </select>
+                      <input value={materialIdInput} onChange={(event) => setMaterialIdInput(event.target.value)} placeholder="输入精确 ID" aria-label="新增材料 ID" />
+                      <button type="button" onClick={addMaterial}>加入拟绑定</button>
+                    </div>
+                    {previewSeal?.material_delta ? (
+                      <div className="narrative-editor__material-delta" role="status">
+                        <strong>本次材料变更</strong>
+                        {Object.entries(previewSeal.material_delta.added || {}).flatMap(([key, ids]) => ids.map((id) => <span className="is-added" key={`added:${key}:${id}`}>＋ {id}</span>))}
+                        {Object.entries(previewSeal.material_delta.removed || {}).flatMap(([key, ids]) => ids.map((id) => <span className="is-removed" key={`removed:${key}:${id}`}>－ {id}</span>))}
+                        {!Object.values(previewSeal.material_delta.added || {}).some((ids) => ids.length) && !Object.values(previewSeal.material_delta.removed || {}).some((ids) => ids.length) ? <span>材料不变</span> : null}
+                      </div>
+                    ) : null}
                   </aside>
                 </div>
                 {previewDiff ? (
@@ -395,7 +477,7 @@ export function NarrativePage() {
                 <footer>
                   <button className="is-primary" type="button" disabled={saving || previewing || !previewBody.trim()} onClick={saveBody}>
                     {saving ? <CircleNotch className="is-spinning" size={16} aria-hidden="true" /> : null}
-                    保存
+                    {previewSeal ? "确认保存" : "校验变更"}
                   </button>
                 </footer>
               </section>

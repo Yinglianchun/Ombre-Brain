@@ -735,8 +735,13 @@ narrative_rolls:
   revision_scan_minute: 0
   revision_scan_timezone: "Asia/Shanghai"
   revision_scan_check_interval_minutes: 15
-  new_roll_scout_enabled: true          # external configured dehydration model may group unbound Events into review candidates
-  new_roll_scout_max_events: 80
+  new_roll_scout_enabled: true          # host literal search + one Terra review; never writes Narrative
+  new_roll_scout_base_url: "https://756777.xyz/v1"
+  new_roll_scout_model: "gpt-5.6-terra"
+  new_roll_scout_api_key_env: "Testkey_qwl" # secret env only; never store its value in Git
+  new_roll_scout_seed_limit: 24         # newest unbound Event/Scene seeds first
+  new_roll_scout_keywords_per_seed: 8   # literal seed-keyword cap
+  new_roll_scout_candidates_per_seed: 12 # bounded one-hop results from all active Event/Scene
   shadow_admission_enabled: true   # keep candidate/admission evidence in recall debug
   live_injection_enabled: true     # strong gate injects one authored body; weak/ambiguous matches stay out
   ambiguity_margin: 10             # tied strong rolls remain index-only and do not inject a body

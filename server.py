@@ -166,7 +166,10 @@ from window_shadows import (
 from memory_nodes import MemoryNodeStore
 from narrative_rolls import NarrativeRollStore
 from narrative_revision_inbox import NarrativeRevisionInbox
-from narrative_revision_scout import propose_new_roll_candidates
+from narrative_revision_scout import (
+    build_keyword_corridors,
+    propose_new_roll_candidates,
+)
 from persona_engine import PersonaStateEngine
 from persona_event_selection import select_persona_events
 from raw_events import RawEventStore
@@ -175,9 +178,18 @@ from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
 from narrative_arc_rank import NarrativeArcMemberRanker, normalize_arc_rank_request
 from narrative_source_verification import (
+    diary_comments_sha256,
     verify_narrative_darkroom_sources,
     verify_narrative_diary_sources,
     verify_narrative_scene_sources,
+)
+from narrative_materials import (
+    material_delta,
+    material_ids_from_narrative,
+    material_snapshot_sha256,
+    narrative_preview_fingerprint,
+    normalize_material_ids,
+    render_material_snapshot,
 )
 from reranker_engine import RerankerEngine
 from scene_linker import SceneLinker
@@ -8913,6 +8925,7 @@ async def _read_narrative_memory(narrative_id: str) -> dict:
         return result
     automatic_links = fact_event_store.arc_event_links(result["arc_key"])
     direct_ids = list(result.get("linked_event_ids") or [])
+    result["direct_linked_event_ids"] = list(direct_ids)
     automatic_ids = [
         item["event_id"]
         for item in automatic_links
@@ -8937,7 +8950,10 @@ async def _materialize_narrative_writer_sources(narrative: dict) -> dict:
     errors: list[dict] = []
 
     for event_id in narrative.get("linked_event_ids") or []:
-        event = fact_event_store.read(str(event_id), include_sources=True)
+        try:
+            event = fact_event_store.read(str(event_id), include_sources=True)
+        except ValueError:
+            event = None
         if not event:
             errors.append({"source_type": "event", "source_id": str(event_id), "reason": "not_found"})
             continue
@@ -8988,6 +9004,15 @@ async def _materialize_narrative_writer_sources(narrative: dict) -> dict:
             errors.append({"source_type": "scene", "source_id": str(scene_id), "reason": "not_found"})
             continue
         meta = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
+        if (
+            not _is_canonical_scene_bucket(scene)
+            or meta.get("active") is False
+            or meta.get("deprecated")
+            or meta.get("resolved")
+            or meta.get("digested")
+        ):
+            errors.append({"source_type": "scene", "source_id": str(scene_id), "reason": "not_active"})
+            continue
         content = strip_wikilinks(str(scene.get("content") or "")).strip()
         if not content:
             errors.append({"source_type": "scene", "source_id": str(scene_id), "reason": "empty_content"})
@@ -8997,7 +9022,7 @@ async def _materialize_narrative_writer_sources(narrative: dict) -> dict:
             "scene_id": str(scene_id),
             "title": str(meta.get("name") or scene_id),
             "date": str(meta.get("date") or meta.get("event_date") or meta.get("created") or ""),
-            "status": "active" if not (meta.get("active") is False or meta.get("deprecated")) else "legacy",
+            "status": "active",
             "content": content,
             "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         })
@@ -9007,13 +9032,21 @@ async def _materialize_narrative_writer_sources(narrative: dict) -> dict:
         if result.get("count") != 1 or int(result.get("id") or 0) != int(source_id):
             errors.append({"source_type": source_type, "source_id": int(source_id), "reason": "not_found"})
             return None
+        expected_entry_type = "darkroom" if source_type == "darkroom" else "diary"
+        if str(result.get("entry_type") or "") != expected_entry_type:
+            errors.append({"source_type": source_type, "source_id": int(source_id), "reason": "wrong_source_type"})
+            return None
+        if str(result.get("visibility") or "") != "active":
+            errors.append({"source_type": source_type, "source_id": int(source_id), "reason": "not_active"})
+            return None
         if bool(result.get("locked")) or not bool(result.get("body_available", True)):
-            errors.append({"source_type": source_type, "source_id": int(source_id), "reason": "locked"})
+            errors.append({"source_type": source_type, "source_id": int(source_id), "reason": "locked_or_unavailable"})
             return None
         content = str(result.get("content") or "").strip()
         if not content:
             errors.append({"source_type": source_type, "source_id": int(source_id), "reason": "empty_content"})
             return None
+        comments = list(result.get("comments") or [])
         return {
             "source_type": source_type,
             f"{source_type}_id": int(source_id),
@@ -9022,13 +9055,14 @@ async def _materialize_narrative_writer_sources(narrative: dict) -> dict:
             "revision": int(result.get("revision") or 1),
             "content": content,
             "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "comments_sha256": diary_comments_sha256(comments),
             "comments": [
                 {
                     "author": str(comment.get("author") or ""),
                     "created_at": str(comment.get("created_at") or ""),
                     "content": str(comment.get("content") or ""),
                 }
-                for comment in result.get("comments") or []
+                for comment in comments
                 if str(comment.get("content") or "").strip()
             ],
         }
@@ -9111,7 +9145,7 @@ async def api_narrative_roll_preview_input(request):
     mode = str(body.get("mode") or "").strip().lower()
     expected_revision = body.get("expected_revision")
     expected_hash = str(body.get("expected_document_sha256") or "").strip().lower()
-    if not narrative_id or not MEMORY_ID_RE.fullmatch(narrative_id) or mode not in {"update", "rewrite"}:
+    if not narrative_id or not MEMORY_ID_RE.fullmatch(narrative_id) or mode not in {"edit", "update", "rewrite"}:
         return JSONResponse({"status": "invalid", "reason": "invalid_preview_request", "writes_performed": []}, status_code=400)
 
     narrative = narrative_roll_store.read(narrative_id)
@@ -9134,7 +9168,22 @@ async def api_narrative_roll_preview_input(request):
             "writes_performed": [],
         }, status_code=409)
 
-    materials = await _materialize_narrative_writer_sources(narrative)
+    current_material_ids = material_ids_from_narrative(narrative)
+    try:
+        proposed_material_ids = normalize_material_ids(
+            body.get("proposed_material_ids"),
+            fallback=current_material_ids,
+        )
+    except ValueError as exc:
+        return JSONResponse({"status": "invalid", "reason": str(exc), "writes_performed": []}, status_code=400)
+    proposed_narrative = {
+        **narrative,
+        "linked_event_ids": proposed_material_ids["event_ids"],
+        "linked_scene_ids": proposed_material_ids["scene_ids"],
+        "linked_diary_ids": proposed_material_ids["diary_ids"],
+        "linked_darkroom_ids": proposed_material_ids["darkroom_ids"],
+    }
+    materials = await _materialize_narrative_writer_sources(proposed_narrative)
     if materials.get("status") != "ok":
         return JSONResponse({**materials, "writes_performed": []}, status_code=409)
     return JSONResponse({
@@ -9147,13 +9196,17 @@ async def api_narrative_roll_preview_input(request):
         "base_revision": current_revision,
         "base_document_sha256": current_hash,
         "material_counts": materials.get("material_counts") or {},
+        "current_material_ids": current_material_ids,
+        "proposed_material_ids": proposed_material_ids,
+        "material_delta": material_delta(current_material_ids, proposed_material_ids),
+        "material_snapshot_sha256": material_snapshot_sha256(materials),
         "writes_performed": [],
     })
 
 
 @mcp.custom_route("/api/narrative-rolls/save-body", methods=["POST"])
 async def api_save_narrative_roll_body(request):
-    """Save a manual body edit as one new revision without changing membership."""
+    """Save one sealed body/material preview after fresh source and CAS validation."""
     from starlette.responses import JSONResponse
 
     err = _require_dashboard_auth(request)
@@ -9167,13 +9220,72 @@ async def api_save_narrative_roll_body(request):
         return JSONResponse({"status": "invalid", "reason": "request_body_not_object"}, status_code=400)
     narrative_id = str(body.get("narrative_id") or "").strip()
     exact_body = str(body.get("body") or "")
-    if not narrative_id or not MEMORY_ID_RE.fullmatch(narrative_id) or not exact_body.strip():
+    preview_fingerprint = str(body.get("preview_fingerprint") or "").strip().lower()
+    expected_material_hash = str(body.get("expected_material_snapshot_sha256") or "").strip().lower()
+    if (
+        not narrative_id
+        or not MEMORY_ID_RE.fullmatch(narrative_id)
+        or not exact_body.strip()
+        or not re.fullmatch(r"[0-9a-f]{64}", preview_fingerprint)
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_material_hash)
+    ):
         return JSONResponse({"status": "invalid", "reason": "invalid_body_save_request"}, status_code=400)
+    current = narrative_roll_store.read(narrative_id)
+    if current.get("status") != "ok":
+        return JSONResponse({"status": "not_found", "reason": "narrative_not_found"}, status_code=404)
+    try:
+        expected_revision = int(body.get("expected_revision"))
+    except (TypeError, ValueError):
+        return JSONResponse({"status": "invalid", "reason": "invalid_expected_revision"}, status_code=400)
+    expected_document_hash = str(body.get("expected_document_sha256") or "").strip().lower()
+    if expected_revision != int(current.get("revision") or 0):
+        return JSONResponse({"status": "conflict", "reason": "revision_mismatch"}, status_code=409)
+    if expected_document_hash != str(current.get("document_sha256") or "").strip().lower():
+        return JSONResponse({"status": "conflict", "reason": "document_hash_mismatch"}, status_code=409)
+    try:
+        proposed_material_ids = normalize_material_ids(
+            body.get("proposed_material_ids"),
+            fallback=material_ids_from_narrative(current),
+        )
+    except ValueError as exc:
+        return JSONResponse({"status": "invalid", "reason": str(exc)}, status_code=400)
+    proposed_narrative = {
+        **current,
+        "linked_event_ids": proposed_material_ids["event_ids"],
+        "linked_scene_ids": proposed_material_ids["scene_ids"],
+        "linked_diary_ids": proposed_material_ids["diary_ids"],
+        "linked_darkroom_ids": proposed_material_ids["darkroom_ids"],
+    }
+    fresh_materials = await _materialize_narrative_writer_sources(proposed_narrative)
+    if fresh_materials.get("status") != "ok":
+        return JSONResponse({**fresh_materials, "writes_performed": []}, status_code=409)
+    fresh_material_hash = material_snapshot_sha256(fresh_materials)
+    if fresh_material_hash != expected_material_hash:
+        return JSONResponse({
+            "status": "conflict",
+            "reason": "material_snapshot_changed",
+            "current_material_snapshot_sha256": fresh_material_hash,
+            "writes_performed": [],
+        }, status_code=409)
+    expected_fingerprint = narrative_preview_fingerprint(
+        narrative_id=narrative_id,
+        revision=expected_revision,
+        document_sha256=expected_document_hash,
+        body=exact_body,
+        material_snapshot_sha256_value=fresh_material_hash,
+    )
+    if preview_fingerprint != expected_fingerprint:
+        return JSONResponse({"status": "conflict", "reason": "preview_fingerprint_mismatch", "writes_performed": []}, status_code=409)
     result = narrative_roll_store.save_body(
         narrative_id,
         exact_body,
-        expected_revision=body.get("expected_revision"),
-        expected_document_sha256=str(body.get("expected_document_sha256") or ""),
+        expected_revision=expected_revision,
+        expected_document_sha256=expected_document_hash,
+        source_scene_ids=proposed_material_ids["scene_ids"],
+        source_event_ids=proposed_material_ids["event_ids"],
+        source_diary_ids=proposed_material_ids["diary_ids"],
+        source_darkroom_ids=proposed_material_ids["darkroom_ids"],
+        material_snapshot=render_material_snapshot(fresh_materials),
     )
     if result.get("status") == "updated":
         current = narrative_roll_store.read(narrative_id)
@@ -9181,6 +9293,12 @@ async def api_save_narrative_roll_body(request):
             narrative_id,
             source_scene_ids=list(current.get("linked_scene_ids") or []),
             revision=int(result.get("revision") or 0),
+        )
+        result["bound_new_roll_proposal_ids_removed"] = (
+            narrative_revision_inbox_store.reconcile_bound_new_roll_materials(
+                bound_event_ids=set(current.get("linked_event_ids") or []),
+                bound_scene_ids=set(current.get("linked_scene_ids") or []),
+            )
         )
     status_code = (
         404
@@ -9390,8 +9508,23 @@ def _narrative_revision_scan_settings(config_arg: dict | None = None) -> dict[st
             roll_cfg.get("revision_scan_check_interval_minutes"), 15, 1, 1440
         ) * 60,
         "new_roll_scout_enabled": _bool_value(roll_cfg.get("new_roll_scout_enabled"), True),
-        "new_roll_scout_max_events": _int_between(
-            roll_cfg.get("new_roll_scout_max_events"), 80, 2, 200
+        "new_roll_scout_base_url": str(
+            roll_cfg.get("new_roll_scout_base_url") or "https://756777.xyz/v1"
+        ).strip().rstrip("/"),
+        "new_roll_scout_model": str(
+            roll_cfg.get("new_roll_scout_model") or "gpt-5.6-terra"
+        ).strip(),
+        "new_roll_scout_api_key_env": str(
+            roll_cfg.get("new_roll_scout_api_key_env") or "Testkey_qwl"
+        ).strip(),
+        "new_roll_scout_seed_limit": _int_between(
+            roll_cfg.get("new_roll_scout_seed_limit"), 24, 2, 80
+        ),
+        "new_roll_scout_keywords_per_seed": _int_between(
+            roll_cfg.get("new_roll_scout_keywords_per_seed"), 8, 2, 16
+        ),
+        "new_roll_scout_candidates_per_seed": _int_between(
+            roll_cfg.get("new_roll_scout_candidates_per_seed"), 12, 2, 24
         ),
     }
 
@@ -9489,39 +9622,175 @@ async def _narrative_material_freshness(narrative: dict, scan_timezone: ZoneInfo
     return sources
 
 
-def _unbound_narrative_event_candidates(limit: int) -> list[dict[str, Any]]:
-    linked_event_ids: set[str] = set()
+def _narrative_material_link_index() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    event_links: dict[str, set[str]] = {}
+    scene_links: dict[str, set[str]] = {}
     for roll in narrative_roll_store._load():
         if str(roll.get("lifecycle") or "active") != "active":
             continue
-        linked_event_ids.update(str(value) for value in roll.get("linked_event_ids") or [])
+        narrative_id = str(roll.get("narrative_id") or "").strip()
+        if not narrative_id:
+            continue
+        for event_id in roll.get("linked_event_ids") or []:
+            safe_id = str(event_id or "").strip()
+            if safe_id:
+                event_links.setdefault(safe_id, set()).add(narrative_id)
         arc_key = str(roll.get("arc_key") or "").strip()
         if arc_key:
-            linked_event_ids.update(
-                str(link.get("event_id") or "")
-                for link in fact_event_store.arc_event_links(arc_key)
+            for link in fact_event_store.arc_event_links(arc_key):
+                safe_id = str(link.get("event_id") or "").strip()
+                if safe_id:
+                    event_links.setdefault(safe_id, set()).add(narrative_id)
+        for scene_id in roll.get("linked_scene_ids") or []:
+            safe_id = str(scene_id or "").strip()
+            if safe_id:
+                scene_links.setdefault(safe_id, set()).add(narrative_id)
+    return event_links, scene_links
+
+
+async def _active_narrative_material_inventory() -> list[dict[str, Any]]:
+    """Return every non-archived Event and canonical Scene for lexical one-hop search."""
+
+    event_links, scene_links = _narrative_material_link_index()
+    materials: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        page = fact_event_store.list(
+            item_type="event",
+            status="active",
+            limit=500,
+            offset=offset,
+            include_sources=False,
+        )
+        items = page.get("items") or []
+        for event in items:
+            event_id = str(event.get("item_id") or "").strip()
+            if not event_id:
+                continue
+            bound_ids = sorted(event_links.get(event_id, set()))
+            materials.append(
+                {
+                    "source_type": "event",
+                    "source_id": event_id,
+                    "date": str(event.get("local_date") or ""),
+                    "title": str(event.get("title") or ""),
+                    "summary": str(event.get("body") or ""),
+                    "source_excerpt": "",
+                    "search_text": "\n".join(
+                        (str(event.get("title") or ""), str(event.get("body") or ""))
+                    ),
+                    "updated_at": str(event.get("created_at") or ""),
+                    "fingerprint": str(event.get("fingerprint") or ""),
+                    "bound_narrative_ids": bound_ids,
+                    "is_unbound": not bound_ids,
+                }
             )
-    result = fact_event_store.list(
-        item_type="event",
-        status="active",
-        limit=200,
-        include_sources=False,
-    )
-    rows = []
-    for event in result.get("items") or []:
-        event_id = str(event.get("item_id") or "")
-        if not event_id or event_id in linked_event_ids or int(event.get("importance") or 0) < 3:
-            continue
-        rows.append({
-            "event_id": event_id,
-            "date": str(event.get("local_date") or ""),
-            "title": str(event.get("title") or ""),
-            "summary": str(event.get("body") or ""),
-            "updated_at": str(event.get("updated_at") or event.get("created_at") or ""),
-        })
-        if len(rows) >= max(2, min(int(limit), 200)):
+        offset += len(items)
+        if not items or offset >= int(page.get("count") or 0):
             break
-    return rows
+
+    for scene in await bucket_mgr.list_all(include_archive=False):
+        if not _is_canonical_scene_bucket(scene):
+            continue
+        meta = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
+        if meta.get("active") is False or bool(meta.get("deprecated")):
+            continue
+        if str(meta.get("scene_status") or "active").strip().lower() not in {"", "active"}:
+            continue
+        scene_id = str(scene.get("id") or "").strip()
+        content = strip_wikilinks(str(scene.get("content") or "")).strip()
+        if not scene_id or not content:
+            continue
+        title = str(meta.get("name") or meta.get("title") or scene_id)
+        bound_ids = sorted(scene_links.get(scene_id, set()))
+        materials.append(
+            {
+                "source_type": "scene",
+                "source_id": scene_id,
+                "date": str(meta.get("date") or meta.get("event_date") or meta.get("created") or ""),
+                "title": title,
+                "summary": content[:1200],
+                "source_excerpt": content[:1800],
+                "search_text": "\n".join((title, content)),
+                "updated_at": str(meta.get("updated_at") or meta.get("created") or ""),
+                "fingerprint": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "bound_narrative_ids": bound_ids,
+                "is_unbound": not bound_ids,
+            }
+        )
+    return materials
+
+
+def _narrative_seed_sort_key(item: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(item.get("updated_at") or item.get("date") or ""),
+        str(item.get("source_type") or ""),
+        str(item.get("source_id") or ""),
+    )
+
+
+def _hydrate_event_scout_material(item: dict[str, Any]) -> dict[str, Any]:
+    if str(item.get("source_type") or "") != "event":
+        return dict(item)
+    event_id = str(item.get("source_id") or "")
+    event = fact_event_store.read(event_id, include_sources=True)
+    if not event or str(event.get("status") or "") != "active":
+        raise RuntimeError(f"narrative_scout_event_drift:{event_id}")
+    excerpts = []
+    for ref in event.get("source_refs") or []:
+        content = str(ref.get("content") or "").strip()
+        expected_hash = str(ref.get("content_sha256") or "").strip().lower()
+        if not content or hashlib.sha256(content.encode("utf-8")).hexdigest() != expected_hash:
+            raise RuntimeError(f"narrative_scout_event_source_drift:{event_id}")
+        excerpts.append(content)
+    hydrated = dict(item)
+    hydrated["source_excerpt"] = "\n".join(excerpts)[:2400]
+    hydrated["fingerprint"] = str(event.get("fingerprint") or "")
+    return hydrated
+
+
+def _hydrate_scout_corridors(corridors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cache: dict[str, dict[str, Any]] = {}
+
+    def hydrate(item: dict[str, Any]) -> dict[str, Any]:
+        key = f"{item.get('source_type')}:{item.get('source_id')}"
+        if key not in cache:
+            cache[key] = _hydrate_event_scout_material(item)
+        return dict(cache[key])
+
+    hydrated = []
+    for corridor in corridors:
+        hydrated.append(
+            {
+                **corridor,
+                "seed": hydrate(corridor["seed"]),
+                "candidates": [hydrate(item) for item in corridor.get("candidates") or []],
+            }
+        )
+    return hydrated
+
+
+def _hydrate_scout_seeds(seeds: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_hydrate_event_scout_material(item) for item in seeds]
+
+
+def _narrative_scout_role_rules() -> str:
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "prototypes",
+        "serein-awake",
+        "codex_agents",
+        "narrative_scout",
+        "AGENTS.md",
+    )
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            rules = handle.read().strip()
+    except OSError as exc:
+        raise RuntimeError("narrative_scout_role_not_installed") from exc
+    if not rules:
+        raise RuntimeError("narrative_scout_role_rules_empty")
+    return rules
 
 
 async def _scan_narrative_revision_inbox(*, include_external: bool = True, force_external: bool = False) -> dict[str, Any]:
@@ -9563,44 +9832,113 @@ async def _scan_narrative_revision_inbox(*, include_external: bool = True, force
     stale_hints_removed = narrative_revision_inbox_store.reconcile_stale_rolls(stale_narrative_ids)
 
     scout_status = "disabled"
-    scout_model = str(getattr(dehydrator, "model", "") or "")
+    scout_model = str(settings["new_roll_scout_model"])
+    scout_base_url = str(settings["new_roll_scout_base_url"])
+    scout_api_key_env = str(settings["new_roll_scout_api_key_env"])
     candidate_created: list[dict[str, Any]] = []
-    events = _unbound_narrative_event_candidates(int(settings["new_roll_scout_max_events"]))
-    event_fingerprint = hashlib.sha256(
+    inventory = await _active_narrative_material_inventory()
+    bound_new_roll_hints_removed = narrative_revision_inbox_store.reconcile_bound_new_roll_materials(
+        bound_event_ids={
+            str(item.get("source_id") or "")
+            for item in inventory
+            if str(item.get("source_type") or "") == "event"
+            and list(item.get("bound_narrative_ids") or [])
+        },
+        bound_scene_ids={
+            str(item.get("source_id") or "")
+            for item in inventory
+            if str(item.get("source_type") or "") == "scene"
+            and list(item.get("bound_narrative_ids") or [])
+        },
+    )
+    seeds = sorted(
+        (item for item in inventory if bool(item.get("is_unbound"))),
+        key=_narrative_seed_sort_key,
+        reverse=True,
+    )[: int(settings["new_roll_scout_seed_limit"])]
+    scout_input_fingerprint = hashlib.sha256(
         _json_lib.dumps(
-            [(item["event_id"], item["updated_at"]) for item in events],
+            [
+                (
+                    str(item.get("source_type") or ""),
+                    str(item.get("source_id") or ""),
+                    str(item.get("updated_at") or ""),
+                    str(item.get("fingerprint") or ""),
+                    tuple(item.get("bound_narrative_ids") or []),
+                )
+                for item in sorted(
+                    inventory,
+                    key=lambda row: (
+                        str(row.get("source_type") or ""),
+                        str(row.get("source_id") or ""),
+                    ),
+                )
+            ],
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
     previous_scan = narrative_revision_inbox_store.scan_metadata()
     if include_external and settings["new_roll_scout_enabled"]:
-        if not events or len(events) < 2:
+        if not seeds:
             scout_status = "no_materials"
-        elif event_fingerprint == previous_scan.get("external_input_sha256") and not force_external:
+        elif scout_input_fingerprint == previous_scan.get("external_input_sha256") and not force_external:
             scout_status = "unchanged"
-        elif not getattr(dehydrator, "client", None) or not getattr(dehydrator, "api_available", False):
+        elif not scout_base_url or not scout_model or not scout_api_key_env or not os.environ.get(scout_api_key_env):
             scout_status = "unavailable"
         else:
+            client = None
             try:
+                from openai import AsyncOpenAI
+
+                client = AsyncOpenAI(
+                    api_key=os.environ[scout_api_key_env],
+                    base_url=scout_base_url,
+                    timeout=180.0,
+                    max_retries=0,
+                )
+                role_rules = _narrative_scout_role_rules()
+                hydrated_seeds = _hydrate_scout_seeds(seeds)
+                hydrated_by_key = {
+                    f"{str(item.get('source_type') or '')}:{str(item.get('source_id') or '')}": item
+                    for item in hydrated_seeds
+                }
+                search_inventory = [
+                    hydrated_by_key.get(
+                        f"{str(item.get('source_type') or '')}:{str(item.get('source_id') or '')}",
+                        item,
+                    )
+                    for item in inventory
+                ]
+                corridors = build_keyword_corridors(
+                    search_inventory,
+                    list(hydrated_by_key),
+                    max_keywords=int(settings["new_roll_scout_keywords_per_seed"]),
+                    max_candidates_per_seed=int(settings["new_roll_scout_candidates_per_seed"]),
+                )
+                hydrated_corridors = _hydrate_scout_corridors(corridors)
                 candidates = await propose_new_roll_candidates(
-                    client=dehydrator.client,
+                    client=client,
                     model=scout_model,
-                    events=events,
-                    completion_options=dehydrator._completion_options(max_tokens=1400, temperature=0.0),
+                    corridors=hydrated_corridors,
+                    role_rules=role_rules,
+                    completion_options={"max_tokens": 2600, "temperature": 0.0},
                 )
                 candidate_created = narrative_revision_inbox_store.consider_new_roll_candidates(
                     candidates,
                     model=scout_model,
                 )
-                scout_status = "ok"
+                scout_status = "ok" if corridors else "no_keyword_matches"
             except Exception as exc:
                 scout_status = "error"
                 logger.warning("New Narrative Roll scout failed / 新叙事卷候选扫描失败: %s", exc)
+            finally:
+                if client is not None:
+                    await client.close()
 
     recorded_fingerprint = (
-        event_fingerprint
-        if scout_status in {"ok", "unchanged", "no_materials"}
+        scout_input_fingerprint
+        if scout_status in {"ok", "unchanged", "no_materials", "no_keyword_matches"}
         else str(previous_scan.get("external_input_sha256") or "")
     )
 
@@ -9609,10 +9947,20 @@ async def _scan_narrative_revision_inbox(*, include_external: bool = True, force
         "checked_rolls": checked_rolls,
         "stale_roll_hints_created": len(stale_created),
         "stale_roll_hints_removed": len(stale_hints_removed),
-        "unbound_events_checked": len(events),
+        "bound_new_roll_hints_removed": len(bound_new_roll_hints_removed),
+        "active_materials_searched": len(inventory),
+        "unbound_material_seeds_checked": len(seeds),
+        "unbound_events_checked": sum(
+            1 for item in seeds if str(item.get("source_type") or "") == "event"
+        ),
+        "unbound_scenes_checked": sum(
+            1 for item in seeds if str(item.get("source_type") or "") == "scene"
+        ),
         "new_roll_hints_created": len(candidate_created),
         "external_scout_status": scout_status,
         "external_model": scout_model if scout_status not in {"disabled", "unavailable"} else "",
+        "external_base_url": scout_base_url if scout_status not in {"disabled", "unavailable"} else "",
+        "external_search_mode": "host_literal_keywords_then_active_exact_search_then_terra_review",
         "external_input_sha256": recorded_fingerprint,
         "writes_performed": [
             {
@@ -13518,6 +13866,12 @@ async def publish_narrative(
             str(narrative_id or "").strip(),
             source_scene_ids=linked_ids,
             revision=int(result.get("revision") or 0),
+        )
+        result["bound_new_roll_proposal_ids_removed"] = (
+            narrative_revision_inbox_store.reconcile_bound_new_roll_materials(
+                bound_event_ids=set(linked_event_ids),
+                bound_scene_ids=set(linked_ids),
+            )
         )
     return result
 
