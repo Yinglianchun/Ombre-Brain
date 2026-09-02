@@ -296,6 +296,16 @@ def verify_observed_entities_and_scope() -> None:
         assert entity_detail["operator"] == "none", entity_detail
         assert entity_detail["retrieval_allowed"] is True, entity_detail
 
+        entity_speech = index.resolve_query("阿尼亚说过什么")
+        assert entity_speech["status"] == "scoped_recall", entity_speech
+        assert entity_speech["intent"] == "entity_detail", entity_speech
+        assert entity_speech["operator"] == "none", entity_speech
+        assert entity_speech["retrieval_allowed"] is True, entity_speech
+
+        entity_opinion = index.resolve_query("阿尼亚好可爱")
+        assert entity_opinion["status"] == "scope_only", entity_opinion
+        assert entity_opinion["retrieval_allowed"] is False, entity_opinion
+
         no_entity = index.resolve_query("看到哪了")
         assert no_entity["status"] == "insufficient_scope", no_entity
         assert no_entity["operator"] == "latest_relevant_member", no_entity

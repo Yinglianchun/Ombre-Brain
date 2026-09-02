@@ -41,7 +41,11 @@ _INTENT_PATTERNS = (
     (
         "entity_detail",
         "none",
-        re.compile(r"是谁|是什么人|什么来头|指的是谁|是哪位"),
+        re.compile(
+            r"是谁|是什么人|什么来头|指的是谁|是哪位|"
+            r"怎么评价|如何评价|怎么看待|说过什么|说了什么|"
+            r"提到过什么|聊过什么|指什么|是什么意思"
+        ),
     ),
     ("progress", "latest_relevant_member", re.compile(r"看到哪|读到哪|做到哪|进行到哪|进展(?:到哪|如何|怎么样)|追到哪")),
     ("timeline", "timeline", re.compile(r"后来|后续|之后|怎么发展|如何发展|发展成|演变|时间线")),
