@@ -6,6 +6,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+import httpx
+
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -13,6 +15,38 @@ if str(ROOT) not in sys.path:
 
 from gateway import GatewayService
 from reranker_engine import RerankResult, RerankerEngine
+
+
+async def verify_reranker_reuses_http_client() -> None:
+    requests = 0
+
+    async def handler(request):
+        nonlocal requests
+        requests += 1
+        return httpx.Response(
+            200,
+            json={"results": [{"index": 0, "relevance_score": 0.91}]},
+            request=request,
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    engine = RerankerEngine(
+        {
+            "reranker": {
+                "enabled": True,
+                "base_url": "https://reranker.test",
+                "api_key": "test-key",
+            }
+        },
+        http_client=client,
+    )
+    first = await engine.rerank("query one", ["document"])
+    second = await engine.rerank("query two", ["document"])
+    assert requests == 2
+    assert first[0].score == second[0].score == 0.91
+    assert engine._http_client is client
+    assert client.is_closed is False
+    await client.aclose()
 
 
 class FakeEvidenceStore:
@@ -202,5 +236,6 @@ engine_config = {
 configured_engine = RerankerEngine(engine_config)
 assert configured_engine.enabled is False
 assert configured_engine.shadow_ready is True
+asyncio.run(verify_reranker_reuses_http_client())
 
 print("retrieval budget reranker shadow verification passed")

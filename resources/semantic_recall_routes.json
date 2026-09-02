@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "dataset_version": 10,
+  "dataset_version": 11,
   "routes": [
     {
       "name": "simple_contact",
@@ -59,6 +59,16 @@
       ]
     },
     {
+      "name": "current_context",
+      "action": "skip",
+      "threshold": 0.62,
+      "utterances": [
+        {"text": "刚才我们聊到哪了", "source": "historical_false_positive"},
+        {"text": "上一条你是什么意思", "source": "seed"},
+        {"text": "前一句我没看懂", "source": "seed"}
+      ]
+    },
+    {
       "name": "intimate_contact",
       "action": "skip",
       "enabled": false,
@@ -85,7 +95,11 @@
         {"text": "还记得那次洗完澡我们聊了什么吗", "source": "hard_negative"},
         {"text": "以前我说要睡时你都会怎么回", "source": "hard_negative"},
         {"text": "我们之前聊过我总是忘记吃饭吗", "source": "hard_negative"},
-        {"text": "还记得我上次累坏了以后发生了什么吗", "source": "hard_negative"}
+        {"text": "还记得我上次累坏了以后发生了什么吗", "source": "hard_negative"},
+        {"text": "上一条提到的那个人，我以前见过吗", "source": "hard_negative"},
+        {"text": "刚才说的项目，我们以前做过什么", "source": "hard_negative"},
+        {"text": "前一句提到的约定，是哪一次定下的", "source": "hard_negative"},
+        {"text": "你为什么叫Haven", "source": "hard_negative"}
       ]
     }
   ]

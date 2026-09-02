@@ -147,16 +147,15 @@
       }
     },
     {
-      "id": "single_member_observation_cannot_scope",
+      "id": "single_member_observation_global_fallback",
       "query": "奇美拉后来怎么发展",
       "expected": {
-        "shadow_status": "not_retrieved",
-        "reason": "scope_required_for_deictic_intent",
-        "scope_status": "insufficient_scope",
+        "shadow_status": "ok",
+        "scope_status": "global_recall",
         "intent": "timeline",
-        "operator": "timeline",
+        "operator": "none",
         "arc_key": "",
-        "candidate_count": 0
+        "min_candidate_count": 1
       }
     },
     {
@@ -180,6 +179,37 @@
         "required_candidate_refs": ["scene:scene_mig2_407efe47a99c8d6ca351"],
         "required_candidate_sources": {
           "scene:scene_mig2_407efe47a99c8d6ca351": "scene_passage_embedding"
+        }
+      }
+    },
+    {
+      "id": "identity_name_origin",
+      "query": "你为什么叫Haven？",
+      "observed_live_head": "5c9b5a8",
+      "expected": {
+        "shadow_status": "ok",
+        "scope_status": "no_scope",
+        "intent": "none",
+        "operator": "none",
+        "required_candidate_refs": ["scene:scene_mig2_346557fc25de1c58a268"],
+        "required_candidate_sources": {
+          "scene:scene_mig2_346557fc25de1c58a268": "scene_passage_embedding"
+        }
+      }
+    },
+    {
+      "id": "unscoped_named_timeline",
+      "query": "Lumos后来怎么样了？",
+      "observed_live_head": "5c9b5a8",
+      "expected": {
+        "shadow_status": "ok",
+        "scope_status": "global_recall",
+        "intent": "timeline",
+        "operator": "none",
+        "min_candidate_count": 1,
+        "required_candidate_refs": ["scene:scene_mig2_647405f4dd95ff0f669c"],
+        "required_candidate_sources": {
+          "scene:scene_mig2_647405f4dd95ff0f669c": "scene_whole_embedding"
         }
       }
     },

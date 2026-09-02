@@ -113,6 +113,15 @@ def _evaluate_case(
     ):
         if field in expected and actual[field] != expected[field]:
             failures.append(f"{field}: expected={expected[field]!r} actual={actual[field]!r}")
+    if (
+        "min_candidate_count" in expected
+        and actual["candidate_count"] < int(expected["min_candidate_count"])
+    ):
+        failures.append(
+            "candidate_count: "
+            f"expected>={expected['min_candidate_count']!r} "
+            f"actual={actual['candidate_count']!r}"
+        )
 
     required_refs = {str(value) for value in expected.get("required_candidate_refs") or []}
     missing_refs = sorted(required_refs - set(candidate_refs))

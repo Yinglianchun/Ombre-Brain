@@ -473,6 +473,17 @@ class GatewayService:
             1,
             min(5, int(typed_recall_cfg.get("max_cards") or 2)),
         )
+        self.typed_event_scene_hook_deadline_ms = max(
+            1000,
+            min(14000, int(typed_recall_cfg.get("hook_deadline_ms") or 8000)),
+        )
+        self.typed_event_scene_reranker_min_remaining_ms = max(
+            100,
+            min(
+                self.typed_event_scene_hook_deadline_ms,
+                int(typed_recall_cfg.get("reranker_min_remaining_ms") or 3500),
+            ),
+        )
         self.passage_shadow_index = PassageShadowIndex(config, self.embedding_engine)
         self.cue_passage_shadow_index = CuePassageShadowIndex(config, self.embedding_engine)
         self.fact_event_lexical_shadow_index = FactEventLexicalShadowIndex(config)
@@ -827,6 +838,9 @@ class GatewayService:
                 await refresh_task
             except asyncio.CancelledError:
                 pass
+        reranker_close = getattr(getattr(self, "reranker_engine", None), "close", None)
+        if callable(reranker_close):
+            await reranker_close()
         if self.http_client and not getattr(self.http_client, "is_closed", False):
             await self.http_client.aclose()
 
@@ -2277,6 +2291,7 @@ class GatewayService:
         })
 
     async def handle_hook_recall(self, request: Request) -> JSONResponse:
+        hook_started_at = time.perf_counter()
         auth_result = self._authorize(request.headers.get("Authorization", ""))
         if auth_result is not None:
             return auth_result
@@ -2413,9 +2428,54 @@ class GatewayService:
             and not simulation_probe
         )
 
-        semantic_recall_debug, semantic_query_vector = (
-            await self._route_semantic_query_views(query)
+        hook_deadline_ms = max(
+            1000,
+            int(getattr(self, "typed_event_scene_hook_deadline_ms", 8000) or 8000),
         )
+        hook_deadline_at = hook_started_at + (hook_deadline_ms / 1000.0)
+        semantic_route_started_at = time.perf_counter()
+        try:
+            semantic_recall_debug, semantic_query_vector = await asyncio.wait_for(
+                self._route_semantic_query_views(query),
+                timeout=max(0.05, hook_deadline_at - time.perf_counter()),
+            )
+        except asyncio.TimeoutError:
+            elapsed_ms = max(0, int((time.perf_counter() - hook_started_at) * 1000))
+            logger.warning(
+                "Gateway hook recall deadline | session=%s stage=semantic_route elapsed_ms=%s deadline_ms=%s",
+                session_id,
+                elapsed_ms,
+                hook_deadline_ms,
+            )
+            return JSONResponse({
+                "ok": True,
+                "query": query,
+                "session_id": session_id,
+                "cards": [],
+                "notes": [],
+                "additional_context": "",
+                "recalled_ids": [],
+                "debug": {
+                    "query": query,
+                    "candidate_count": 0,
+                    "hook_recall_debug": {
+                        "mode": "full_gateway" if recall_mode == "full" else "fast_bucket",
+                        "skip_reason": "hook_deadline_at_semantic_route",
+                    },
+                    "hook_timing_debug": {
+                        "total_ms": elapsed_ms,
+                        "deadline_ms": hook_deadline_ms,
+                        "deadline_exceeded": True,
+                        "deadline_stage": "semantic_route",
+                        "steps_ms": {"semantic_route": elapsed_ms},
+                    },
+                },
+            })
+        semantic_route_timing_ms = max(
+            0,
+            int((time.perf_counter() - semantic_route_started_at) * 1000),
+        )
+        semantic_recall_debug["route_timing_ms"] = semantic_route_timing_ms
         semantic_recall_debug["simulation_scope"] = (
             simulation_scope if simulation_probe else "live"
         )
@@ -2484,6 +2544,16 @@ class GatewayService:
             direct_skip_budget,
             route_skip_proposed=route_skip_proposed,
         )
+        identity_name_recall = bool(
+            getattr(self, "identity", None)
+            and self._identity_name_search_terms(query)
+        )
+        if identity_name_recall:
+            structure_allows_pre_skip = False
+            semantic_recall_debug["identity_name_recall_veto"] = {
+                "applied": True,
+                "reason": "identity_name_question_requires_memory_search",
+            }
         direct_chitchat_skip = bool(
             (not simulation_probe or simulation_scope == "live_mirror")
             and structure_allows_pre_skip
@@ -2641,6 +2711,9 @@ class GatewayService:
                 passage_query_view_shadow_enabled=passage_query_view_shadow_requested,
                 record_hook_injection=record_hook_injection,
                 typed_live_allowed=not simulation_probe,
+                semantic_route_timing_ms=semantic_route_timing_ms,
+                hook_started_at=hook_started_at,
+                hook_deadline_at=hook_deadline_at,
             )
 
         try:
@@ -2805,67 +2878,116 @@ class GatewayService:
         passage_query_view_shadow_enabled: bool = False,
         record_hook_injection: bool = False,
         typed_live_allowed: bool = True,
+        semantic_route_timing_ms: int = 0,
+        hook_started_at: float | None = None,
+        hook_deadline_at: float | None = None,
     ) -> JSONResponse:
         """Run the normal Gateway recall pipeline without forwarding upstream."""
-        try:
-            _forward_payload, recalled_ids, debug_payload = await self.prepare_payload(
-                {
-                    "model": model,
-                    "messages": messages,
-                    "stream": False,
-                },
-                session_id,
-                include_debug=True,
-                debug_detail="compact",
-                include_recent_context=include_recent_context,
-                semantic_recall_result=semantic_recall_result,
-            )
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-        except RuntimeError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=503)
+        full_started_at = time.perf_counter()
+        request_started_at = hook_started_at or full_started_at
+        hook_steps_ms: dict[str, int] = {
+            "semantic_route": max(0, int(semantic_route_timing_ms or 0)),
+        }
 
-        cards = self._hook_recall_cards_from_debug(
-            debug_payload,
-            max_cards=max_cards,
-            max_chars=max_chars,
-            include_diffused=include_diffused,
+        def mark_hook_step(name: str, started_at: float) -> None:
+            hook_steps_ms[name] = max(
+                0,
+                int((time.perf_counter() - started_at) * 1000),
+            )
+
+        semantic_debug = (
+            semantic_recall_result[0]
+            if semantic_recall_result
+            and isinstance(semantic_recall_result[0], dict)
+            else {}
         )
-        recalled_ids = list(recalled_ids or debug_payload.get("injected_bucket_ids") or [])
-        typed_live = (
-            await self._typed_event_scene_live_context(
+        semantic_query_vector = (
+            semantic_recall_result[1]
+            if semantic_recall_result is not None
+            else None
+        )
+        typed_prepass_enabled = bool(
+            typed_live_allowed
+            and getattr(self, "typed_event_scene_live_enabled", False)
+        )
+        if typed_prepass_enabled:
+            stage_started_at = time.perf_counter()
+            retrieval_budget = semantic_debug.get("retrieval_budget")
+            prefetched_candidate = (
+                retrieval_budget.get("passage_candidate_shadow")
+                if isinstance(retrieval_budget, dict)
+                else None
+            )
+            typed_candidate_result = (
+                prefetched_candidate
+                if isinstance(prefetched_candidate, dict)
+                else self._passage_candidate_shadow_debug(
+                    query,
+                    semantic_query_vector or [],
+                )
+            )
+            mark_hook_step("typed_candidate", stage_started_at)
+
+            stage_started_at = time.perf_counter()
+            typed_call = self._typed_event_scene_live_context(
                 query,
                 session_id,
-                (semantic_recall_result[1] or []) if semantic_recall_result else [],
-                semantic_recall_debug=(
-                    semantic_recall_result[0]
-                    if semantic_recall_result
-                    and isinstance(semantic_recall_result[0], dict)
-                    else debug_payload.get("semantic_recall_debug")
-                ),
-                excluded_scene_ids=set(recalled_ids),
+                semantic_query_vector or [],
+                semantic_recall_debug=semantic_debug,
                 body_char_limit=max_chars,
+                candidate_result=typed_candidate_result,
+                deadline_at=hook_deadline_at,
+                reranker_min_remaining_ms=int(
+                    getattr(
+                        self,
+                        "typed_event_scene_reranker_min_remaining_ms",
+                        3500,
+                    )
+                    or 3500
+                ),
             )
-            if typed_live_allowed
-            else {
-                "status": "simulation_disabled",
+            try:
+                typed_live = (
+                    await asyncio.wait_for(
+                        typed_call,
+                        timeout=max(0.05, hook_deadline_at - time.perf_counter()),
+                    )
+                    if hook_deadline_at is not None
+                    else await typed_call
+                )
+            except asyncio.TimeoutError:
+                typed_live = {
+                    "status": "not_retrieved",
+                    "reason": "hook_deadline_during_typed_recall",
+                    "context": "",
+                    "cards": [],
+                    "selected_refs": [],
+                    "menus_included": [],
+                    "menus_suppressed": [],
+                }
+            mark_hook_step("typed_admission", stage_started_at)
+        else:
+            typed_live = {
+                "status": "simulation_disabled" if not typed_live_allowed else "disabled",
                 "context": "",
                 "cards": [],
                 "selected_refs": [],
                 "menus_included": [],
                 "menus_suppressed": [],
             }
-        )
-        cards.extend(list(typed_live.get("cards") or []))
-        dynamic_parts = [
-            str(typed_live.get("context") or ""),
-            self._hook_recall_full_dynamic_context(
-                debug_payload,
-                include_diffused=include_diffused,
-            ),
-        ]
+
+        typed_reason = str(typed_live.get("reason") or "")
+        recalled_ids: list[str] = []
+        debug_payload = {
+            "semantic_recall_debug": semantic_debug,
+            "recalled_bucket_ids": [],
+            "injected_bucket_ids": [],
+            "recalled_moment_debug": [],
+            "suppressed_candidates": [],
+        }
+        cards = list(typed_live.get("cards") or [])
         dynamic_context = self._clip_text(
-            "\n\n".join(part for part in dynamic_parts if str(part or "").strip()),
+            str(typed_live.get("context") or ""),
             max_context_chars,
         )
         if record_hook_injection:
@@ -2880,16 +3002,34 @@ class GatewayService:
                     ),
                 )
         additional_context = self._render_hook_recall_full_additional_context(dynamic_context)
+        hook_timing_debug = {
+            "total_ms": max(
+                0,
+                int((time.perf_counter() - request_started_at) * 1000),
+            ),
+            "full_handler_ms": max(
+                0,
+                int((time.perf_counter() - full_started_at) * 1000),
+            ),
+            "steps_ms": dict(hook_steps_ms),
+            "typed_first": typed_prepass_enabled,
+            "deadline_ms": (
+                max(0, int((hook_deadline_at - request_started_at) * 1000))
+                if hook_deadline_at is not None
+                else None
+            ),
+            "deadline_exceeded": typed_reason.startswith("hook_deadline_"),
+            "legacy_pool": "removed",
+        }
         minimal_debug = {
             "mode": "full_gateway",
             "query": query,
-            "candidate_count": len(debug_payload.get("recalled_moment_debug") or [])
-            + len(debug_payload.get("suppressed_candidates") or []),
-            "recalled_bucket_ids": list(debug_payload.get("recalled_bucket_ids") or []),
-            "diffused_bucket_ids": list(debug_payload.get("diffused_bucket_ids") or []),
-            "just_now_context_injected": bool(debug_payload.get("just_now_context_injected")),
-            "date_recall_injected": bool(debug_payload.get("date_recall_injected")),
-            "prepare_timing_debug": dict(debug_payload.get("prepare_timing_debug") or {}),
+            "candidate_count": int(typed_live.get("candidate_count") or 0),
+            "recalled_bucket_ids": [],
+            "diffused_bucket_ids": [],
+            "just_now_context_injected": False,
+            "date_recall_injected": False,
+            "hook_timing_debug": hook_timing_debug,
             "typed_event_scene_live": {
                 key: value
                 for key, value in typed_live.items()
@@ -2897,11 +3037,7 @@ class GatewayService:
             },
         }
         semantic_debug = debug_payload.get("semantic_recall_debug")
-        semantic_query_vector = (
-            semantic_recall_result[1]
-            if semantic_recall_result is not None
-            else None
-        )
+        stage_started_at = time.perf_counter()
         await self._apply_passage_weak_candidate_query_view_shadow(
             query,
             semantic_query_vector or [],
@@ -2913,6 +3049,7 @@ class GatewayService:
             semantic_debug,
             recalled_ids=recalled_ids,
         )
+        mark_hook_step("post_recall_shadow", stage_started_at)
         ablation_observation = (
             semantic_debug.get("live_recall_ablation_observation")
             if isinstance(semantic_debug, dict)
@@ -2925,6 +3062,24 @@ class GatewayService:
                 session_id,
                 json.dumps(ablation_observation, ensure_ascii=False, separators=(",", ":")),
             )
+        hook_timing_debug["total_ms"] = max(
+            0,
+            int((time.perf_counter() - request_started_at) * 1000),
+        )
+        hook_timing_debug["full_handler_ms"] = max(
+            0,
+            int((time.perf_counter() - full_started_at) * 1000),
+        )
+        hook_timing_debug["steps_ms"] = dict(hook_steps_ms)
+        logger.info(
+            "Gateway hook recall timing | session=%s total_ms=%s typed_first=%s "
+            "legacy_pool=removed typed_reason=%s steps_ms=%s",
+            session_id,
+            hook_timing_debug["total_ms"],
+            typed_prepass_enabled,
+            typed_reason,
+            json.dumps(hook_steps_ms, ensure_ascii=False, separators=(",", ":")),
+        )
         response: dict[str, Any] = {
             "ok": True,
             "query": query,
@@ -2935,8 +3090,6 @@ class GatewayService:
             "recalled_ids": recalled_ids,
             "debug": minimal_debug,
         }
-        if record_hook_injection and recalled_ids:
-            self._record_hook_recall_injection(session_id, recalled_ids)
         if include_debug:
             debug = dict(debug_payload)
             if not include_context_debug:
@@ -3335,11 +3488,13 @@ class GatewayService:
             semantic_recall_debug["applied_action"] = (
                 "skip" if semantic_skip_broad else "recall"
             )
+            stage_started_at = time.perf_counter()
             self._seed_typed_event_scene_observation(
                 current_user_query,
                 semantic_recall_query_vector or [],
                 semantic_recall_debug,
             )
+            mark_step("typed_candidate_seed", stage_started_at)
             skip_broad_dynamic_recall = (
                 skip_for_targeted_detail
                 or needs_handoff_first
@@ -14379,11 +14534,6 @@ class GatewayService:
                 set(),
             )
         )
-        hard_scope_block = scope_status in {"scope_only", "ambiguous_scope"} or (
-            scope_status == "insufficient_scope"
-            and scope_operator
-            in {"latest_relevant_member", "timeline", "member_search", "narrative_read"}
-        )
         specific_term_reader = getattr(
             getattr(self, "recall_policy", None),
             "specific_query_terms",
@@ -14400,6 +14550,33 @@ class GatewayService:
         specific_global_terms = [
             term for term in raw_global_terms if self._matched_query_term_is_specific(term)
         ]
+        deictic_scope_missing = bool(
+            scope_status == "insufficient_scope"
+            and scope_operator
+            in {"latest_relevant_member", "timeline", "member_search"}
+        )
+        narrative_scope_missing = bool(
+            scope_status == "insufficient_scope"
+            and scope_operator == "narrative_read"
+        )
+        global_named_fallback = bool(
+            deictic_scope_missing and specific_global_terms
+        )
+        if global_named_fallback:
+            entity_scope = {
+                **entity_scope,
+                "status": "global_recall",
+                "operator": "none",
+                "retrieval_allowed": True,
+                "scope_fallback": "specific_term_global_event_scene",
+                "decision_applied": False,
+            }
+            scope_status = "global_recall"
+            scope_operator = "none"
+        hard_scope_block = scope_status in {"scope_only", "ambiguous_scope"} or bool(
+            narrative_scope_missing
+            or (deictic_scope_missing and not global_named_fallback)
+        )
         if hard_scope_block or (
             not scope_arc_key
             and not specific_global_terms
@@ -14632,6 +14809,7 @@ class GatewayService:
                 "scope_applied_before_candidate_search": bool(scope_arc_key),
                 "scope_arc_key": scope_arc_key,
                 "global_specific_terms": specific_global_terms,
+                "global_named_fallback": global_named_fallback,
                 "event_eligibility": "all_active",
             },
             "lanes": {
@@ -14891,6 +15069,10 @@ class GatewayService:
         has_memory_backed_detail = bool(
             matched_detail_markers and has_memory_side_handle
         )
+        has_identity_name_intent = bool(
+            getattr(self, "identity", None)
+            and self._identity_name_search_terms(query)
+        )
         applied = bool(
             route in {"present_chitchat", "present_reality"}
             and route_action == "skip"
@@ -14898,6 +15080,7 @@ class GatewayService:
             and not has_anchor
             and not has_explicit_recall
             and not has_memory_backed_detail
+            and not has_identity_name_intent
         )
         return {
             "applied": applied,
@@ -14907,6 +15090,7 @@ class GatewayService:
             "has_anchor": has_anchor,
             "has_explicit_recall": has_explicit_recall,
             "has_memory_backed_detail": has_memory_backed_detail,
+            "has_identity_name_intent": has_identity_name_intent,
             "matched_detail_markers": matched_detail_markers,
             "matched_candidate_sources": matched_candidate_sources,
             "owner_entity_matches": observed_matches,
@@ -15119,6 +15303,8 @@ class GatewayService:
         body_char_limit: int = 1200,
         simulation_only: bool = False,
         candidate_result: dict[str, Any] | None = None,
+        deadline_at: float | None = None,
+        reranker_min_remaining_ms: int = 0,
     ) -> dict[str, Any]:
         live_mode = str(
             getattr(self, "typed_event_scene_recall_mode", "") or ""
@@ -15234,11 +15420,41 @@ class GatewayService:
         ]
         admission = evaluate_typed_admission_shadow(query, scope, candidates)
         if admission.get("mode") == "direct_evidence_rerank" and candidates:
+            remaining_ms = (
+                max(0, int((deadline_at - time.perf_counter()) * 1000))
+                if deadline_at is not None
+                else None
+            )
+            if (
+                remaining_ms is not None
+                and remaining_ms < max(0, int(reranker_min_remaining_ms or 0))
+            ):
+                return {
+                    **empty,
+                    "status": "not_retrieved",
+                    "reason": "hook_deadline_before_reranker",
+                    "entity_scope": scope,
+                    "surface_reranker_gate": surface_gate,
+                    "live_mode_gate": live_mode_gate,
+                    "candidate_count": len(candidates),
+                    "admission": admission,
+                    "deadline_remaining_ms": remaining_ms,
+                    "narrative_body_included": False,
+                    "raw_source_query_enabled": False,
+                }
             documents = [self._typed_reranker_document(row) for row in candidates]
-            results = await self.reranker_engine.rerank(
+            rerank_call = self.reranker_engine.rerank(
                 typed_admission_rerank_query(query, scope),
                 documents,
                 top_n=len(documents),
+            )
+            results = (
+                await asyncio.wait_for(
+                    rerank_call,
+                    timeout=max(0.05, (deadline_at or 0.0) - time.perf_counter()),
+                )
+                if deadline_at is not None
+                else await rerank_call
             )
             rerank_scores = {
                 self._typed_owner_ref(candidates[result.index]): float(result.score)

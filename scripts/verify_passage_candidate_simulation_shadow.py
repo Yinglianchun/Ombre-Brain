@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -92,6 +94,19 @@ service.cue_passage_shadow_index = CuePassageIndex()
 service.fact_event_semantic_index = FactSemanticIndex()
 service.fact_event_lexical_shadow_index = LexicalIndex()
 service._passage_candidate_shadow_sync = {"status": "ok", "decision_applied": False}
+
+
+class RecallPolicy:
+    @staticmethod
+    def specific_query_terms(query: str) -> list[str]:
+        if "Lumos" in query:
+            return ["Lumos"]
+        if "初遇" in query:
+            return ["初遇"]
+        return []
+
+
+service.recall_policy = RecallPolicy()
 service._passage_candidate_shadow_catalog = {
     "scene-a": {"owner_kind": "scene", "title": "A", "memory_date": "2026-01-01"},
     "scene-b": {"owner_kind": "scene", "title": "B", "memory_date": "2026-08-30"},
@@ -154,6 +169,13 @@ class ObservedScope:
             return {"status": "scope_only", "operator": "none", "scope_anchor": {"arc_key": "work:spy"}}
         if query == "看到哪了":
             return {"status": "insufficient_scope", "operator": "latest_relevant_member", "scope_anchor": None}
+        if query == "Lumos后来怎么样了":
+            return {
+                "status": "insufficient_scope",
+                "intent": "timeline",
+                "operator": "timeline",
+                "scope_anchor": None,
+            }
         if query == "约尔后来怎么发展":
             return {"status": "ambiguous_scope", "operator": "timeline", "scope_anchor": None}
         if query == "事情":
@@ -192,6 +214,13 @@ assert service._passage_candidate_shadow_debug("阿尼亚", [1.0, 0.0])["reason"
 assert service._passage_candidate_shadow_debug("看到哪了", [1.0, 0.0])["reason"] == (
     "scope_required_for_deictic_intent"
 )
+lumos = service._passage_candidate_shadow_debug("Lumos后来怎么样了", [1.0, 0.0])
+assert lumos["status"] == "ok", lumos
+assert lumos["entity_scope"]["status"] == "global_recall", lumos
+assert lumos["entity_scope"]["intent"] == "timeline", lumos
+assert lumos["entity_scope"]["operator"] == "none", lumos
+assert lumos["policy"]["global_named_fallback"] is True, lumos
+assert lumos["candidate_count"] > 0, lumos
 assert service._passage_candidate_shadow_debug("约尔后来怎么发展", [1.0, 0.0])[
     "reason"
 ] == "ambiguous_entity_scope"
@@ -538,15 +567,10 @@ async def verify_full_handler_uses_prefetched_query_vector() -> None:
     handler = GatewayService.__new__(GatewayService)
     captured_vectors: list[list[float]] = []
 
-    async def fake_prepare_payload(self, *_args, **kwargs):
-        assert kwargs["semantic_recall_result"][1] == [0.25, 0.75]
-        return {}, ["scene-live"], {"semantic_recall_debug": {}}
-
     async def fake_apply(self, _query, query_embedding, _semantic_debug, **kwargs):
         assert kwargs["execution_enabled"] is True
         captured_vectors.append(query_embedding)
 
-    handler.prepare_payload = types.MethodType(fake_prepare_payload, handler)
     handler._apply_passage_weak_candidate_query_view_shadow = types.MethodType(
         fake_apply,
         handler,
@@ -574,6 +598,121 @@ async def verify_full_handler_uses_prefetched_query_vector() -> None:
     )
     assert response.status_code == 200
     assert captured_vectors == [[0.25, 0.75]]
+
+
+async def verify_full_handler_uses_only_typed_pool() -> None:
+    async def run_case(
+        query: str,
+        typed_result: dict,
+    ) -> tuple[dict, int]:
+        handler = GatewayService.__new__(GatewayService)
+        handler.typed_event_scene_live_enabled = True
+        candidate_calls = 0
+
+        def fake_candidates(_query, _vector):
+            nonlocal candidate_calls
+            candidate_calls += 1
+            return {"status": "ok", "candidates": [{"owner_id": "scene-a"}]}
+
+        async def fake_typed(self, _query, _session, _vector, **kwargs):
+            assert kwargs["candidate_result"]["status"] == "ok"
+            return dict(typed_result)
+
+        async def legacy_prepare_must_not_run(*_args, **_kwargs):
+            raise AssertionError("automatic hook recall must not fall back to legacy buckets")
+
+        async def no_op(*_args, **_kwargs):
+            return None
+
+        handler._passage_candidate_shadow_debug = fake_candidates
+        handler._typed_event_scene_live_context = types.MethodType(fake_typed, handler)
+        handler.prepare_payload = legacy_prepare_must_not_run
+        handler._hook_recall_cards_from_debug = lambda *_args, **_kwargs: []
+        handler._hook_recall_full_dynamic_context = (
+            lambda debug, **_kwargs: "legacy" if debug.get("recalled_bucket_ids") else ""
+        )
+        handler._clip_text = lambda text, _limit: text
+        handler._render_hook_recall_full_additional_context = lambda context: context
+        handler._apply_passage_weak_candidate_query_view_shadow = no_op
+        handler._attach_reviewed_scene_onehop_shadow = no_op
+
+        response = await handler._handle_hook_recall_full(
+            query=query,
+            session_id=f"typed-first-{query}",
+            messages=[{"role": "user", "content": query}],
+            model="gpt-5.5",
+            max_cards=2,
+            max_chars=1000,
+            max_context_chars=4200,
+            include_diffused=False,
+            include_context_debug=False,
+            include_debug=True,
+            include_recent_context=False,
+            semantic_recall_result=({}, [0.25, 0.75]),
+        )
+        return json.loads(response.body), candidate_calls
+
+    selected, selected_candidate_calls = await run_case(
+        "记得巧克蕾是谁吗",
+        {
+            "status": "injected",
+            "context": "typed",
+            "cards": [],
+            "selected_refs": ["event:event-a"],
+            "menus_included": [],
+            "menus_suppressed": [],
+        },
+    )
+    assert selected_candidate_calls == 1
+    assert selected["recalled_ids"] == []
+    assert selected["debug"]["hook_timing_debug"]["legacy_pool"] == "removed"
+
+    daily, daily_candidate_calls = await run_case(
+        "今天好热",
+        {
+            "status": "not_retrieved",
+            "reason": "daily_surface_without_memory_intent",
+            "context": "",
+            "cards": [],
+            "selected_refs": [],
+            "menus_included": [],
+            "menus_suppressed": [],
+        },
+    )
+    assert daily_candidate_calls == 1
+    assert daily["recalled_ids"] == []
+    assert daily["debug"]["hook_timing_debug"]["legacy_pool"] == "removed"
+
+    entity_only, entity_candidate_calls = await run_case(
+        "阿尼亚",
+        {
+            "status": "not_retrieved",
+            "reason": "entity_without_recall_intent",
+            "context": "",
+            "cards": [],
+            "selected_refs": [],
+            "menus_included": [],
+            "menus_suppressed": [],
+        },
+    )
+    assert entity_candidate_calls == 1
+    assert entity_only["recalled_ids"] == []
+    assert entity_only["debug"]["hook_timing_debug"]["legacy_pool"] == "removed"
+
+    empty, empty_candidate_calls = await run_case(
+        "Lumos后来怎么样了",
+        {
+            "status": "not_admitted",
+            "context": "",
+            "cards": [],
+            "selected_refs": [],
+            "menus_included": [],
+            "menus_suppressed": [],
+        },
+    )
+    assert empty_candidate_calls == 1
+    assert empty["recalled_ids"] == []
+    assert empty["debug"]["hook_timing_debug"]["legacy_pool"] == "removed"
 
 
 async def verify_mutation_refresh_queue() -> None:
@@ -744,6 +883,7 @@ async def verify_warm_plans_and_bounded_refresh_applies() -> None:
 
 asyncio.run(verify_weak_trigger_controls_query_view_execution())
 asyncio.run(verify_full_handler_uses_prefetched_query_vector())
+asyncio.run(verify_full_handler_uses_only_typed_pool())
 asyncio.run(verify_mutation_refresh_queue())
 asyncio.run(verify_warm_plans_and_bounded_refresh_applies())
 

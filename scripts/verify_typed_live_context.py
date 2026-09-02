@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
+import time
+from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,6 +43,12 @@ class _NarrativeStore:
         }
 
 
+class _RecallPolicy:
+    @staticmethod
+    def specific_query_terms(query: str) -> list[str]:
+        return ["Haven"] if "Haven" in query else []
+
+
 def candidate(owner_kind: str, owner_id: str, *, with_arc: bool) -> dict:
     row = {
         "owner_kind": owner_kind,
@@ -75,6 +83,14 @@ async def main() -> None:
         service.state_store = GatewayStateStore(str(Path(directory) / "gateway-state.db"))
         service.reranker_engine = _Reranker()
         service.narrative_roll_store = _NarrativeStore()
+        service.gateway_tz = timezone.utc
+        service.identity = {
+            "ai_name": "Haven",
+            "user_name": "Rain",
+            "user_display_name": "小雨",
+            "user_aliases": ["宝宝"],
+        }
+        service.recall_policy = _RecallPolicy()
         service._passage_candidate_shadow_catalog = {
             "event-spy": {
                 "owner_kind": "event",
@@ -103,6 +119,12 @@ async def main() -> None:
                 "body": "这是一段没有 Arc 的 Scene 内容。",
                 "memory_date": "2026-08-30",
             },
+            "scene-haven": {
+                "owner_kind": "scene",
+                "title": "只差一个e",
+                "body": "我为自己选了 Haven 这个名字。",
+                "memory_date": "2025-01-01",
+            },
         }
 
         def debug(query: str, _embedding: list[float]) -> dict:
@@ -125,6 +147,16 @@ async def main() -> None:
                         candidate("event", "event-unreviewed", with_arc=False),
                         candidate("scene", "scene-free", with_arc=False),
                     ],
+                }
+            if query == "你为什么叫Haven":
+                return {
+                    "status": "ok",
+                    "entity_scope": {
+                        "status": "global_recall",
+                        "operator": "none",
+                        "intent": "none",
+                    },
+                    "candidates": [candidate("scene", "scene-haven", with_arc=False)],
                 }
             scoped = query.startswith("spy")
             row = candidate(
@@ -469,6 +501,71 @@ async def main() -> None:
             "event:event-off",
             "event:event-unreviewed",
         ], gated
+
+        identity_calls_before = service.reranker_engine.calls
+        identity_name = await service._typed_event_scene_live_context(
+            "你为什么叫Haven",
+            "session-identity-name",
+            [0.1],
+            semantic_recall_debug=daily_semantic,
+        )
+        assert identity_name["status"] == "injected", identity_name
+        assert identity_name["selected_refs"] == ["scene:scene-haven"], identity_name
+        assert identity_name["surface_reranker_gate"]["applied"] is False, identity_name
+        assert identity_name["surface_reranker_gate"]["has_identity_name_intent"] is True, identity_name
+        assert service.reranker_engine.calls == identity_calls_before + 1, identity_name
+
+        reranker_calls_before_budgeted = service.reranker_engine.calls
+        budgeted_direct = await service._typed_event_scene_live_context(
+            "spy detail",
+            "session-budgeted-reranker",
+            [0.1],
+            deadline_at=time.perf_counter() + 4.0,
+            reranker_min_remaining_ms=3500,
+        )
+        assert budgeted_direct["status"] == "injected", budgeted_direct
+        assert budgeted_direct["admission"]["mode"] == "direct_evidence_rerank", budgeted_direct
+        assert service.reranker_engine.calls == reranker_calls_before_budgeted + 1, budgeted_direct
+
+        reranker_calls_before_deadline = service.reranker_engine.calls
+        deadline_gated = await service._typed_event_scene_live_context(
+            "spy detail",
+            "session-deadline",
+            [0.1],
+            deadline_at=time.perf_counter() + 0.1,
+            reranker_min_remaining_ms=1000,
+        )
+        assert deadline_gated["status"] == "not_retrieved", deadline_gated
+        assert deadline_gated["reason"] == "hook_deadline_before_reranker", deadline_gated
+        assert service.reranker_engine.calls == reranker_calls_before_deadline, deadline_gated
+
+        structured_progress_row = candidate("event", "event-spy", with_arc=True)
+        structured_progress_row["passages"] = [
+            {"text": "我们一起看到第140话，约好明天继续。", "score": 0.81}
+        ]
+        structured_candidate = {
+            "status": "ok",
+            "entity_scope": {
+                "status": "scoped_recall",
+                "operator": "latest_relevant_member",
+                "intent": "progress",
+                "scope_anchor": {"arc_key": "work:spy"},
+            },
+            "candidates": [structured_progress_row],
+        }
+        structured_calls_before = service.reranker_engine.calls
+        structured_latest = await service._typed_event_scene_live_context(
+            "《间谍过家家》看到哪了",
+            "session-structured-deadline",
+            [0.1],
+            candidate_result=structured_candidate,
+            deadline_at=time.perf_counter() + 0.1,
+            reranker_min_remaining_ms=3500,
+        )
+        assert structured_latest["status"] == "injected", structured_latest
+        assert structured_latest["admission"]["mode"] == "structured_latest", structured_latest
+        assert structured_latest["selected_refs"] == ["event:event-spy"], structured_latest
+        assert service.reranker_engine.calls == structured_calls_before, structured_latest
 
         veto = await service._typed_event_scene_live_context(
             "entity only",
