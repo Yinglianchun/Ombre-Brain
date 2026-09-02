@@ -9420,7 +9420,9 @@ async def _narrative_material_freshness(narrative: dict, scan_timezone: ZoneInfo
         event = fact_event_store.read(str(event_id), include_sources=False)
         if not event or str(event.get("status") or "") != "active":
             continue
-        event_updated_at = str(event.get("updated_at") or event.get("created_at") or "")
+        # Event revisions are immutable successor rows. ``updated_at`` also tracks
+        # recallability/maintenance changes, so it is not a prose freshness signal.
+        event_updated_at = str(event.get("created_at") or "")
         link_updated_at = automatic_linked_at.get(str(event_id), "")
         updated_at = max(
             (event_updated_at, link_updated_at),
@@ -9528,6 +9530,7 @@ async def _scan_narrative_revision_inbox(*, include_external: bool = True, force
     settings = _narrative_revision_scan_settings(config)
     scan_timezone = settings["timezone"]
     stale_created: list[dict[str, Any]] = []
+    stale_narrative_ids: set[str] = set()
     checked_rolls = 0
     for summary in narrative_roll_store.revision_targets():
         narrative_id = str(summary.get("narrative_id") or "")
@@ -9548,6 +9551,7 @@ async def _scan_narrative_revision_inbox(*, include_external: bool = True, force
         )
         latest_time = _narrative_timestamp(latest.get("updated_at"), scan_timezone)
         if latest_time and latest_time > published:
+            stale_narrative_ids.add(narrative_id)
             stale_created.extend(
                 narrative_revision_inbox_store.consider_stale_roll(
                     narrative,
@@ -9555,6 +9559,8 @@ async def _scan_narrative_revision_inbox(*, include_external: bool = True, force
                     material_count=len(sources),
                 )
             )
+
+    stale_hints_removed = narrative_revision_inbox_store.reconcile_stale_rolls(stale_narrative_ids)
 
     scout_status = "disabled"
     scout_model = str(getattr(dehydrator, "model", "") or "")
@@ -9602,6 +9608,7 @@ async def _scan_narrative_revision_inbox(*, include_external: bool = True, force
         "status": "ok",
         "checked_rolls": checked_rolls,
         "stale_roll_hints_created": len(stale_created),
+        "stale_roll_hints_removed": len(stale_hints_removed),
         "unbound_events_checked": len(events),
         "new_roll_hints_created": len(candidate_created),
         "external_scout_status": scout_status,
@@ -9614,6 +9621,13 @@ async def _scan_narrative_revision_inbox(*, include_external: bool = True, force
                 "proposal_kind": item.get("proposal_kind"),
             }
             for item in [*stale_created, *candidate_created]
+        ] + [
+            {
+                "type": "narrative_revision_hint_removed",
+                "proposal_id": proposal_id,
+                "proposal_kind": "existing_roll_update",
+            }
+            for proposal_id in stale_hints_removed
         ],
         "narrative_writes_performed": [],
     }

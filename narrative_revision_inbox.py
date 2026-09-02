@@ -460,6 +460,29 @@ class NarrativeRevisionInbox:
             }
             self._save(raw)
 
+    def reconcile_stale_rolls(self, stale_narrative_ids: set[str]) -> list[str]:
+        """Remove pending derived freshness hints that the current scan disproves."""
+
+        active = {str(value or "").strip() for value in stale_narrative_ids if str(value or "").strip()}
+        removed: list[str] = []
+        with self._lock:
+            raw = self._load()
+            kept = []
+            for item in raw["items"]:
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("proposal_kind") or "") == "existing_roll_update"
+                    and str(item.get("status") or "") == "pending"
+                    and str(item.get("narrative_id") or "") not in active
+                ):
+                    removed.append(str(item.get("proposal_id") or ""))
+                    continue
+                kept.append(item)
+            if removed:
+                raw["items"] = kept
+                self._save(raw)
+        return removed
+
     def list(
         self,
         *,

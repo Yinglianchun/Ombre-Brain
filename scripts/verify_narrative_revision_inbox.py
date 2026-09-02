@@ -160,6 +160,7 @@ def main() -> int:
             },
             material_count=3,
         ) == []
+        assert inbox.reconcile_stale_rolls({"narrative_names_between_us"}) == []
 
         new_rolls = inbox.consider_new_roll_candidates(
             [{
