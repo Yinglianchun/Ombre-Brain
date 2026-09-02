@@ -166,6 +166,7 @@ from window_shadows import (
 from memory_nodes import MemoryNodeStore
 from narrative_rolls import NarrativeRollStore
 from narrative_revision_inbox import NarrativeRevisionInbox
+from narrative_revision_scout import propose_new_roll_candidates
 from persona_engine import PersonaStateEngine
 from persona_event_selection import select_persona_events
 from raw_events import RawEventStore
@@ -9174,6 +9175,13 @@ async def api_save_narrative_roll_body(request):
         expected_revision=body.get("expected_revision"),
         expected_document_sha256=str(body.get("expected_document_sha256") or ""),
     )
+    if result.get("status") == "updated":
+        current = narrative_roll_store.read(narrative_id)
+        result["absorbed_revision_proposal_ids"] = narrative_revision_inbox_store.mark_absorbed(
+            narrative_id,
+            source_scene_ids=list(current.get("linked_scene_ids") or []),
+            revision=int(result.get("revision") or 0),
+        )
     status_code = (
         404
         if result.get("status") == "not_found"
@@ -9363,6 +9371,256 @@ async def api_append_narrative_arc_event_materials(request):
     return JSONResponse(result, status_code=status_code)
 
 
+def _narrative_revision_scan_settings(config_arg: dict | None = None) -> dict[str, Any]:
+    cfg_source = config_arg if isinstance(config_arg, dict) else config
+    roll_cfg = cfg_source.get("narrative_rolls", {})
+    if not isinstance(roll_cfg, dict):
+        roll_cfg = {}
+    timezone_name = str(roll_cfg.get("revision_scan_timezone") or "Asia/Shanghai").strip()
+    try:
+        scan_timezone = ZoneInfo(timezone_name)
+    except Exception:
+        scan_timezone = ZoneInfo("Asia/Shanghai")
+    return {
+        "enabled": _bool_value(roll_cfg.get("revision_scan_enabled"), True),
+        "hour": _int_between(roll_cfg.get("revision_scan_hour"), 4, 0, 23),
+        "minute": _int_between(roll_cfg.get("revision_scan_minute"), 0, 0, 59),
+        "timezone": scan_timezone,
+        "check_interval_seconds": _int_between(
+            roll_cfg.get("revision_scan_check_interval_minutes"), 15, 1, 1440
+        ) * 60,
+        "new_roll_scout_enabled": _bool_value(roll_cfg.get("new_roll_scout_enabled"), True),
+        "new_roll_scout_max_events": _int_between(
+            roll_cfg.get("new_roll_scout_max_events"), 80, 2, 200
+        ),
+    }
+
+
+def _narrative_timestamp(value: Any, scan_timezone: ZoneInfo) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=scan_timezone)
+    return parsed.astimezone(timezone.utc)
+
+
+async def _narrative_material_freshness(narrative: dict, scan_timezone: ZoneInfo) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    automatic_linked_at = {
+        str(link.get("event_id") or ""): str(link.get("linked_at") or "")
+        for link in narrative.get("automatic_event_links") or []
+        if str(link.get("event_id") or "")
+    }
+    for event_id in list(dict.fromkeys(narrative.get("linked_event_ids") or [])):
+        event = fact_event_store.read(str(event_id), include_sources=False)
+        if not event or str(event.get("status") or "") != "active":
+            continue
+        event_updated_at = str(event.get("updated_at") or event.get("created_at") or "")
+        link_updated_at = automatic_linked_at.get(str(event_id), "")
+        updated_at = max(
+            (event_updated_at, link_updated_at),
+            key=lambda value: _narrative_timestamp(value, scan_timezone)
+            or datetime.min.replace(tzinfo=timezone.utc),
+        )
+        if _narrative_timestamp(updated_at, scan_timezone) is None:
+            continue
+        sources.append({
+            "source_type": "event",
+            "source_id": str(event_id),
+            "updated_at": updated_at,
+            "title": str(event.get("title") or event_id),
+            "excerpt": str(event.get("body") or ""),
+            "source_sha256": str(event.get("fingerprint") or ""),
+        })
+    for scene_id in list(dict.fromkeys(narrative.get("linked_scene_ids") or [])):
+        scene = await bucket_mgr.get(str(scene_id))
+        if not scene:
+            continue
+        metadata = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
+        updated_at = str(
+            metadata.get("updated_at")
+            or metadata.get("created")
+            or metadata.get("created_at")
+            or ""
+        )
+        if _narrative_timestamp(updated_at, scan_timezone) is None:
+            continue
+        content = str(scene.get("content") or "")
+        sources.append({
+            "source_type": "scene",
+            "source_id": str(scene_id),
+            "updated_at": updated_at,
+            "title": str(metadata.get("name") or scene_id),
+            "excerpt": content,
+            "source_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        })
+    for source_type, ids in (
+        ("diary", narrative.get("linked_diary_ids") or []),
+        ("darkroom", narrative.get("linked_darkroom_ids") or []),
+    ):
+        for source_id in list(dict.fromkeys(ids)):
+            item = diary_store.read(diary_id=int(source_id), limit=1, include_archived=True)
+            if item.get("count") != 1:
+                continue
+            updated_at = str(
+                item.get("updated_at")
+                or item.get("created_at")
+                or item.get("date")
+                or ""
+            )
+            if _narrative_timestamp(updated_at, scan_timezone) is None:
+                continue
+            content = str(item.get("content") or "")
+            sources.append({
+                "source_type": source_type,
+                "source_id": str(source_id),
+                "updated_at": updated_at,
+                "title": str(item.get("title") or f"{source_type} {source_id}"),
+                "excerpt": content,
+                "source_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            })
+    return sources
+
+
+def _unbound_narrative_event_candidates(limit: int) -> list[dict[str, Any]]:
+    linked_event_ids: set[str] = set()
+    for roll in narrative_roll_store._load():
+        if str(roll.get("lifecycle") or "active") != "active":
+            continue
+        linked_event_ids.update(str(value) for value in roll.get("linked_event_ids") or [])
+        arc_key = str(roll.get("arc_key") or "").strip()
+        if arc_key:
+            linked_event_ids.update(
+                str(link.get("event_id") or "")
+                for link in fact_event_store.arc_event_links(arc_key)
+            )
+    result = fact_event_store.list(
+        item_type="event",
+        status="active",
+        limit=200,
+        include_sources=False,
+    )
+    rows = []
+    for event in result.get("items") or []:
+        event_id = str(event.get("item_id") or "")
+        if not event_id or event_id in linked_event_ids or int(event.get("importance") or 0) < 3:
+            continue
+        rows.append({
+            "event_id": event_id,
+            "date": str(event.get("local_date") or ""),
+            "title": str(event.get("title") or ""),
+            "summary": str(event.get("body") or ""),
+            "updated_at": str(event.get("updated_at") or event.get("created_at") or ""),
+        })
+        if len(rows) >= max(2, min(int(limit), 200)):
+            break
+    return rows
+
+
+async def _scan_narrative_revision_inbox(*, include_external: bool = True, force_external: bool = False) -> dict[str, Any]:
+    """Create review hints only; never invoke Narrative Writer or publish a roll."""
+
+    settings = _narrative_revision_scan_settings(config)
+    scan_timezone = settings["timezone"]
+    stale_created: list[dict[str, Any]] = []
+    checked_rolls = 0
+    for summary in narrative_roll_store.revision_targets():
+        narrative_id = str(summary.get("narrative_id") or "")
+        narrative = await _read_narrative_memory(narrative_id)
+        if narrative.get("status") != "ok":
+            continue
+        published = _narrative_timestamp(narrative.get("published_at"), scan_timezone)
+        if published is None:
+            continue
+        checked_rolls += 1
+        sources = await _narrative_material_freshness(narrative, scan_timezone)
+        if not sources:
+            continue
+        latest = max(
+            sources,
+            key=lambda source: _narrative_timestamp(source.get("updated_at"), scan_timezone)
+            or datetime.min.replace(tzinfo=timezone.utc),
+        )
+        latest_time = _narrative_timestamp(latest.get("updated_at"), scan_timezone)
+        if latest_time and latest_time > published:
+            stale_created.extend(
+                narrative_revision_inbox_store.consider_stale_roll(
+                    narrative,
+                    latest_material=latest,
+                    material_count=len(sources),
+                )
+            )
+
+    scout_status = "disabled"
+    scout_model = str(getattr(dehydrator, "model", "") or "")
+    candidate_created: list[dict[str, Any]] = []
+    events = _unbound_narrative_event_candidates(int(settings["new_roll_scout_max_events"]))
+    event_fingerprint = hashlib.sha256(
+        _json_lib.dumps(
+            [(item["event_id"], item["updated_at"]) for item in events],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    previous_scan = narrative_revision_inbox_store.scan_metadata()
+    if include_external and settings["new_roll_scout_enabled"]:
+        if not events or len(events) < 2:
+            scout_status = "no_materials"
+        elif event_fingerprint == previous_scan.get("external_input_sha256") and not force_external:
+            scout_status = "unchanged"
+        elif not getattr(dehydrator, "client", None) or not getattr(dehydrator, "api_available", False):
+            scout_status = "unavailable"
+        else:
+            try:
+                candidates = await propose_new_roll_candidates(
+                    client=dehydrator.client,
+                    model=scout_model,
+                    events=events,
+                    completion_options=dehydrator._completion_options(max_tokens=1400, temperature=0.0),
+                )
+                candidate_created = narrative_revision_inbox_store.consider_new_roll_candidates(
+                    candidates,
+                    model=scout_model,
+                )
+                scout_status = "ok"
+            except Exception as exc:
+                scout_status = "error"
+                logger.warning("New Narrative Roll scout failed / 新叙事卷候选扫描失败: %s", exc)
+
+    recorded_fingerprint = (
+        event_fingerprint
+        if scout_status in {"ok", "unchanged", "no_materials"}
+        else str(previous_scan.get("external_input_sha256") or "")
+    )
+
+    result = {
+        "status": "ok",
+        "checked_rolls": checked_rolls,
+        "stale_roll_hints_created": len(stale_created),
+        "unbound_events_checked": len(events),
+        "new_roll_hints_created": len(candidate_created),
+        "external_scout_status": scout_status,
+        "external_model": scout_model if scout_status not in {"disabled", "unavailable"} else "",
+        "external_input_sha256": recorded_fingerprint,
+        "writes_performed": [
+            {
+                "type": "narrative_revision_hint",
+                "proposal_id": item.get("proposal_id"),
+                "proposal_kind": item.get("proposal_kind"),
+            }
+            for item in [*stale_created, *candidate_created]
+        ],
+        "narrative_writes_performed": [],
+    }
+    narrative_revision_inbox_store.record_scan(result)
+    return result
+
+
 async def _capture_narrative_revision_candidates(
     *,
     scene_ids: list[str] | None = None,
@@ -9445,6 +9703,36 @@ async def api_narrative_revision_inbox(request):
         limit=_int_between(request.query_params.get("limit"), 50, 1, 200),
     )
     return JSONResponse(result, status_code=400 if result.get("status") == "invalid" else 200)
+
+
+@mcp.custom_route("/api/narrative-revision-inbox/scan", methods=["POST"])
+async def api_scan_narrative_revision_inbox(request):
+    """Run the derived hint scan without writing or publishing Narrative prose."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"status": "invalid", "reason": "request_body_not_object"}, status_code=400)
+    try:
+        result = await _scan_narrative_revision_inbox(
+            include_external=_bool_value(body.get("include_external"), True),
+            force_external=_bool_value(body.get("force_external"), False),
+        )
+    except Exception as exc:
+        logger.warning("Narrative revision scan failed / 叙事卷修订扫描失败: %s", exc, exc_info=True)
+        return JSONResponse({
+            "status": "error",
+            "reason": "narrative_revision_scan_failed",
+            "error": str(exc),
+            "narrative_writes_performed": [],
+        }, status_code=502)
+    return JSONResponse(result)
 
 
 @mcp.custom_route("/api/narrative-revision-inbox/{proposal_id}", methods=["PATCH"])
@@ -17666,6 +17954,58 @@ if __name__ == "__main__":
             wt = threading.Thread(target=_start_word_map_daily_rebuild_scheduler, daemon=True)
             wt.start()
             logger.info("Word Map daily rebuild scheduler started / 词图每日重建定时器已启动")
+
+        async def _narrative_revision_scan_loop():
+            await asyncio.sleep(45)
+            while True:
+                settings = _narrative_revision_scan_settings(config)
+                try:
+                    now = datetime.now(settings["timezone"])
+                    scan = narrative_revision_inbox_store.scan_metadata()
+                    last_scan = _narrative_timestamp(scan.get("last_scan_at"), settings["timezone"])
+                    last_run_date = (
+                        last_scan.astimezone(settings["timezone"]).date().isoformat()
+                        if last_scan is not None
+                        else ""
+                    )
+                    target = now.replace(
+                        hour=int(settings["hour"]),
+                        minute=int(settings["minute"]),
+                        second=0,
+                        microsecond=0,
+                    )
+                    if (
+                        settings["enabled"]
+                        and last_run_date != now.date().isoformat()
+                        and now >= target
+                    ):
+                        result = await _scan_narrative_revision_inbox(include_external=True)
+                        logger.info(
+                            "Narrative revision daily scan result / 叙事卷每日修订扫描结果: %s",
+                            result,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Narrative revision daily scan failed / 叙事卷每日修订扫描失败: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                await asyncio.sleep(int(settings["check_interval_seconds"]))
+
+        def _start_narrative_revision_scan_scheduler():
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_narrative_revision_scan_loop())
+
+        narrative_scan_cfg = _narrative_revision_scan_settings(config)
+        if narrative_scan_cfg["enabled"]:
+            nt = threading.Thread(target=_start_narrative_revision_scan_scheduler, daemon=True)
+            nt.start()
+            logger.info(
+                "Narrative revision scan scheduler started / 叙事卷修订扫描定时器已启动 (%02d:%02d %s)",
+                narrative_scan_cfg["hour"],
+                narrative_scan_cfg["minute"],
+                narrative_scan_cfg["timezone"],
+            )
 
         async def _dream_loop():
             await asyncio.sleep(30)

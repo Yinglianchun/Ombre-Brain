@@ -49,3 +49,5 @@
 Writer 由 Serein 主机上的 Codex 单次任务执行。`update` 使用 `gpt-5.6-terra`，`rewrite` 使用 `gpt-5.6-sol`，两者 reasoning effort 均为 `medium`。角色规则只放在 `prototypes/serein-awake/codex_agents/narrative_writer/AGENTS.md`；动态任务只携带 mode、标题、当前正文（仅 update）和后端冻结的当前绑定材料。任务以 read-only sandbox 运行，不调用工具；完成后立即归档 Codex thread，并删除临时输入输出文件。
 
 这条链不会定时或随材料变化自动生成正文。只有用户点击“更新”或“重写”才会创建一次预览任务；预览仍然不写 Narrative registry。
+
+修订箱每天 `04:00 Asia/Shanghai` 运行一次派生扫描。已有卷只用程序比较 `published_at` 与当前绑定材料的最新 `updated_at`，较新的材料会生成“需要更新”提示；未归卷的高重要度 Event 只把标题、摘要与 ID 交给现有外部模型，模型只能提出“可能成卷”的分组。两类结果都只是修订箱提示，不调用 Narrative Writer、不创建叙事卷，也不发布正文。修订箱里的“重写”仍是一次明确的用户点击，生成预览后还必须另点“保存”。

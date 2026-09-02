@@ -730,6 +730,13 @@ narrative_rolls:
   registry_path: ""                    # empty = state_dir/narrative_rolls/registry.json; keep private narrative data out of Git
   documents_dir: ""                   # empty = registry sibling revisions/; immutable author-supplied revision files
   revision_inbox_path: ""             # empty = state_dir/narrative_rolls/revision_inbox.json; derived review hints, never evidence or auto-publish
+  revision_scan_enabled: true          # daily scan creates revision-box hints only; it never runs Writer or publishes prose
+  revision_scan_hour: 4                # Asia/Shanghai local hour
+  revision_scan_minute: 0
+  revision_scan_timezone: "Asia/Shanghai"
+  revision_scan_check_interval_minutes: 15
+  new_roll_scout_enabled: true          # external configured dehydration model may group unbound Events into review candidates
+  new_roll_scout_max_events: 80
   shadow_admission_enabled: true   # keep candidate/admission evidence in recall debug
   live_injection_enabled: true     # strong gate injects one authored body; weak/ambiguous matches stay out
   ambiguity_margin: 10             # tied strong rolls remain index-only and do not inject a body

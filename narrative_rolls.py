@@ -323,6 +323,7 @@ class NarrativeRollStore:
                 "intent_tags",
                 "query_cues",
                 "current_status_cue",
+                "published_at",
                 "source_file",
                 "document_sha256",
                 "actual_document_sha256",
@@ -588,6 +589,7 @@ class NarrativeRollStore:
                     "title_aliases",
                     "query_cues",
                     "current_status_cue",
+                    "published_at",
                     "document_sha256",
                     "integrity_status",
                 )

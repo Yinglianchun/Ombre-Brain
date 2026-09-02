@@ -5426,6 +5426,12 @@ label:has(input:focus-visible) {
   background: #4e7768;
   box-shadow: 0 0 0 4px rgba(78, 119, 104, 0.09);
 }
+.basement-workbench__scan-note {
+  margin: 12px clamp(24px, 3.2vw, 42px) 0;
+  color: #8a9591;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+}
 .recall-simulator-form {
   display: grid;
   gap: 9px;
@@ -5995,6 +6001,7 @@ label:has(input:focus-visible) {
 .revision-card:last-child { border-bottom: 0; }
 .revision-card__meta { display: flex; align-items: center; gap: 10px; color: #929c98; font-size: 9px; }
 .revision-card__meta > span { color: #526e65; }
+.revision-card__meta b { color: #8a6c51; font-weight: 500; }
 .revision-card__meta em { margin-left: auto; font-style: normal; }
 .revision-card h4 { margin: 8px 0 0; font-family: var(--font-editorial-cjk); font-size: 16px; font-weight: 400; }
 .revision-card > blockquote, .relationship-evidence-grid blockquote {
@@ -6007,6 +6014,13 @@ label:has(input:focus-visible) {
   font-family: var(--font-editorial-cjk);
   font-size: 11px;
   line-height: 1.75;
+}
+.revision-card__freshness {
+  margin: 12px 0 0;
+  color: #78847f;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  line-height: 1.7;
 }
 .revision-anchor-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 13px; }
 .revision-anchor-list span { padding: 5px 8px; border: 1px solid rgba(68, 89, 81, 0.12); border-radius: 999px; color: #71807a; font-size: 8px; }

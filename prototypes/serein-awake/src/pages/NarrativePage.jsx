@@ -131,19 +131,19 @@ export function NarrativePage() {
     setSaveMessage("");
   };
 
-  const generatePreview = async (mode) => {
-    if (!selectedRoll || previewing) return;
+  const generatePreview = async (mode, targetRoll = selectedRoll) => {
+    if (!targetRoll || previewing) return;
     setEditorOpen(true);
-    setPreviewBody(selectedRoll.body || selectedRoll.paragraphs.join("\n\n"));
+    setPreviewBody(targetRoll.body || targetRoll.paragraphs.join("\n\n"));
     setPreviewDiff("");
     setPreviewMode(mode);
     setPreviewing(true);
     setPreviewError("");
     setSaveMessage("");
     try {
-      const result = await previewNarrativeRoll(selectedRoll, mode);
+      const result = await previewNarrativeRoll(targetRoll, mode);
       if (result.status === "insufficient") {
-        setPreviewBody(selectedRoll.body || selectedRoll.paragraphs.join("\n\n"));
+        setPreviewBody(targetRoll.body || targetRoll.paragraphs.join("\n\n"));
         setPreviewDiff("");
         setPreviewMode(mode);
         setPreviewError(result.issues?.join("；") || "当前绑定材料不足以生成可信正文。");
@@ -158,6 +158,21 @@ export function NarrativePage() {
       setPreviewing(false);
     }
   };
+
+  useEffect(() => {
+    const openRewriteIntent = () => {
+      if (window.location.hash !== "#narrative") return;
+      const narrativeId = window.sessionStorage.getItem("serein:narrative-rewrite-intent") || "";
+      const targetRoll = narrativeRolls.find((roll) => roll.id === narrativeId);
+      if (!targetRoll) return;
+      window.sessionStorage.removeItem("serein:narrative-rewrite-intent");
+      setSelectedRollId(targetRoll.id);
+      generatePreview("rewrite", targetRoll);
+    };
+    openRewriteIntent();
+    window.addEventListener("hashchange", openRewriteIntent);
+    return () => window.removeEventListener("hashchange", openRewriteIntent);
+  }, [narrativeRolls]);
 
   const saveBody = async () => {
     if (!selectedRoll || saving || previewing || !previewBody.trim()) return;

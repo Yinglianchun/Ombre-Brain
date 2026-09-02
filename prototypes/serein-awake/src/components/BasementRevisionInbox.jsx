@@ -11,6 +11,13 @@ const statusLabels = {
 const sourceLabels = {
   scene: "Scene",
   window_shadow: "窗影",
+  material_freshness: "材料时间",
+  event_group: "成卷候选",
+};
+
+const proposalKindLabels = {
+  existing_roll_update: "需要更新",
+  new_roll_candidate: "可能成卷",
 };
 
 async function requestRevisionInbox(status) {
@@ -45,6 +52,7 @@ export function BasementRevisionInbox() {
   useEffect(() => { load(filter); }, [filter]);
 
   const items = state.payload?.items ?? [];
+  const scan = state.payload?.scan ?? {};
   const groups = useMemo(() => {
     const grouped = new Map();
     items.forEach((item) => {
@@ -59,6 +67,12 @@ export function BasementRevisionInbox() {
     setEditingId(item.proposal_id);
     setDraftDelta(item.draft_delta || "");
     setReviewNote(item.review_note || "");
+  };
+
+  const openNarrativeRewrite = (item) => {
+    if (!String(item.narrative_id || "").startsWith("narrative_")) return;
+    window.sessionStorage.setItem("serein:narrative-rewrite-intent", item.narrative_id);
+    window.location.hash = "#narrative";
   };
 
   const review = async (item, action) => {
@@ -96,13 +110,19 @@ export function BasementRevisionInbox() {
         <div>
           <span className="basement-kicker">来源发生变化之后</span>
           <h2 id="revision-inbox-title">修订箱</h2>
-          <p>把新 Scene 或窗影可能影响到的叙事卷放在这里，逐条决定要不要重写。</p>
+          <p>凌晨四点只检查与标记：已有卷看材料时间，可能成卷的 Event 交给外部模型判断。</p>
         </div>
         <div className="basement-live-note">
           <i aria-hidden="true" />
           <span>真实修订队列 · {items.length} 条</span>
         </div>
       </header>
+
+      {scan.last_scan_at && (
+        <p className="basement-workbench__scan-note">
+          上次扫描 {scan.last_scan_at} · {scan.external_model || "未调用外部模型"} · 正文写入 0
+        </p>
+      )}
 
       <div className="review-toolbar">
         <label>查看
@@ -134,7 +154,10 @@ export function BasementRevisionInbox() {
         {groups.map(([narrativeId, groupItems]) => (
           <section className="revision-group" key={narrativeId}>
             <header>
-              <div><span>NARRATIVE ROLL</span><h3>{groupItems[0]?.narrative_title || narrativeId}</h3></div>
+              <div>
+                <span>{groupItems[0]?.proposal_kind === "new_roll_candidate" ? "NEW ROLL CANDIDATE" : "NARRATIVE ROLL"}</span>
+                <h3>{groupItems[0]?.narrative_title || narrativeId}</h3>
+              </div>
               <small>{groupItems.length} 条来源</small>
             </header>
             {groupItems.map((item) => (
@@ -142,10 +165,23 @@ export function BasementRevisionInbox() {
                 <div className="revision-card__meta">
                   <span>{sourceLabels[item.source_type] || item.source_type || "来源"}</span>
                   <time>{item.source_date || "日期未写"}</time>
+                  {item.proposal_kind && <b>{proposalKindLabels[item.proposal_kind] || item.proposal_kind}</b>}
                   <em>{statusLabels[item.status] || item.status}</em>
                 </div>
                 <h4>{item.source_title || item.source_id}</h4>
                 {item.source_excerpt && <blockquote>{item.source_excerpt}</blockquote>}
+                {item.proposal_kind === "existing_roll_update" && (
+                  <p className="revision-card__freshness">
+                    卷最后修订：{item.narrative_published_at || "未知"}<br />
+                    最新材料：{item.latest_material_at || item.source_date || "未知"}
+                  </p>
+                )}
+                {item.proposal_kind === "new_roll_candidate" && (
+                  <details className="review-technical-details">
+                    <summary>{item.source_event_ids?.length || 0} 条候选 Event</summary>
+                    <p>{item.source_event_ids?.join(" · ")}</p>
+                  </details>
+                )}
                 {(item.matched_anchors?.length ?? 0) > 0 && (
                   <div className="revision-anchor-list">
                     {item.matched_anchors.map((anchor, index) => (
@@ -182,7 +218,10 @@ export function BasementRevisionInbox() {
                   <footer className="review-card-actions">
                     {item.status === "pending" && <>
                       <button type="button" onClick={() => review(item, "dismiss")} disabled={savingId === item.proposal_id}>本次不影响</button>
-                      <button type="button" className="basement-primary-action" onClick={() => openEditor(item)}><NotePencil size={15} />写修订草稿</button>
+                      {item.proposal_kind !== "new_roll_candidate" && <>
+                        <button type="button" onClick={() => openEditor(item)}><NotePencil size={15} />写修订草稿</button>
+                        <button type="button" className="basement-primary-action" onClick={() => openNarrativeRewrite(item)}><NotePencil size={15} />重写</button>
+                      </>}
                     </>}
                     {item.status === "dismissed" && <button type="button" onClick={() => review(item, "reopen")} disabled={savingId === item.proposal_id}>重新打开</button>}
                     {item.status === "absorbed" && <span>已由叙事卷 revision {item.absorbed_revision ?? "—"} 吸收</span>}

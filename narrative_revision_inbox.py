@@ -284,6 +284,182 @@ class NarrativeRevisionInbox:
             narrative_targets,
         )
 
+    def consider_stale_roll(
+        self,
+        narrative: dict[str, Any],
+        *,
+        latest_material: dict[str, Any],
+        material_count: int,
+    ) -> list[dict[str, Any]]:
+        """Flag one existing roll whose bound material changed after publication."""
+
+        narrative_id = str(narrative.get("narrative_id") or "").strip()
+        baseline_revision = int(narrative.get("revision") or 0)
+        baseline_hash = str(narrative.get("document_sha256") or "").strip().lower()
+        latest_at = str(latest_material.get("updated_at") or "").strip()
+        source_type = str(latest_material.get("source_type") or "material").strip()
+        source_id = str(latest_material.get("source_id") or "").strip()
+        if not narrative_id or baseline_revision < 1 or not latest_at or not source_id:
+            return []
+
+        proposal_id = self._proposal_id(
+            narrative_id,
+            "material_freshness",
+            str(baseline_revision),
+            baseline_hash,
+        )
+        now = _now_utc()
+        with self._lock:
+            raw = self._load()
+            existing = next(
+                (
+                    item
+                    for item in raw["items"]
+                    if isinstance(item, dict) and str(item.get("proposal_id") or "") == proposal_id
+                ),
+                None,
+            )
+            if existing is not None:
+                existing.update(
+                    {
+                        "latest_material_at": latest_at,
+                        "latest_material_type": source_type,
+                        "latest_material_id": source_id,
+                        "material_count": int(material_count or 0),
+                        "updated_at": now,
+                    }
+                )
+                self._save(raw)
+                return []
+
+            row = {
+                "proposal_id": proposal_id,
+                "proposal_kind": "existing_roll_update",
+                "narrative_id": narrative_id,
+                "narrative_title": str(narrative.get("title") or narrative_id),
+                "baseline_revision": baseline_revision,
+                "baseline_document_sha256": baseline_hash,
+                "narrative_published_at": str(narrative.get("published_at") or ""),
+                "latest_material_at": latest_at,
+                "latest_material_type": source_type,
+                "latest_material_id": source_id,
+                "material_count": int(material_count or 0),
+                "source_type": "material_freshness",
+                "source_id": source_id,
+                "source_date": latest_at,
+                "source_sha256": str(latest_material.get("source_sha256") or ""),
+                "source_title": str(latest_material.get("title") or source_id),
+                "source_excerpt": _excerpt(latest_material.get("excerpt") or ""),
+                "source_scene_ids": [source_id] if source_type == "scene" else [],
+                "source_event_ids": [source_id] if source_type == "event" else [],
+                "matched_anchors": [
+                    {
+                        "reason": "material_newer_than_narrative",
+                        "source_cue": "",
+                        "anchor_kind": "published_at",
+                        "anchor": str(narrative.get("published_at") or ""),
+                    }
+                ],
+                "status": "pending",
+                "draft_delta": "",
+                "review_note": "",
+                "created_at": now,
+                "updated_at": now,
+                "reviewed_at": "",
+                "absorbed_revision": 0,
+                "derived_only": True,
+                "evidence_authority": False,
+            }
+            raw["items"].append(row)
+            self._save(raw)
+            return [dict(row)]
+
+    def consider_new_roll_candidates(
+        self,
+        candidates: list[dict[str, Any]],
+        *,
+        model: str,
+    ) -> list[dict[str, Any]]:
+        """Store external-model groupings as review hints, never as Narrative Rolls."""
+
+        now = _now_utc()
+        created: list[dict[str, Any]] = []
+        with self._lock:
+            raw = self._load()
+            known = {
+                str(item.get("proposal_id") or "")
+                for item in raw["items"]
+                if isinstance(item, dict)
+            }
+            for candidate in candidates:
+                event_ids = _string_list(candidate.get("source_event_ids"), limit=40)
+                title = str(candidate.get("title") or "").strip()
+                reason = str(candidate.get("reason") or "").strip()
+                if len(event_ids) < 2 or not title or not reason:
+                    continue
+                joined_ids = "\n".join(sorted(event_ids))
+                proposal_id = self._proposal_id("new_roll", "event_group", joined_ids, _sha256(title))
+                if proposal_id in known:
+                    continue
+                candidate_id = f"candidate_{proposal_id[5:]}"
+                row = {
+                    "proposal_id": proposal_id,
+                    "proposal_kind": "new_roll_candidate",
+                    "narrative_id": candidate_id,
+                    "narrative_title": title,
+                    "baseline_revision": 0,
+                    "baseline_document_sha256": "",
+                    "source_type": "event_group",
+                    "source_id": candidate_id,
+                    "source_date": str(candidate.get("latest_date") or ""),
+                    "source_sha256": _sha256(joined_ids),
+                    "source_title": title,
+                    "source_excerpt": _excerpt(reason),
+                    "source_scene_ids": [],
+                    "source_event_ids": event_ids,
+                    "matched_anchors": [
+                        {
+                            "reason": "external_model_grouping",
+                            "source_cue": "",
+                            "anchor_kind": "model",
+                            "anchor": str(model or "external_model"),
+                        }
+                    ],
+                    "candidate_confidence": str(candidate.get("confidence") or "medium"),
+                    "candidate_model": str(model or ""),
+                    "status": "pending",
+                    "draft_delta": "",
+                    "review_note": "",
+                    "created_at": now,
+                    "updated_at": now,
+                    "reviewed_at": "",
+                    "absorbed_revision": 0,
+                    "derived_only": True,
+                    "evidence_authority": False,
+                }
+                raw["items"].append(row)
+                known.add(proposal_id)
+                created.append(dict(row))
+            if created:
+                self._save(raw)
+        return created
+
+    def scan_metadata(self) -> dict[str, Any]:
+        with self._lock:
+            raw = self._load()
+        value = raw.get("scan") if isinstance(raw.get("scan"), dict) else {}
+        return dict(value)
+
+    def record_scan(self, result: dict[str, Any]) -> None:
+        with self._lock:
+            raw = self._load()
+            raw["scan"] = {
+                **(raw.get("scan") if isinstance(raw.get("scan"), dict) else {}),
+                **dict(result),
+                "last_scan_at": _now_utc(),
+            }
+            self._save(raw)
+
     def list(
         self,
         *,
@@ -338,6 +514,7 @@ class NarrativeRevisionInbox:
             "count": len(items),
             "items": bounded_items,
             "trajectories": trajectories,
+            "scan": self.scan_metadata(),
             "boundary": "Review hints are not evidence and never update Narrative Rolls automatically.",
         }
 
@@ -389,8 +566,6 @@ class NarrativeRevisionInbox:
         revision: int,
     ) -> list[str]:
         linked = set(_string_list(source_scene_ids, limit=500))
-        if not linked:
-            return []
         changed: list[str] = []
         with self._lock:
             raw = self._load()
@@ -400,9 +575,17 @@ class NarrativeRevisionInbox:
                     continue
                 if str(item.get("narrative_id") or "") != str(narrative_id or "").strip():
                     continue
-                proposal_sources = set(_string_list(item.get("source_scene_ids"), limit=500))
-                if not proposal_sources or not proposal_sources.issubset(linked):
-                    continue
+                if (
+                    str(item.get("proposal_kind") or "") == "existing_roll_update"
+                    and int(item.get("baseline_revision") or 0) < int(revision or 0)
+                ):
+                    pass
+                else:
+                    if not linked:
+                        continue
+                    proposal_sources = set(_string_list(item.get("source_scene_ids"), limit=500))
+                    if not proposal_sources or not proposal_sources.issubset(linked):
+                        continue
                 if item.get("status") == "absorbed":
                     continue
                 item["status"] = "absorbed"

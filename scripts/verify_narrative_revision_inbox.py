@@ -136,12 +136,54 @@ def main() -> int:
         reopened = inbox.review(proposal_id, action="reopen")
         assert reopened["item"]["status"] == "pending"
 
+        current_roll = rolls.read("narrative_names_between_us")
+        stale = inbox.consider_stale_roll(
+            current_roll,
+            latest_material={
+                "source_type": "scene",
+                "source_id": SCENE_NEW,
+                "updated_at": "2026-07-31T12:00:00+00:00",
+                "title": "后来理解",
+                "excerpt": new_scene["content"],
+                "source_sha256": hashlib.sha256(new_scene["content"].encode("utf-8")).hexdigest(),
+            },
+            material_count=3,
+        )
+        assert len(stale) == 1
+        assert stale[0]["proposal_kind"] == "existing_roll_update"
+        assert inbox.consider_stale_roll(
+            current_roll,
+            latest_material={
+                "source_type": "scene",
+                "source_id": SCENE_NEW,
+                "updated_at": "2026-07-31T12:00:00+00:00",
+            },
+            material_count=3,
+        ) == []
+
+        new_rolls = inbox.consider_new_roll_candidates(
+            [{
+                "title": "一路长出来的名字",
+                "reason": "两件事属于同一条持续推进的命名线。",
+                "source_event_ids": ["event_a", "event_b"],
+                "confidence": "high",
+                "latest_date": "2026-08-01",
+            }],
+            model="external-test-model",
+        )
+        assert len(new_rolls) == 1
+        assert new_rolls[0]["proposal_kind"] == "new_roll_candidate"
+        assert new_rolls[0]["evidence_authority"] is False
+        inbox.record_scan({"external_model": "external-test-model", "narrative_writes_performed": []})
+        assert inbox.list(status="all")["scan"]["external_model"] == "external-test-model"
+
         changed = inbox.mark_absorbed(
             "narrative_names_between_us",
             source_scene_ids=[SCENE_OLD, SCENE_NEW, "scene_existing_other"],
             revision=2,
         )
         assert proposal_id in changed
+        assert stale[0]["proposal_id"] in changed
         statuses = {
             item["source_type"]: item["status"]
             for item in inbox.list(status="all", narrative_id="narrative_names_between_us")["items"]
