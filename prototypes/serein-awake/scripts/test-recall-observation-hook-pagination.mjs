@@ -17,8 +17,8 @@ const rows = [
   [7, 1, "user", "2026-08-03 07:00:00", "recent two", { hook_memory_outcome: "injected" }],
   [8, 1, "user", "2026-08-03 08:00:00", "most recent", {
     hook_memory_outcome: "injected",
-    gateway_memory_injected_ids: ["scene-1"],
-    gateway_memory_items: [{ id: "scene-1", title: "visible title", score: 0.8, body: "must not escape" }],
+    gateway_memory_injected_ids: ["event:event-1"],
+    gateway_memory_items: [{ id: "event:event-1", title: "visible title", score: 0.8, source_kind: "event", body: "must not escape" }],
     additional_context: "private",
   }],
 ];
@@ -50,6 +50,7 @@ try {
   assert.equal(Object.hasOwn(firstPage.items[0], "developer_context"), false);
   assert.equal(Object.hasOwn(firstPage.items[0], "additional_context"), false);
   assert.equal(Object.hasOwn(firstPage.items[0].gateway_memory_items[0], "body"), false);
+  assert.equal(firstPage.items[0].gateway_memory_items[0].source_kind, "event");
 
   const secondPage = await readHavenBridgeHookLedger(2, firstPage.next_before_id);
   assert.deepEqual(secondPage.items.map((item) => item.id), [5, 3]);

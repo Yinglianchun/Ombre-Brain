@@ -29,10 +29,6 @@ import {
 } from "../storage/recallObservationPagination.js";
 import { readRecallSimulationTrainingLabels } from "../storage/recallSimulationTraining.js";
 import { resolveBridgeObservationOutcome } from "../recallObservationOutcome.js";
-import {
-  hasTypedExpectedMatch,
-  normalizeTypedRecallObservation,
-} from "../recallObservationTyped.js";
 
 const snapshotRouteLabels = Object.fromEntries(
   semanticRouteSnapshot.routes.map((route) => [route.name, route.label || route.name]),
@@ -71,24 +67,6 @@ const candidateRelevances = [
   { key: "irrelevant", label: "无关" },
 ];
 
-const typedStatusLabels = {
-  pending: "后台判断中",
-  would_inject: "预计会注入",
-  not_admitted: "候选未过线",
-  not_retrieved: "没有进入召回",
-  unavailable: "本轮不可用",
-};
-
-const typedReasonLabels = {
-  reranker_direct_evidence: "reranker 通过",
-  reranker_below_direct_threshold: "reranker 未过线",
-  reranker_score_missing: "缺少 reranker 分数",
-  candidate_without_scored_evidence: "没有可评分正文",
-  latest_dated_relevant_member: "最新相关成员",
-  not_latest_relevant_member: "不是最新成员",
-  timeline_candidate_material: "Arc 时间线材料",
-};
-
 function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -104,10 +82,6 @@ function normalizeScoreValue(item) {
   const raw = item?.score?.final ?? item?.score?.semantic ?? item?.score?.keyword ?? item?.score;
   const score = Number(raw);
   return Number.isFinite(score) ? score : null;
-}
-
-function formatTypedScore(value) {
-  return Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "—";
 }
 
 function normalizeObservation(row) {
@@ -126,13 +100,13 @@ function normalizeObservation(row) {
       title: item.bucket_name || item.title || item.bucket_id || item.id || "未命名记忆",
       score: normalizeScore(asArray(item.evidence)[0] || item),
       scoreValue: normalizeScoreValue(asArray(item.evidence)[0] || item),
+      sourceKind: String(item.source_kind || "").trim(),
     }))
-    : injectedIds.map((id) => ({ id, title: id, score: "", scoreValue: null }));
+    : injectedIds.map((id) => ({ id, title: id, score: "", scoreValue: null, sourceKind: "" }));
   const action = String(semantic.applied_action || semantic.action || "").trim();
   const query = String(payload.query || payload.query_preview || payload.original_query || payload.user_query || "").trim();
   const outcome = action === "skip" ? "skip" : injected.length ? "injected" : "no_match";
   const confidence = Number(semantic.confidence);
-  const typedObservation = normalizeTypedRecallObservation(semantic);
   return {
     id: String(row?.id ?? `${row?.session_id || "session"}-${row?.round_id || "round"}`),
     createdAt: row?.created_at || "",
@@ -149,7 +123,6 @@ function normalizeObservation(row) {
     source: "gateway",
     trigger: String(semantic.reason || "").trim(),
     hookOutcome: "",
-    typedObservation,
   };
 }
 
@@ -164,6 +137,7 @@ function normalizeBridgeObservation(row, routeActions = snapshotRouteActions) {
       title: String(item.title || id),
       score: normalizeScore(item),
       scoreValue: normalizeScoreValue(item),
+      sourceKind: String(item.source_kind || "").trim(),
     };
   });
   const hookOutcome = String(row?.hook_memory_outcome || "").trim();
@@ -189,8 +163,14 @@ function normalizeBridgeObservation(row, routeActions = snapshotRouteActions) {
     trigger,
     hookOutcome,
     messageId: row?.id,
-    typedObservation: null,
   };
+}
+
+function injectedMemoryKind(memory) {
+  const kind = String(memory?.sourceKind || "").trim().toLowerCase();
+  if (kind === "event" || String(memory?.id || "").startsWith("event:")) return "Event";
+  if (kind === "scene" || String(memory?.id || "").startsWith("scene:")) return "Scene";
+  return "";
 }
 
 function formatObservedAt(value) {
@@ -227,8 +207,8 @@ export function BasementRecallObservation() {
   const [datasets, setDatasets] = useState({ hook: [], gateway: [] });
   const [pagination, setPagination] = useState(initialPaginationState);
   const [pageLoading, setPageLoading] = useState({ hook: false, gateway: false });
-  const [source, setSource] = useState("gateway");
-  const [filter, setFilter] = useState("all");
+  const [source, setSource] = useState("hook");
+  const [filter, setFilter] = useState("injected");
   const [reviews, setReviews] = useState(readRecallObservationReviews);
   const [draftForms, setDraftForms] = useState({});
   const [draftNotices, setDraftNotices] = useState({});
@@ -408,11 +388,7 @@ export function BasementRecallObservation() {
   );
   const exportSummary = exportPayload.summary;
   const filteredItems = useMemo(
-    () => filter === "all"
-      ? items
-      : items.filter((item) => (
-        filter === "typed_match" ? hasTypedExpectedMatch(item) : item.outcome === filter
-      )),
+    () => filter === "all" ? items : items.filter((item) => item.outcome === filter),
     [filter, items],
   );
 
@@ -542,7 +518,6 @@ export function BasementRecallObservation() {
     injected: items.filter((item) => item.outcome === "injected").length,
     no_match: items.filter((item) => item.outcome === "no_match").length,
     skip: items.filter((item) => item.outcome === "skip").length,
-    typed_match: items.filter(hasTypedExpectedMatch).length,
   }), [items]);
 
   const downloadTrainingExport = useCallback(() => {
@@ -601,7 +576,6 @@ export function BasementRecallObservation() {
         <i aria-hidden="true" />
         {[
           ["injected", "已注入", counts.injected],
-          ["typed_match", "Event / Scene 预计", counts.typed_match],
           ["no_match", "未命中", counts.no_match],
           ["skip", "已跳过", counts.skip],
           ["all", "全部", items.length],
@@ -610,7 +584,7 @@ export function BasementRecallObservation() {
             {label}<span>{count}</span>
           </button>
         ))}
-        <p>{source === "hook" ? "这里只显示真正送入模型的 hook 账本。" : "实际注入与回答后完成的 typed shadow 会分开显示。"}</p>
+        <p>{source === "hook" ? "这里只显示真正送入模型的 hook 账本。" : "这里是 Gateway 自己记录的准备结果。"}</p>
       </div>
 
       <div className="observation-export-summary" aria-live="polite">
@@ -693,7 +667,10 @@ export function BasementRecallObservation() {
                   <span>{item.source === "hook" ? "真正送入模型" : "Gateway 准备注入"}</span>
                   {item.injected.length ? item.injected.map((memory) => (
                     <div className="observation-memory-row" key={`${item.id}-${memory.id}`}>
-                      <strong>{memory.title}</strong>
+                      <strong>
+                        {injectedMemoryKind(memory) && <span className="observation-memory-kind">{injectedMemoryKind(memory)}</span>}
+                        {memory.title}
+                      </strong>
                       <code>{memory.id || "ID 未记录"}</code>
                       <em>{memory.score || "score 未记录"}</em>
                       {item.source === "hook" && item.outcome === "injected" && memory.id && (
@@ -723,59 +700,6 @@ export function BasementRecallObservation() {
                     </div>
                   )) : <p>没有记忆进入这一轮上下文。</p>}
                 </div>
-
-                {item.source === "gateway" && item.typedObservation && (() => {
-                  const typed = item.typedObservation;
-                  return (
-                    <section className="observation-typed-shadow">
-                      <header>
-                        <div>
-                          <span>Event / Scene shadow</span>
-                          <strong>{typedStatusLabels[typed.status] || typed.status}</strong>
-                        </div>
-                        <small>{typed.runsAfterResponse ? "reranker 回答后运行" : "只读 shadow"}</small>
-                      </header>
-                      <dl>
-                        <div><dt>scope</dt><dd>{typed.scopeLabel || "全局"}</dd></div>
-                        <div><dt>intent / operator</dt><dd>{typed.intent || "none"} / {typed.operator || "none"}</dd></div>
-                        <div><dt>admission</dt><dd>{typed.admissionMode || "未进入"}</dd></div>
-                        <div><dt>预计 / 候选</dt><dd>{typed.selectedRefs.length} / {typed.candidateCount}</dd></div>
-                        <div><dt>候选快照</dt><dd>{typed.candidateTimingMs == null ? "—" : `${typed.candidateTimingMs} ms`}</dd></div>
-                        <div><dt>后台耗时</dt><dd>{typed.timingMs == null ? "—" : `${typed.timingMs} ms`}</dd></div>
-                      </dl>
-                      {typed.status === "pending" ? (
-                        <p>本轮候选已经冻结，reranker 正在后台补齐；刷新后会原位显示结果。</p>
-                      ) : typed.candidates.length ? (
-                        <div className="observation-typed-shadow__candidates">
-                          {typed.candidates.map((candidate) => (
-                            <article className={candidate.selected ? "is-selected" : ""} key={`${item.id}-${candidate.ref}`}>
-                              <div>
-                                <strong>{candidate.title}</strong>
-                                <span>{candidate.ownerKind === "event" ? "Event" : candidate.ownerKind === "scene" ? "Scene" : candidate.ownerKind}</span>
-                              </div>
-                              <code>{candidate.ref}</code>
-                              <dl>
-                                <div><dt>候选</dt><dd>{formatTypedScore(candidate.candidateScore)}</dd></div>
-                                <div><dt>reranker</dt><dd>{formatTypedScore(candidate.rerankScore)}</dd></div>
-                                <div><dt>判断</dt><dd>{typedReasonLabels[candidate.reason] || candidate.reason || candidate.disposition || "—"}</dd></div>
-                              </dl>
-                            </article>
-                          ))}
-                        </div>
-                      ) : (
-                        <p>{typed.reason || "没有 Event / Scene 进入本轮 admission。"}</p>
-                      )}
-                      <footer>
-                        <span>实际注入仍以上方 Gateway 回执为准</span>
-                        <span>
-                          typed live：{typed.liveMode}
-                          {typed.guardApplied ? ` · guard：${typed.guardedLiveAllowed ? "放行" : "拦截"}` : ""}
-                          {typed.guardReason ? ` · ${typed.guardReason}` : ""}
-                        </span>
-                      </footer>
-                    </section>
-                  );
-                })()}
 
                 <div className="observation-review">
                   <span>召回动作</span>

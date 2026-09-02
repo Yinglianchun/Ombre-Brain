@@ -658,14 +658,23 @@ async def verify_full_handler_uses_only_typed_pool() -> None:
         {
             "status": "injected",
             "context": "typed",
-            "cards": [],
+            "cards": [
+                {
+                    "id": "event:event-a",
+                    "source_kind": "event",
+                    "title": "测试 Event",
+                    "text": "实际送入的 Event 正文",
+                }
+            ],
             "selected_refs": ["event:event-a"],
             "menus_included": [],
             "menus_suppressed": [],
         },
     )
     assert selected_candidate_calls == 1
-    assert selected["recalled_ids"] == []
+    assert selected["recalled_ids"] == ["event:event-a"]
+    assert selected["cards"][0]["source_kind"] == "event"
+    assert selected["debug"]["injected_bucket_ids"] == ["event:event-a"]
     assert selected["debug"]["hook_timing_debug"]["legacy_pool"] == "removed"
 
     daily, daily_candidate_calls = await run_case(

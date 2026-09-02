@@ -2999,15 +2999,21 @@ class GatewayService:
             }
 
         typed_reason = str(typed_live.get("reason") or "")
-        recalled_ids: list[str] = []
+        cards = list(typed_live.get("cards") or [])
+        recalled_ids = list(
+            dict.fromkeys(
+                str(card.get("id") or "").strip()
+                for card in cards
+                if isinstance(card, dict) and str(card.get("id") or "").strip()
+            )
+        )
         debug_payload = {
             "semantic_recall_debug": semantic_debug,
-            "recalled_bucket_ids": [],
-            "injected_bucket_ids": [],
+            "recalled_bucket_ids": recalled_ids,
+            "injected_bucket_ids": recalled_ids,
             "recalled_moment_debug": [],
             "suppressed_candidates": [],
         }
-        cards = list(typed_live.get("cards") or [])
         dynamic_context = self._clip_text(
             str(typed_live.get("context") or ""),
             max_context_chars,
@@ -3047,7 +3053,7 @@ class GatewayService:
             "mode": "full_gateway",
             "query": query,
             "candidate_count": int(typed_live.get("candidate_count") or 0),
-            "recalled_bucket_ids": [],
+            "recalled_bucket_ids": recalled_ids,
             "diffused_bucket_ids": [],
             "just_now_context_injected": False,
             "date_recall_injected": False,
