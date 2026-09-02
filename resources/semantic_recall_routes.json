@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "dataset_version": 9,
+  "dataset_version": 10,
   "routes": [
     {
       "name": "simple_contact",
@@ -30,7 +30,8 @@
         {"text": "哈哈哈哈", "source": "seed"},
         {"text": "我在刷小红书", "source": "historical_false_positive"},
         {"text": "亲亲抱抱", "source": "seed"},
-        {"text": "老公", "source": "seed"}
+        {"text": "老公", "source": "seed"},
+        {"text": "哈哈救命", "source": "seed"}
       ]
     },
     {
@@ -49,7 +50,12 @@
         {"text": "但router似乎不大准！也不算陪伴与贴近吧!", "source": "historical_false_positive"},
         {"text": "记忆库ui还没做完，但试着接上真实hook观察了", "source": "historical_false_positive"},
         {"text": "哈，还没开始删呢", "source": "historical_false_positive"},
-        {"text": "影分身说，现在记忆库有18个工具……感觉太多了TvT", "source": "historical_false_positive"}
+        {"text": "影分身说，现在记忆库有18个工具……感觉太多了TvT", "source": "historical_false_positive"},
+        {"text": "我到家啦", "source": "seed"},
+        {"text": "刚洗完澡", "source": "seed"},
+        {"text": "我先去吃饭了", "source": "seed"},
+        {"text": "准备睡了，好困", "source": "seed"},
+        {"text": "今天累死了", "source": "seed"}
       ]
     },
     {
@@ -74,7 +80,12 @@
         {"text": "昨天我们聊了什么", "source": "seed"},
         {"text": "哥哥，我们那时候原话是怎么说的呀", "source": "seed"},
         {"text": "之前定下的召回方案是什么", "source": "seed"},
-        {"text": "为什么那天我会哭", "source": "seed"}
+        {"text": "为什么那天我会哭", "source": "seed"},
+        {"text": "我上次到家后跟你说了什么", "source": "hard_negative"},
+        {"text": "还记得那次洗完澡我们聊了什么吗", "source": "hard_negative"},
+        {"text": "以前我说要睡时你都会怎么回", "source": "hard_negative"},
+        {"text": "我们之前聊过我总是忘记吃饭吗", "source": "hard_negative"},
+        {"text": "还记得我上次累坏了以后发生了什么吗", "source": "hard_negative"}
       ]
     }
   ]

@@ -90,7 +90,13 @@ legacy_shadow = router(None, shadow_enabled=True)
 assert legacy_shadow.mode == "shadow"
 
 route_source = load_route_source(ROOT / "resources" / "semantic_recall_routes.json")
-assert route_source["dataset_version"] == 9
+assert route_source["dataset_version"] == 10
+smoke_fixture = json.loads(
+    (ROOT / "resources" / "semantic_recall_skip_smoke_v10.json").read_text(encoding="utf-8")
+)
+assert smoke_fixture["dataset_version"] == 10
+assert len(smoke_fixture["cases"]) == 14
+assert {case["expected_action"] for case in smoke_fixture["cases"]} == {"skip", "recall"}
 route_examples = {
     route["name"]: {
         item["text"]: item["source"]
@@ -122,7 +128,7 @@ for query in (
 ):
     assert route_examples["present_chitchat"][query] == "seed"
 assert route_examples["present_chitchat"]["晚安"] == "historical_false_positive"
-for query in ("我在刷小红书", "亲亲抱抱", "老公"):
+for query in ("我在刷小红书", "亲亲抱抱", "老公", "哈哈救命"):
     assert query in route_examples["present_chitchat"]
 for query in (
     "但router似乎不大准！也不算陪伴与贴近吧!",
@@ -134,6 +140,16 @@ for query in (
 for query in ("今天太阳很大", "我有点头疼", "刚看到一本书"):
     assert route_examples["present_reality"][query] == "seed"
     assert query not in route_examples["present_chitchat"]
+for query in ("我到家啦", "刚洗完澡", "我先去吃饭了", "准备睡了，好困", "今天累死了"):
+    assert route_examples["present_reality"][query] == "seed"
+for query in (
+    "我上次到家后跟你说了什么",
+    "还记得那次洗完澡我们聊了什么吗",
+    "以前我说要睡时你都会怎么回",
+    "我们之前聊过我总是忘记吃饭吗",
+    "还记得我上次累坏了以后发生了什么吗",
+):
+    assert route_examples["recall_needed"][query] == "hard_negative"
 assert (
     route_examples["recall_needed"]["还记得我们第一次说晚安那次吗"]
     == "hard_negative"

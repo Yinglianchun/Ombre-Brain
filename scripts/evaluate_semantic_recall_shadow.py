@@ -52,6 +52,10 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         shadow_enabled=True,
         routes_path=str(Path(args.routes).resolve()),
         index_path=str(Path(args.index).resolve()),
+        publish_dir=str(
+            Path(args.output).resolve().parent
+            / f".{Path(args.output).name}.publish-disabled"
+        ),
     )
     if args.aggregation_top_k > 0:
         router_config["aggregation_top_k"] = args.aggregation_top_k
@@ -73,6 +77,8 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         legacy = legacy if isinstance(legacy, dict) else {}
         legacy_skip = legacy.get("skip_broad_dynamic_recall")
         semantic_action = str(debug.get("recommended_action") or "recall")
+        expected_action = str(case.get("expected_action") or "").strip().lower()
+        expected_available = expected_action in {"skip", "recall"}
         comparison_available = isinstance(legacy_skip, bool)
         return {
             "id": str(case.get("id") or ""),
@@ -88,6 +94,15 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 "scores": list(debug.get("scores") or []),
             },
             "legacy": legacy,
+            "expected": {
+                "available": expected_available,
+                "action": expected_action if expected_available else None,
+                "agrees": (
+                    semantic_action == expected_action
+                    if expected_available
+                    else None
+                ),
+            },
             "comparison": {
                 "available": comparison_available,
                 "agrees": (
@@ -105,6 +120,10 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     disagreements = [
         row for row in comparable if row["comparison"]["agrees"] is False
     ]
+    expected_rows = [row for row in results if row["expected"]["available"]]
+    expected_failures = [
+        row for row in expected_rows if row["expected"]["agrees"] is False
+    ]
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -118,6 +137,9 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 1 for row in results if row["semantic"]["action"] == "recall"
             ),
             "errors": sum(1 for row in results if row["semantic"]["errors"]),
+            "expected_comparable": len(expected_rows),
+            "expected_passes": len(expected_rows) - len(expected_failures),
+            "expected_failures": len(expected_failures),
             "legacy_comparable": len(comparable),
             "legacy_agreements": len(comparable) - len(disagreements),
             "legacy_disagreements": len(disagreements),

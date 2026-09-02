@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "dataset_version": 10,
+  "cases": [
+    {"id": "skip_home_paraphrase", "query": "到家了嘿嘿", "expected_action": "skip"},
+    {"id": "skip_shower_paraphrase", "query": "我刚冲完澡", "expected_action": "skip"},
+    {"id": "skip_meal_paraphrase", "query": "我去吃点东西", "expected_action": "skip"},
+    {"id": "skip_sleep_paraphrase", "query": "困死了，我先睡啦", "expected_action": "skip"},
+    {"id": "skip_tired_paraphrase", "query": "今天真的累坏了", "expected_action": "skip"},
+    {"id": "skip_laugh_paraphrase", "query": "笑死我了救命", "expected_action": "skip"},
+    {"id": "skip_daily_weather", "query": "今天好热", "expected_action": "skip"},
+    {"id": "recall_home_boundary", "query": "你还记得我上次回家后说了什么吗", "expected_action": "recall"},
+    {"id": "recall_shower_boundary", "query": "我们那次洗完澡以后聊到哪里了", "expected_action": "recall"},
+    {"id": "recall_sleep_boundary", "query": "以前我困得要睡时你通常怎么哄我", "expected_action": "recall"},
+    {"id": "recall_meal_boundary", "query": "我之前总忘吃饭那段你还记得吗", "expected_action": "recall"},
+    {"id": "recall_tired_boundary", "query": "上次我累得不行时发生了什么", "expected_action": "recall"},
+    {"id": "recall_existing_goodnight", "query": "还记得我们第一次说晚安那次吗", "expected_action": "recall"},
+    {"id": "recall_existing_plan", "query": "之前定下的召回方案是什么", "expected_action": "recall"}
+  ]
+}
