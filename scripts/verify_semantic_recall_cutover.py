@@ -294,6 +294,15 @@ async def verify_hook_modes_use_the_same_semantic_entry() -> None:
     assert identity_route["direct_skip"]["applied"] is False
     assert identity_route["identity_name_recall_veto"]["applied"] is True
 
+    generic_name_origin = await service.handle_hook_recall(
+        RequestStub({"query": "Lumos为什么叫这个名字", "include_debug": True})
+    )
+    generic_name_origin_body = json.loads(generic_name_origin.body)
+    generic_name_origin_route = generic_name_origin_body["debug"]["semantic_recall_debug"]
+    assert generic_name_origin_body["ok"] is True
+    assert generic_name_origin_route["direct_skip"]["applied"] is False
+    assert generic_name_origin_route["identity_name_recall_veto"]["applied"] is True
+
     current_state = await service.handle_hook_recall(
         RequestStub({"query": "回来看看你", "include_debug": True})
     )

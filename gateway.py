@@ -2568,7 +2568,10 @@ class GatewayService:
         )
         identity_name_recall = bool(
             getattr(self, "identity", None)
-            and self._identity_name_search_terms(query)
+            and (
+                self._identity_name_search_terms(query)
+                or self._name_origin_search_terms(query)
+            )
         )
         if identity_name_recall:
             structure_allows_pre_skip = False
@@ -2934,60 +2937,81 @@ class GatewayService:
         )
         if typed_prepass_enabled:
             stage_started_at = time.perf_counter()
-            retrieval_budget = semantic_debug.get("retrieval_budget")
-            prefetched_candidate = (
-                retrieval_budget.get("passage_candidate_shadow")
-                if isinstance(retrieval_budget, dict)
-                else None
-            )
-            typed_candidate_result = (
-                prefetched_candidate
-                if isinstance(prefetched_candidate, dict)
-                else self._passage_candidate_shadow_debug(
-                    query,
-                    semantic_query_vector or [],
-                )
-            )
-            mark_hook_step("typed_candidate", stage_started_at)
-
-            stage_started_at = time.perf_counter()
-            typed_call = self._typed_event_scene_live_context(
+            pre_candidate_gate = self._typed_pre_candidate_surface_gate(
                 query,
-                session_id,
-                semantic_query_vector or [],
-                semantic_recall_debug=semantic_debug,
-                body_char_limit=max_chars,
-                candidate_result=typed_candidate_result,
-                deadline_at=hook_deadline_at,
-                reranker_min_remaining_ms=int(
-                    getattr(
-                        self,
-                        "typed_event_scene_reranker_min_remaining_ms",
-                        1800,
-                    )
-                    or 1800
-                ),
+                semantic_debug,
             )
-            try:
-                typed_live = (
-                    await asyncio.wait_for(
-                        typed_call,
-                        timeout=max(0.05, hook_deadline_at - time.perf_counter()),
-                    )
-                    if hook_deadline_at is not None
-                    else await typed_call
-                )
-            except asyncio.TimeoutError:
+            semantic_debug["typed_pre_candidate_gate"] = pre_candidate_gate
+            mark_hook_step("typed_pre_candidate_gate", stage_started_at)
+            if pre_candidate_gate.get("applied"):
                 typed_live = {
                     "status": "not_retrieved",
-                    "reason": "hook_deadline_during_typed_recall",
+                    "reason": "daily_surface_without_memory_intent",
                     "context": "",
                     "cards": [],
                     "selected_refs": [],
                     "menus_included": [],
                     "menus_suppressed": [],
+                    "pre_candidate_gate": pre_candidate_gate,
                 }
-            mark_hook_step("typed_admission", stage_started_at)
+                hook_steps_ms["typed_candidate"] = 0
+                hook_steps_ms["typed_admission"] = 0
+            else:
+                stage_started_at = time.perf_counter()
+                retrieval_budget = semantic_debug.get("retrieval_budget")
+                prefetched_candidate = (
+                    retrieval_budget.get("passage_candidate_shadow")
+                    if isinstance(retrieval_budget, dict)
+                    else None
+                )
+                typed_candidate_result = (
+                    prefetched_candidate
+                    if isinstance(prefetched_candidate, dict)
+                    else self._passage_candidate_shadow_debug(
+                        query,
+                        semantic_query_vector or [],
+                    )
+                )
+                mark_hook_step("typed_candidate", stage_started_at)
+
+                stage_started_at = time.perf_counter()
+                typed_call = self._typed_event_scene_live_context(
+                    query,
+                    session_id,
+                    semantic_query_vector or [],
+                    semantic_recall_debug=semantic_debug,
+                    body_char_limit=max_chars,
+                    candidate_result=typed_candidate_result,
+                    deadline_at=hook_deadline_at,
+                    reranker_min_remaining_ms=int(
+                        getattr(
+                            self,
+                            "typed_event_scene_reranker_min_remaining_ms",
+                            1800,
+                        )
+                        or 1800
+                    ),
+                )
+                try:
+                    typed_live = (
+                        await asyncio.wait_for(
+                            typed_call,
+                            timeout=max(0.05, hook_deadline_at - time.perf_counter()),
+                        )
+                        if hook_deadline_at is not None
+                        else await typed_call
+                    )
+                except asyncio.TimeoutError:
+                    typed_live = {
+                        "status": "not_retrieved",
+                        "reason": "hook_deadline_during_typed_recall",
+                        "context": "",
+                        "cards": [],
+                        "selected_refs": [],
+                        "menus_included": [],
+                        "menus_suppressed": [],
+                    }
+                mark_hook_step("typed_admission", stage_started_at)
         else:
             typed_live = {
                 "status": "simulation_disabled" if not typed_live_allowed else "disabled",
@@ -8343,6 +8367,82 @@ class GatewayService:
     def _query_has_identity_name_intent(self, query: str) -> bool:
         compact = self._compact_lookup_key(query)
         return bool(compact and any(marker in compact for marker in IDENTITY_NAME_INTENT_MARKERS))
+
+    def _query_has_name_origin_intent(self, query: str) -> bool:
+        compact = self._compact_lookup_key(query)
+        if not compact:
+            return False
+        has_name_event = any(
+            marker in compact
+            for marker in ("名字", "叫", "取名", "起名", "命名", "称呼")
+        )
+        has_origin_question = any(
+            marker in compact
+            for marker in (
+                "为什么",
+                "为何",
+                "为啥",
+                "原因",
+                "由来",
+                "来历",
+                "怎么来",
+                "从哪来",
+                "从哪里来",
+                "谁取",
+                "谁起",
+                "谁选",
+            )
+        )
+        return bool(has_name_event and has_origin_question)
+
+    def _name_origin_search_terms(self, query: str) -> list[str]:
+        text = str(query or "").strip()
+        if not self._query_has_name_origin_intent(text):
+            return []
+        reader = getattr(getattr(self, "recall_policy", None), "specific_query_terms", None)
+        raw_terms = list(reader(text)) if callable(reader) else []
+        raw_terms.extend(re.findall(r"[A-Za-z][A-Za-z0-9_.-]{1,31}", text))
+        noise = (
+            "从哪里来的", "从哪来的", "名字怎么来的", "为什么", "怎么会",
+            "怎么来", "这个名字", "那个名字", "名字的由来", "名字的来历",
+            "为何", "为啥", "谁取", "谁起", "谁选", "取名", "起名", "命名",
+            "称呼", "由来", "来历", "名字", "叫做", "叫", "原因", "谁",
+        )
+        generic_keys = {
+            self._compact_lookup_key(value)
+            for value in (
+                "我",
+                "你",
+                "他",
+                "她",
+                "它",
+                "我们",
+                "你们",
+                "他们",
+                "这个",
+                "那个",
+                *identity_address_terms(getattr(self, "identity", None) or {}),
+            )
+            if self._compact_lookup_key(value)
+        }
+        output: list[str] = []
+        seen: set[str] = set()
+        for raw_term in raw_terms:
+            residue = self._compact_lookup_key(raw_term)
+            for fragment in noise:
+                fragment_key = self._compact_lookup_key(fragment)
+                if fragment_key:
+                    residue = residue.replace(fragment_key, "")
+            residue = residue.strip("的了呢吗呀啊吧")
+            if not residue or residue in generic_keys or residue in seen:
+                continue
+            if re.fullmatch(r"[a-z][a-z0-9_.-]{1,31}", residue):
+                pass
+            elif not re.fullmatch(r"[\u4e00-\u9fff]{2,18}", residue):
+                continue
+            seen.add(residue)
+            output.append(residue)
+        return output[:8]
 
     def _query_prefers_identity_name_over_date_recall(self, query: str) -> bool:
         text = str(query or "").strip()
@@ -15101,6 +15201,8 @@ class GatewayService:
             getattr(self, "identity", None)
             and self._identity_name_search_terms(query)
         )
+        name_origin_terms = self._name_origin_search_terms(query)
+        has_name_origin_intent = bool(name_origin_terms)
         applied = bool(
             route in {"present_chitchat", "present_reality"}
             and route_action == "skip"
@@ -15109,6 +15211,7 @@ class GatewayService:
             and not has_explicit_recall
             and not has_memory_backed_detail
             and not has_identity_name_intent
+            and not has_name_origin_intent
         )
         return {
             "applied": applied,
@@ -15119,6 +15222,8 @@ class GatewayService:
             "has_explicit_recall": has_explicit_recall,
             "has_memory_backed_detail": has_memory_backed_detail,
             "has_identity_name_intent": has_identity_name_intent,
+            "has_name_origin_intent": has_name_origin_intent,
+            "name_origin_terms": name_origin_terms,
             "matched_detail_markers": matched_detail_markers,
             "matched_candidate_sources": matched_candidate_sources,
             "owner_entity_matches": observed_matches,
@@ -15126,6 +15231,92 @@ class GatewayService:
                 "daily_surface_without_memory_intent"
                 if applied
                 else "typed_retrieval_allowed"
+            ),
+        }
+
+    def _typed_pre_candidate_surface_gate(
+        self,
+        query: str,
+        semantic_recall_debug: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        semantic_debug = semantic_recall_debug if isinstance(semantic_recall_debug, dict) else {}
+        route = str(semantic_debug.get("route") or "").strip()
+        route_action = str(semantic_debug.get("route_action") or "recall").strip().lower()
+        if route not in {"present_chitchat", "present_reality"} or route_action != "skip":
+            return {
+                "applied": False,
+                "stage": "pre_candidate",
+                "route": route,
+                "route_action": route_action,
+                "reason": "semantic_route_requires_candidate_search",
+            }
+        scope = {
+            "status": "unavailable",
+            "intent": "none",
+            "operator": "none",
+            "scope_anchor": None,
+        }
+        scope_resolver = getattr(
+            getattr(self, "observed_entity_shadow_index", None),
+            "resolve_query",
+            None,
+        )
+        if callable(scope_resolver):
+            resolved = scope_resolver(query)
+            if isinstance(resolved, dict):
+                scope = resolved
+        detail_markers = query_intent_terms("typed_recall.detail_question_markers")
+        normalized_query = unicodedata.normalize("NFKC", str(query or "")).casefold()
+        has_detail_question = any(
+            str(marker or "").casefold() in normalized_query
+            for marker in detail_markers
+        )
+        owner_entity_matches: list[dict[str, Any]] = []
+        owner_query_matcher = getattr(
+            getattr(self, "observed_entity_shadow_index", None),
+            "owner_query_matches",
+            None,
+        )
+        if has_detail_question and callable(owner_query_matcher):
+            owner_entity_matches = [
+                dict(row)
+                for row in owner_query_matcher(query, limit=8)
+                if isinstance(row, dict)
+            ]
+        surface_scope = (
+            scope
+            if str(scope.get("status") or "") == "scoped_recall"
+            else {**scope, "scope_anchor": None}
+        )
+        surface_gate = self._typed_surface_reranker_gate(
+            query,
+            surface_scope,
+            semantic_debug,
+            candidates=[],
+            owner_entity_matches=owner_entity_matches,
+        )
+        reader = getattr(getattr(self, "recall_policy", None), "specific_query_terms", None)
+        raw_terms = list(reader(query)) if callable(reader) else []
+        specific_terms = [
+            str(term) for term in raw_terms if self._matched_query_term_is_specific(term)
+        ]
+        has_named_memory_intent = bool(
+            str(scope.get("intent") or "none") != "none"
+            and specific_terms
+        )
+        applied = bool(surface_gate.get("applied") and not has_named_memory_intent)
+        return {
+            **surface_gate,
+            "stage": "pre_candidate",
+            "applied": applied,
+            "scope_status": str(scope.get("status") or ""),
+            "scope_intent": str(scope.get("intent") or "none"),
+            "has_named_memory_intent": has_named_memory_intent,
+            "specific_terms": specific_terms[:8],
+            "reason": (
+                "daily_surface_without_memory_intent"
+                if applied
+                else "typed_retrieval_warrant_present"
             ),
         }
 

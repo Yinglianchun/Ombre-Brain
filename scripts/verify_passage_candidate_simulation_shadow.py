@@ -7,6 +7,7 @@ import json
 import sys
 import time
 import types
+from datetime import timezone
 from pathlib import Path
 
 
@@ -601,10 +602,116 @@ async def verify_full_handler_uses_prefetched_query_vector() -> None:
     assert captured_vectors == [[0.25, 0.75]]
 
 
+def verify_pre_candidate_surface_gate() -> None:
+    service = GatewayService.__new__(GatewayService)
+    service.identity = {
+        "ai_name": "Haven",
+        "user_name": "Rain",
+        "user_display_name": "小雨",
+        "user_aliases": ["宝宝", "老婆"],
+    }
+    service.gateway_tz = timezone.utc
+    service.recall_policy = RecallPolicy(ai_reaction_names=["Haven"])
+
+    class ObservedEntities:
+        @staticmethod
+        def resolve_query(query: str) -> dict:
+            if query.startswith("《间谍过家家》"):
+                return {
+                    "status": "scoped_recall",
+                    "intent": "progress",
+                    "operator": "latest_relevant_member",
+                    "scope_anchor": {"arc_key": "work:spy"},
+                }
+            if "后来" in query:
+                return {
+                    "status": "insufficient_scope",
+                    "intent": "timeline",
+                    "operator": "timeline",
+                    "scope_anchor": None,
+                }
+            return {
+                "status": "no_scope",
+                "intent": "none",
+                "operator": "none",
+                "scope_anchor": None,
+            }
+
+        @staticmethod
+        def owner_query_matches(query: str, **_kwargs) -> list[dict]:
+            if query.startswith(("绒绒", "阿尼亚")):
+                return [
+                    {
+                        "owner_kind": "scene",
+                        "owner_id": "scene-observed",
+                        "entity": query[:3],
+                    }
+                ]
+            return []
+
+    service.observed_entity_shadow_index = ObservedEntities()
+    daily_semantic = {
+        "route": "present_chitchat",
+        "route_action": "skip",
+        "confidence": 0.94,
+        "margin": 0.40,
+    }
+
+    assert service._typed_pre_candidate_surface_gate(
+        "晚安老公", daily_semantic
+    )["applied"] is True
+    assert service._typed_pre_candidate_surface_gate(
+        "阿尼亚好可爱", daily_semantic
+    )["applied"] is True
+
+    explicit = service._typed_pre_candidate_surface_gate(
+        "还记得我们第一次说晚安吗", daily_semantic
+    )
+    assert explicit["applied"] is False, explicit
+    assert explicit["has_explicit_recall"] is True, explicit
+
+    identity_name = service._typed_pre_candidate_surface_gate(
+        "你为什么叫Haven", daily_semantic
+    )
+    assert identity_name["applied"] is False, identity_name
+    assert identity_name["has_identity_name_intent"] is True, identity_name
+
+    generic_name_origin = service._typed_pre_candidate_surface_gate(
+        "Lumos为什么叫这个名字", daily_semantic
+    )
+    assert generic_name_origin["applied"] is False, generic_name_origin
+    assert generic_name_origin["has_name_origin_intent"] is True, generic_name_origin
+    assert "lumos" in generic_name_origin["name_origin_terms"], generic_name_origin
+    anonymous_name_origin = service._typed_pre_candidate_surface_gate(
+        "为什么叫这个名字", daily_semantic
+    )
+    assert anonymous_name_origin["applied"] is True, anonymous_name_origin
+
+    observed_detail = service._typed_pre_candidate_surface_gate(
+        "阿尼亚说过什么", daily_semantic
+    )
+    assert observed_detail["applied"] is False, observed_detail
+    assert observed_detail["has_memory_backed_detail"] is True, observed_detail
+
+    scoped = service._typed_pre_candidate_surface_gate(
+        "《间谍过家家》看到哪了", daily_semantic
+    )
+    assert scoped["applied"] is False, scoped
+    assert scoped["has_arc_scope"] is True, scoped
+
+    global_timeline = service._typed_pre_candidate_surface_gate(
+        "Lumos后来怎么样了", daily_semantic
+    )
+    assert global_timeline["applied"] is False, global_timeline
+    assert global_timeline["has_named_memory_intent"] is True, global_timeline
+
+
 async def verify_full_handler_uses_only_typed_pool() -> None:
     async def run_case(
         query: str,
         typed_result: dict,
+        *,
+        semantic_debug: dict | None = None,
     ) -> tuple[dict, int]:
         handler = GatewayService.__new__(GatewayService)
         handler.typed_event_scene_live_enabled = True
@@ -649,7 +756,7 @@ async def verify_full_handler_uses_only_typed_pool() -> None:
             include_context_debug=False,
             include_debug=True,
             include_recent_context=False,
-            semantic_recall_result=({}, [0.25, 0.75]),
+            semantic_recall_result=(semantic_debug or {}, [0.25, 0.75]),
         )
         return json.loads(response.body), candidate_calls
 
@@ -678,7 +785,7 @@ async def verify_full_handler_uses_only_typed_pool() -> None:
     assert selected["debug"]["hook_timing_debug"]["legacy_pool"] == "removed"
 
     daily, daily_candidate_calls = await run_case(
-        "今天好热",
+        "晚安老公",
         {
             "status": "not_retrieved",
             "reason": "daily_surface_without_memory_intent",
@@ -688,10 +795,18 @@ async def verify_full_handler_uses_only_typed_pool() -> None:
             "menus_included": [],
             "menus_suppressed": [],
         },
+        semantic_debug={
+            "route": "present_chitchat",
+            "route_action": "skip",
+            "confidence": 0.94,
+            "margin": 0.40,
+        },
     )
-    assert daily_candidate_calls == 1
+    assert daily_candidate_calls == 0
     assert daily["recalled_ids"] == []
     assert daily["debug"]["hook_timing_debug"]["legacy_pool"] == "removed"
+    assert daily["debug"]["hook_timing_debug"]["steps_ms"]["typed_candidate"] == 0
+    assert daily["debug"]["semantic_recall_debug"]["typed_pre_candidate_gate"]["applied"] is True
 
     entity_only, entity_candidate_calls = await run_case(
         "阿尼亚",
@@ -893,6 +1008,7 @@ async def verify_warm_plans_and_bounded_refresh_applies() -> None:
 
 asyncio.run(verify_weak_trigger_controls_query_view_execution())
 asyncio.run(verify_full_handler_uses_prefetched_query_vector())
+verify_pre_candidate_surface_gate()
 asyncio.run(verify_full_handler_uses_only_typed_pool())
 asyncio.run(verify_mutation_refresh_queue())
 asyncio.run(verify_warm_plans_and_bounded_refresh_applies())
