@@ -6,9 +6,10 @@ import re
 from typing import Any
 
 
-MATERIAL_KEYS = ("event_ids", "scene_ids", "diary_ids", "darkroom_ids")
+MATERIAL_KEYS = ("event_ids", "scene_ids", "diary_ids", "darkroom_ids", "upload_ids")
 _EVENT_ID_RE = re.compile(r"^event_[0-9a-f]{24}$")
 _SCENE_ID_RE = re.compile(r"^scene_[A-Za-z0-9_.:-]{1,120}$")
+_UPLOAD_ID_RE = re.compile(r"^upload_[0-9a-f]{32}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -18,6 +19,7 @@ def material_ids_from_narrative(narrative: dict[str, Any]) -> dict[str, list[Any
         "scene_ids": list(narrative.get("linked_scene_ids") or []),
         "diary_ids": list(narrative.get("linked_diary_ids") or []),
         "darkroom_ids": list(narrative.get("linked_darkroom_ids") or []),
+        "upload_ids": list(narrative.get("linked_upload_ids") or []),
     }
 
 
@@ -28,6 +30,11 @@ def normalize_material_ids(
 ) -> dict[str, list[Any]]:
     if value is None:
         value = fallback
+    if isinstance(value, dict) and set(value) == set(MATERIAL_KEYS[:-1]):
+        value = {
+            **value,
+            "upload_ids": list((fallback or {}).get("upload_ids") or []),
+        }
     if not isinstance(value, dict) or set(value) != set(MATERIAL_KEYS):
         raise ValueError("material_ids_must_contain_exact_source_lists")
 
@@ -49,12 +56,18 @@ def normalize_material_ids(
                     raise ValueError(f"invalid_{key[:-1]}")
             else:
                 item = str(candidate or "").strip()
-                pattern = _EVENT_ID_RE if key == "event_ids" else _SCENE_ID_RE
+                pattern = (
+                    _EVENT_ID_RE
+                    if key == "event_ids"
+                    else _UPLOAD_ID_RE
+                    if key == "upload_ids"
+                    else _SCENE_ID_RE
+                )
                 if not pattern.fullmatch(item):
                     raise ValueError(f"invalid_{key[:-1]}")
             if item not in items:
                 items.append(item)
-        if len(items) > 500:
+        if len(items) > (8 if key == "upload_ids" else 500):
             raise ValueError(f"too_many_{key}")
         normalized[key] = items
     if sum(len(items) for items in normalized.values()) < 2:
@@ -79,7 +92,7 @@ def material_delta(
 def material_snapshot_sha256(materials: dict[str, Any]) -> str:
     frozen = {
         key: materials.get(key) or []
-        for key in ("events", "scenes", "diaries", "darkrooms")
+        for key in ("events", "scenes", "diaries", "darkrooms", "uploads")
     }
     payload = json.dumps(frozen, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -134,5 +147,11 @@ def render_material_snapshot(materials: dict[str, Any]) -> str:
             f"darkroom:{darkroom['darkroom_id']} revision:{darkroom['revision']} "
             f"content_sha256:{darkroom['content_sha256']} "
             f"comments_sha256:{darkroom['comments_sha256']}"
+        )
+    for upload in materials.get("uploads") or []:
+        lines.append(
+            "- upload "
+            f"{upload['upload_id']} sha256:{upload['sha256']} "
+            f"filename:{json.dumps(upload['filename'], ensure_ascii=False)}"
         )
     return "\n".join(lines) + "\n"

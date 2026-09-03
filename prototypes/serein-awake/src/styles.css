@@ -3458,6 +3458,32 @@ label:has(input:focus-visible) {
   font-family: var(--font-editorial-cjk);
   font-size: 9px;
 }
+.narrative-editor__material-upload {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px dashed rgba(67, 84, 78, 0.22);
+  color: #61706a;
+  cursor: pointer;
+}
+.narrative-editor__material-upload input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.narrative-editor__material-upload span {
+  font-family: var(--font-editorial-cjk);
+  font-size: 10px;
+}
+.narrative-editor__material-upload small {
+  color: #929c98;
+  font-family: var(--font-editorial-cjk);
+  font-size: 8px;
+  line-height: 1.55;
+}
 .narrative-editor__material-delta {
   display: grid;
   gap: 5px;

@@ -469,6 +469,18 @@ export function buildNarrativeSourceLedgers(items, metadata = {}) {
         status: String(source?.entry_type || source?.visibility || (source ? "active" : "missing")),
       });
     }
+    const uploadById = new Map((item.linked_uploads || []).map((upload) => [String(upload.upload_id), upload]));
+    for (const sourceId of item.linked_upload_ids || []) {
+      const id = String(sourceId);
+      const source = uploadById.get(id);
+      sourceLedger.push({
+        source_type: "upload",
+        source_id: id,
+        title: String(source?.filename || id),
+        date: sourceDate(source?.created_at),
+        status: String(source?.extraction_status || (source ? "stored" : "missing")),
+      });
+    }
     return { ...item, source_ledger: sourceLedger };
   });
 }
@@ -1428,6 +1440,43 @@ function sereinMemoryBridge() {
             status: "error",
             reason: "narrative_preview_failed",
             message: error?.name === "AbortError" ? "这次预览生成超时了。" : "暂时没有生成叙事卷预览。",
+            writes_performed: [],
+          }));
+        }
+      });
+
+      server.middlewares.use("/__serein/narrative-material-upload", async (request, response) => {
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end(JSON.stringify({ error: "method_not_allowed" }));
+          return;
+        }
+        try {
+          const body = await readJsonBody(request, 14_100_000);
+          const filename = String(body.filename || "").trim();
+          const contentType = String(body.contentType || "application/octet-stream").trim();
+          const contentBase64 = String(body.contentBase64 || "");
+          if (!filename || filename.length > 240 || !contentBase64) {
+            response.statusCode = 400;
+            response.end(JSON.stringify({ status: "invalid", reason: "invalid_upload_request", writes_performed: [] }));
+            return;
+          }
+          const upstream = await callOmbreDashboard("/api/narrative-rolls/material-uploads", {
+            method: "POST",
+            body: {
+              filename,
+              content_type: contentType,
+              content_base64: contentBase64,
+            },
+          });
+          response.statusCode = upstream.status;
+          response.end(JSON.stringify(upstream.payload));
+        } catch (error) {
+          response.statusCode = error?.message === "request_too_large" ? 413 : 502;
+          response.end(JSON.stringify({
+            status: "error",
+            reason: error?.message === "request_too_large" ? "upload_too_large" : "narrative_material_upload_failed",
             writes_performed: [],
           }));
         }

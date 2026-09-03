@@ -13,6 +13,7 @@ import {
   previewNarrativeRoll,
   readFallbackNarrativeRolls,
   saveNarrativeRollBody,
+  uploadNarrativeMaterial,
 } from "../storage/narrativeStore.js";
 
 const transitionTo = (update) => {
@@ -61,6 +62,7 @@ export function NarrativePage() {
   const [previewError, setPreviewError] = useState("");
   const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
   const [materialIds, setMaterialIds] = useState(null);
   const [materialType, setMaterialType] = useState("event_ids");
@@ -256,10 +258,53 @@ export function NarrativePage() {
     setSaveMessage("");
   };
 
+  const uploadLocalMaterial = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || uploading) return;
+    setUploading(true);
+    setPreviewError("");
+    try {
+      const uploaded = await uploadNarrativeMaterial(file);
+      setMaterialIds((current) => {
+        const base = current || selectedRoll.materialIds;
+        const values = base?.upload_ids || [];
+        return {
+          ...base,
+          upload_ids: values.includes(uploaded.upload_id) ? values : [...values, uploaded.upload_id],
+        };
+      });
+      setNarrativeRolls((rolls) => rolls.map((roll) => (
+        roll.id !== selectedRoll.id
+          ? roll
+          : {
+              ...roll,
+              sources: [
+                ...(roll.sources || []).filter((source) => !(source.type === "upload" && source.id === uploaded.upload_id)),
+                {
+                  type: "upload",
+                  typeLabel: "本地文件",
+                  id: uploaded.upload_id,
+                  title: uploaded.filename,
+                  date: String(uploaded.created_at || "").slice(0, 10),
+                  status: uploaded.extraction_status,
+                },
+              ],
+            }
+      )));
+      setPreviewSeal(null);
+      setSaveMessage(`${uploaded.filename} 已上传并加入拟绑定材料。`);
+    } catch (error) {
+      setPreviewError(error.message || "这个文件没有上传成功。");
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const editableMaterials = useMemo(() => {
     if (!selectedRoll || !materialIds) return [];
-    const keys = { event: "event_ids", scene: "scene_ids", diary: "diary_ids", darkroom: "darkroom_ids" };
-    const labels = { event_ids: "Event", scene_ids: "Scene", diary_ids: "日记", darkroom_ids: "暗房" };
+    const keys = { event: "event_ids", scene: "scene_ids", diary: "diary_ids", darkroom: "darkroom_ids", upload: "upload_ids" };
+    const labels = { event_ids: "Event", scene_ids: "Scene", diary_ids: "日记", darkroom_ids: "暗房", upload_ids: "本地文件" };
     const sourceByKey = new Map((selectedRoll.sources || []).map((source) => [`${source.type}:${source.id}`, source]));
     return Object.entries(labels).flatMap(([key, typeLabel]) => (
       (materialIds[key] || []).map((id) => {
@@ -454,10 +499,16 @@ export function NarrativePage() {
                         <option value="scene_ids">Scene</option>
                         <option value="diary_ids">日记</option>
                         <option value="darkroom_ids">暗房</option>
+                        <option value="upload_ids">已上传文件</option>
                       </select>
                       <input value={materialIdInput} onChange={(event) => setMaterialIdInput(event.target.value)} placeholder="输入精确 ID" aria-label="新增材料 ID" />
                       <button type="button" onClick={addMaterial}>加入拟绑定</button>
                     </div>
+                    <label className="narrative-editor__material-upload">
+                      <input type="file" onChange={uploadLocalMaterial} disabled={uploading} />
+                      <span>{uploading ? "正在上传…" : "从本地上传材料"}</span>
+                      <small>保留原文件；文字类文件会同时提供给 Writer 阅读，单个不超过 10 MB。</small>
+                    </label>
                     {previewSeal?.material_delta ? (
                       <div className="narrative-editor__material-delta" role="status">
                         <strong>本次材料变更</strong>

@@ -16,6 +16,7 @@ _SCENE_ID_RE = re.compile(r"\bscene_mig2_[A-Za-z0-9]+\b")
 _EVENT_ID_RE = re.compile(r"\bevent_[0-9a-f]{24}\b")
 _DIARY_ID_RE = re.compile(r"\bdiary:(\d{1,9})\b")
 _DARKROOM_ID_RE = re.compile(r"\bdarkroom:(\d{1,9})\b")
+_UPLOAD_ID_RE = re.compile(r"\bupload_[0-9a-f]{32}\b")
 _NARRATIVE_ID_RE = re.compile(r"^narrative_[A-Za-z0-9_.:-]{1,96}$")
 _ARC_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}:[^\s\x00-\x1f\x7f]{1,127}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -204,6 +205,7 @@ class NarrativeRollStore:
                 "linked_event_ids": [],
                 "linked_diary_ids": [],
                 "linked_darkroom_ids": [],
+                "linked_upload_ids": [],
                 "arc_key": normalize_arc_key(entry.get("arc_key")),
                 "parent_narrative_id": (
                     str(entry.get("parent_narrative_id") or "").strip()
@@ -292,6 +294,22 @@ class NarrativeRollStore:
                     }
                 )
             )
+            excluded_upload_ids = {
+                str(value or "").strip()
+                for value in entry.get("excluded_upload_ids", []) or []
+                if str(value or "").strip()
+            }
+            linked_upload_ids = list(
+                dict.fromkeys(
+                    str(upload_id or "").strip()
+                    for upload_id in [
+                        *(entry.get("linked_upload_ids", []) or []),
+                        *_UPLOAD_ID_RE.findall(document),
+                    ]
+                    if _UPLOAD_ID_RE.fullmatch(str(upload_id or "").strip())
+                    and str(upload_id or "").strip() not in excluded_upload_ids
+                )
+            )
             if expected_hash and actual_hash != expected_hash:
                 integrity_status = "hash_mismatch"
             elif not body and publication_status != "collecting":
@@ -314,6 +332,8 @@ class NarrativeRollStore:
                     "linked_diary_count": len(linked_diary_ids),
                     "linked_darkroom_ids": linked_darkroom_ids,
                     "linked_darkroom_count": len(linked_darkroom_ids),
+                    "linked_upload_ids": linked_upload_ids,
+                    "linked_upload_count": len(linked_upload_ids),
                 }
             )
             items.append(item)
@@ -354,10 +374,13 @@ class NarrativeRollStore:
                 "linked_diary_count",
                 "linked_darkroom_ids",
                 "linked_darkroom_count",
+                "linked_upload_ids",
+                "linked_upload_count",
                 "excluded_scene_ids",
                 "excluded_event_ids",
                 "excluded_diary_ids",
                 "excluded_darkroom_ids",
+                "excluded_upload_ids",
                 "integrity_status",
             )
         }
@@ -372,6 +395,7 @@ class NarrativeRollStore:
                 "linked_event_count",
                 "linked_diary_count",
                 "linked_darkroom_count",
+                "linked_upload_count",
             )
         )
         return {
@@ -523,6 +547,8 @@ class NarrativeRollStore:
             "linked_event_ids": list(item.get("linked_event_ids") or []),
             "linked_diary_ids": list(item.get("linked_diary_ids") or []),
             "linked_darkroom_count": len(item.get("linked_darkroom_ids") or []),
+            "linked_upload_ids": list(item.get("linked_upload_ids") or []),
+            "linked_upload_count": len(item.get("linked_upload_ids") or []),
             "body_included": False,
         }
 
@@ -668,6 +694,7 @@ class NarrativeRollStore:
             "linked_event_ids": list(item.get("linked_event_ids") or []),
             "linked_diary_ids": list(item.get("linked_diary_ids") or []),
             "linked_darkroom_ids": list(item.get("linked_darkroom_ids") or []),
+            "linked_upload_ids": list(item.get("linked_upload_ids") or []),
             "history": [
                 {
                     **history_item,
@@ -675,6 +702,7 @@ class NarrativeRollStore:
                     "linked_event_ids": list(history_item.get("linked_event_ids") or []),
                     "linked_diary_ids": list(history_item.get("linked_diary_ids") or []),
                     "linked_darkroom_ids": list(history_item.get("linked_darkroom_ids") or []),
+                    "linked_upload_ids": list(history_item.get("linked_upload_ids") or []),
                 }
                 for history_item in item.get("history", []) or []
                 if isinstance(history_item, dict)
@@ -719,6 +747,7 @@ class NarrativeRollStore:
         source_event_ids: list[str] | None = None,
         source_diary_ids: list[int] | None = None,
         source_darkroom_ids: list[int] | None = None,
+        source_upload_ids: list[str] | None = None,
         material_snapshot: str = "",
     ) -> dict[str, Any]:
         """Publish one body revision, preserving membership unless an exact proposal is supplied."""
@@ -754,6 +783,7 @@ class NarrativeRollStore:
                     source_event_ids,
                     source_diary_ids,
                     source_darkroom_ids,
+                    source_upload_ids,
                 )
             )
             if membership_proposal_supplied:
@@ -765,16 +795,19 @@ class NarrativeRollStore:
         target_event_ids = list(current.get("linked_event_ids") or []) if source_event_ids is None else list(source_event_ids)
         target_diary_ids = list(current.get("linked_diary_ids") or []) if source_diary_ids is None else list(source_diary_ids)
         target_darkroom_ids = list(current.get("linked_darkroom_ids") or []) if source_darkroom_ids is None else list(source_darkroom_ids)
+        target_upload_ids = list(current.get("linked_upload_ids") or []) if source_upload_ids is None else list(source_upload_ids)
         membership_changed = (
             target_scene_ids != list(current.get("linked_scene_ids") or [])
             or target_event_ids != list(current.get("linked_event_ids") or [])
             or target_diary_ids != list(current.get("linked_diary_ids") or [])
             or target_darkroom_ids != list(current.get("linked_darkroom_ids") or [])
+            or target_upload_ids != list(current.get("linked_upload_ids") or [])
         )
         excluded_scene_ids = [item for item in self.source_scene_ids(document) if item not in target_scene_ids]
         excluded_event_ids = [item for item in self.source_event_ids(document) if item not in target_event_ids]
         excluded_diary_ids = [item for item in self.source_diary_ids(document) if item not in target_diary_ids]
         excluded_darkroom_ids = [item for item in self.source_darkroom_ids(document) if item not in target_darkroom_ids]
+        excluded_upload_ids = [item for item in self.source_upload_ids(document) if item not in target_upload_ids]
 
         result = self.publish(
             narrative_id=str(current.get("narrative_id") or ""),
@@ -787,10 +820,12 @@ class NarrativeRollStore:
             source_event_ids=target_event_ids,
             source_diary_ids=target_diary_ids,
             source_darkroom_ids=target_darkroom_ids,
+            source_upload_ids=target_upload_ids,
             excluded_scene_ids=excluded_scene_ids,
             excluded_event_ids=excluded_event_ids,
             excluded_diary_ids=excluded_diary_ids,
             excluded_darkroom_ids=excluded_darkroom_ids,
+            excluded_upload_ids=excluded_upload_ids,
             title_aliases=list(current.get("title_aliases") or []),
             primary_entities=list(current.get("primary_entities") or []),
             supporting_entities=list(current.get("supporting_entities") or []),
@@ -810,6 +845,7 @@ class NarrativeRollStore:
                 and list(result.get("linked_event_ids") or []) == list(current.get("linked_event_ids") or [])
                 and list(result.get("linked_diary_ids") or []) == list(current.get("linked_diary_ids") or [])
                 and list(result.get("linked_darkroom_ids") or []) == list(current.get("linked_darkroom_ids") or [])
+                and list(result.get("linked_upload_ids") or []) == list(current.get("linked_upload_ids") or [])
             )
         return result
 
@@ -856,6 +892,16 @@ class NarrativeRollStore:
         )
 
     @staticmethod
+    def source_upload_ids(document: str, explicit_ids: list[str] | None = None) -> list[str]:
+        return list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in [*(explicit_ids or []), *_UPLOAD_ID_RE.findall(str(document or ""))]
+                if _UPLOAD_ID_RE.fullmatch(str(value or "").strip())
+            )
+        )
+
+    @staticmethod
     def _string_list(values: Any, *, limit: int = 40) -> list[str]:
         if isinstance(values, str):
             source = re.split(r"[\n,|]+", values)
@@ -884,10 +930,12 @@ class NarrativeRollStore:
         source_event_ids: list[str] | None = None,
         source_diary_ids: list[int] | None = None,
         source_darkroom_ids: list[int] | None = None,
+        source_upload_ids: list[str] | None = None,
         excluded_scene_ids: list[str] | None = None,
         excluded_event_ids: list[str] | None = None,
         excluded_diary_ids: list[int] | None = None,
         excluded_darkroom_ids: list[int] | None = None,
+        excluded_upload_ids: list[str] | None = None,
         title_aliases: list[str] | None = None,
         primary_entities: list[str] | None = None,
         supporting_entities: list[str] | None = None,
@@ -933,15 +981,18 @@ class NarrativeRollStore:
         safe_excluded_darkroom_ids = list(dict.fromkeys(
             int(value) for value in excluded_darkroom_ids or [] if int(value) > 0
         ))
+        safe_excluded_upload_ids = self._string_list(excluded_upload_ids, limit=1000)
         linked_scene_ids = [item for item in self.source_scene_ids(exact_document, source_scene_ids) if item not in safe_excluded_scene_ids]
         linked_event_ids = [item for item in self.source_event_ids(exact_document, source_event_ids) if item not in safe_excluded_event_ids]
         linked_diary_ids = [item for item in self.source_diary_ids(exact_document, source_diary_ids) if item not in safe_excluded_diary_ids]
         linked_darkroom_ids = [item for item in self.source_darkroom_ids(exact_document, source_darkroom_ids) if item not in safe_excluded_darkroom_ids]
+        linked_upload_ids = [item for item in self.source_upload_ids(exact_document, source_upload_ids) if item not in safe_excluded_upload_ids]
         if (
             len(linked_scene_ids)
             + len(linked_event_ids)
             + len(linked_diary_ids)
             + len(linked_darkroom_ids)
+            + len(linked_upload_ids)
             < 2
         ):
             return {
@@ -1015,6 +1066,16 @@ class NarrativeRollStore:
                 "reason": "source_darkroom_id_missing_from_document",
                 "narrative_id": safe_id,
                 "darkroom_ids": missing_darkrooms_in_document,
+            }
+        missing_uploads_in_document = [
+            upload_id for upload_id in linked_upload_ids if upload_id not in exact_document
+        ]
+        if missing_uploads_in_document:
+            return {
+                "status": "invalid",
+                "reason": "source_upload_id_missing_from_document",
+                "narrative_id": safe_id,
+                "upload_ids": missing_uploads_in_document,
             }
 
         lifecycle = str(lifecycle or "active").strip().lower()
@@ -1164,10 +1225,12 @@ class NarrativeRollStore:
                         "linked_event_ids",
                         "linked_diary_ids",
                         "linked_darkroom_ids",
+                        "linked_upload_ids",
                         "excluded_scene_ids",
                         "excluded_event_ids",
                         "excluded_diary_ids",
                         "excluded_darkroom_ids",
+                        "excluded_upload_ids",
                         "arc_key",
                         "parent_narrative_id",
                     )
@@ -1197,10 +1260,12 @@ class NarrativeRollStore:
             "linked_event_ids": linked_event_ids,
             "linked_diary_ids": linked_diary_ids,
             "linked_darkroom_ids": linked_darkroom_ids,
+            "linked_upload_ids": linked_upload_ids,
             "excluded_scene_ids": safe_excluded_scene_ids,
             "excluded_event_ids": safe_excluded_event_ids,
             "excluded_diary_ids": safe_excluded_diary_ids,
             "excluded_darkroom_ids": safe_excluded_darkroom_ids,
+            "excluded_upload_ids": safe_excluded_upload_ids,
             "published_at": published_at,
             "published_by": f"{self.identity['ai_name']}_manual",
             "history": history,
@@ -1249,6 +1314,7 @@ class NarrativeRollStore:
                 "source_event_ids": linked_event_ids,
                 "source_diary_ids": linked_diary_ids,
                 "source_darkroom_ids": linked_darkroom_ids,
+                "source_upload_ids": linked_upload_ids,
                 "canonical_scene_changed": False,
                 "model_called": False,
             }

@@ -82,11 +82,12 @@ const sourceTypeLabels = {
   scene: "Scene",
   diary: "日记",
   darkroom: "暗房",
+  upload: "本地文件",
 };
 
 function materialIdsFromSources(sources = []) {
-  const ids = { event_ids: [], scene_ids: [], diary_ids: [], darkroom_ids: [] };
-  const keyByType = { event: "event_ids", scene: "scene_ids", diary: "diary_ids", darkroom: "darkroom_ids" };
+  const ids = { event_ids: [], scene_ids: [], diary_ids: [], darkroom_ids: [], upload_ids: [] };
+  const keyByType = { event: "event_ids", scene: "scene_ids", diary: "diary_ids", darkroom: "darkroom_ids", upload: "upload_ids" };
   for (const source of sources) {
     const key = keyByType[source?.type || "scene"];
     if (!key) continue;
@@ -97,7 +98,15 @@ function materialIdsFromSources(sources = []) {
 }
 
 function withMaterialIds(roll) {
-  return roll?.materialIds ? roll : { ...roll, materialIds: materialIdsFromSources(roll?.sources) };
+  const inferred = materialIdsFromSources(roll?.sources);
+  return {
+    ...roll,
+    materialIds: {
+      ...inferred,
+      ...(roll?.materialIds || {}),
+      upload_ids: roll?.materialIds?.upload_ids || inferred.upload_ids,
+    },
+  };
 }
 
 function projectSources(item, fallback) {
@@ -160,6 +169,7 @@ function projectLiveRoll(item, index, fallback) {
       scene_ids: (item.linked_scene_ids || []).map(String),
       diary_ids: (item.linked_diary_ids || []).map(Number),
       darkroom_ids: (item.linked_darkroom_ids || []).map(Number),
+      upload_ids: (item.linked_upload_ids || []).map(String),
     },
     sceneNames: sources.length
       ? sources.map((source) => source.title)
@@ -247,4 +257,28 @@ export async function loadNarrativeRolls() {
 
 export function readFallbackNarrativeRolls() {
   return fallbackNarrativeRolls.map(withMaterialIds);
+}
+
+export async function uploadNarrativeMaterial(file) {
+  if (!(file instanceof File) || file.size < 1) throw new Error("请选择一个本地文件。");
+  if (file.size > 10 * 1024 * 1024) throw new Error("单个材料不能超过 10 MB。");
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  const response = await fetch("/__serein/narrative-material-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      filename: file.name,
+      contentType: file.type || "application/octet-stream",
+      contentBase64: btoa(binary),
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.status !== "ok") {
+    throw new Error(payload?.message || payload?.reason || "这个文件没有上传成功。");
+  }
+  return payload;
 }

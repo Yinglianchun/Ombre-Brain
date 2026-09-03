@@ -165,6 +165,7 @@ from window_shadows import (
 )
 from memory_nodes import MemoryNodeStore
 from narrative_rolls import NarrativeRollStore
+from narrative_uploads import MAX_UPLOAD_BYTES, NarrativeUploadStore
 from narrative_revision_inbox import NarrativeRevisionInbox
 from narrative_revision_scout import (
     build_keyword_corridors,
@@ -282,6 +283,7 @@ gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gat
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
 reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
 narrative_roll_store = NarrativeRollStore(config)          # Reviewed sourced Narrative Projection arcs / 审阅后发布的叙事卷
+narrative_upload_store = NarrativeUploadStore(config)      # Durable local files bound to Narrative Rolls / 叙事卷本地材料
 observed_entity_shadow_index = ObservedEntityShadowIndex(config) # Rebuildable read-only entity-to-Arc scope index
 narrative_revision_inbox_store = NarrativeRevisionInbox(config) # Derived source-to-roll review queue / 派生叙事修订箱
 scene_evidence_store = SceneEvidenceStore(config)           # Independent Scene/source evidence sidecar / Scene 原文证据旁路索引
@@ -8935,6 +8937,12 @@ async def _read_narrative_memory(narrative_id: str) -> dict:
     result["automatic_linked_event_ids"] = automatic_ids
     result["linked_event_ids"] = [*direct_ids, *automatic_ids]
     result["linked_event_count"] = len(result["linked_event_ids"])
+    result["linked_uploads"] = [
+        upload
+        for upload_id in result.get("linked_upload_ids") or []
+        for upload in [narrative_upload_store.read(str(upload_id), include_text=False)]
+        if upload.get("status") == "ok"
+    ]
     return result
 
 
@@ -8947,6 +8955,7 @@ async def _materialize_narrative_writer_sources(narrative: dict) -> dict:
     scenes: list[dict] = []
     diaries: list[dict] = []
     darkrooms: list[dict] = []
+    uploads: list[dict] = []
     errors: list[dict] = []
 
     for event_id in narrative.get("linked_event_ids") or []:
@@ -9075,6 +9084,26 @@ async def _materialize_narrative_writer_sources(narrative: dict) -> dict:
         item = read_diary_source(int(darkroom_id), "darkroom")
         if item:
             darkrooms.append(item)
+    for upload_id in narrative.get("linked_upload_ids") or []:
+        item = narrative_upload_store.read(str(upload_id), include_text=True)
+        if item.get("status") != "ok":
+            errors.append({
+                "source_type": "upload",
+                "source_id": str(upload_id),
+                "reason": str(item.get("reason") or item.get("status") or "not_found"),
+            })
+            continue
+        uploads.append({
+            "source_type": "upload",
+            "upload_id": str(item.get("upload_id") or ""),
+            "title": str(item.get("filename") or upload_id),
+            "filename": str(item.get("filename") or ""),
+            "content_type": str(item.get("content_type") or ""),
+            "size": int(item.get("size") or 0),
+            "sha256": str(item.get("sha256") or ""),
+            "extraction_status": str(item.get("extraction_status") or ""),
+            "content": str(item.get("extracted_text") or ""),
+        })
 
     if errors:
         return {"status": "invalid", "reason": "bound_material_unavailable", "errors": errors}
@@ -9091,13 +9120,45 @@ async def _materialize_narrative_writer_sources(narrative: dict) -> dict:
         "scenes": scenes,
         "diaries": diaries,
         "darkrooms": darkrooms,
+        "uploads": uploads,
         "material_counts": {
             "events": len(events),
             "scenes": len(scenes),
             "diaries": len(diaries),
             "darkrooms": len(darkrooms),
+            "uploads": len(uploads),
         },
     }
+
+
+@mcp.custom_route("/api/narrative-rolls/material-uploads", methods=["POST"])
+async def api_narrative_material_upload(request):
+    """Persist one local file as an immutable Narrative material."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"status": "invalid", "reason": "invalid_json", "writes_performed": []}, status_code=400)
+    if not isinstance(body, dict) or set(body) != {"filename", "content_type", "content_base64"}:
+        return JSONResponse({"status": "invalid", "reason": "invalid_upload_request", "writes_performed": []}, status_code=400)
+    encoded = str(body.get("content_base64") or "")
+    if len(encoded) > ((MAX_UPLOAD_BYTES + 2) // 3) * 4 + 8:
+        return JSONResponse({"status": "invalid", "reason": "upload_too_large", "max_bytes": MAX_UPLOAD_BYTES, "writes_performed": []}, status_code=413)
+    try:
+        raw = b64decode(encoded, validate=True)
+    except Exception:
+        return JSONResponse({"status": "invalid", "reason": "invalid_upload_base64", "writes_performed": []}, status_code=400)
+    result = narrative_upload_store.create(
+        raw,
+        filename=str(body.get("filename") or "upload"),
+        content_type=str(body.get("content_type") or "application/octet-stream"),
+    )
+    status_code = 200 if result.get("status") == "ok" else 409 if result.get("status") == "conflict" else 413 if result.get("reason") == "upload_too_large" else 400
+    return JSONResponse(result, status_code=status_code)
 
 
 @mcp.custom_route("/api/narrative-rolls", methods=["GET"])
@@ -9182,6 +9243,7 @@ async def api_narrative_roll_preview_input(request):
         "linked_scene_ids": proposed_material_ids["scene_ids"],
         "linked_diary_ids": proposed_material_ids["diary_ids"],
         "linked_darkroom_ids": proposed_material_ids["darkroom_ids"],
+        "linked_upload_ids": proposed_material_ids["upload_ids"],
     }
     materials = await _materialize_narrative_writer_sources(proposed_narrative)
     if materials.get("status") != "ok":
@@ -9255,6 +9317,7 @@ async def api_save_narrative_roll_body(request):
         "linked_scene_ids": proposed_material_ids["scene_ids"],
         "linked_diary_ids": proposed_material_ids["diary_ids"],
         "linked_darkroom_ids": proposed_material_ids["darkroom_ids"],
+        "linked_upload_ids": proposed_material_ids["upload_ids"],
     }
     fresh_materials = await _materialize_narrative_writer_sources(proposed_narrative)
     if fresh_materials.get("status") != "ok":
@@ -9285,6 +9348,7 @@ async def api_save_narrative_roll_body(request):
         source_event_ids=proposed_material_ids["event_ids"],
         source_diary_ids=proposed_material_ids["diary_ids"],
         source_darkroom_ids=proposed_material_ids["darkroom_ids"],
+        source_upload_ids=proposed_material_ids["upload_ids"],
         material_snapshot=render_material_snapshot(fresh_materials),
     )
     if result.get("status") == "updated":
@@ -13740,6 +13804,7 @@ async def publish_narrative(
     source_event_ids: list[str] | None = None,
     source_diary_ids: list[int] | None = None,
     source_darkroom_ids: list[int] | None = None,
+    source_upload_ids: list[str] | None = None,
     title_aliases: list[str] | None = None,
     primary_entities: list[str] | None = None,
     supporting_entities: list[str] | None = None,
@@ -13751,7 +13816,7 @@ async def publish_narrative(
     publication_status: str = "reviewed",
     lifecycle: str = "active",
 ) -> dict:
-    """发布或修订 Narrative Roll。Diary 与已解锁 Darkroom 来源须绑定精确快照；collecting Arc 必须填写唯一稳定 arc_key。"""
+    """发布或修订 Narrative Roll。Diary、已解锁 Darkroom 与本地上传文件须绑定精确快照；collecting Arc 必须填写唯一稳定 arc_key。"""
     exact_document = str(document or "")
     linked_ids = narrative_roll_store.source_scene_ids(exact_document, source_scene_ids)
     linked_event_ids = narrative_roll_store.source_event_ids(exact_document, source_event_ids)
@@ -13759,6 +13824,7 @@ async def publish_narrative(
     linked_darkroom_ids = narrative_roll_store.source_darkroom_ids(
         exact_document, source_darkroom_ids
     )
+    linked_upload_ids = narrative_roll_store.source_upload_ids(exact_document, source_upload_ids)
     current_roll = narrative_roll_store.read(str(narrative_id or "").strip())
 
     def _active_narrative_source_scene(scene: dict) -> bool:
@@ -13830,6 +13896,24 @@ async def publish_narrative(
     )
     resolved_sources.extend(resolved_darkrooms)
     errors.extend(darkroom_errors)
+    for upload_id in linked_upload_ids:
+        upload = narrative_upload_store.read(upload_id, include_text=False)
+        if upload.get("status") != "ok":
+            errors.append({"upload_id": upload_id, "reason": str(upload.get("reason") or upload.get("status") or "not_found")})
+            continue
+        digest = str(upload.get("sha256") or "")
+        if digest not in exact_document:
+            errors.append({"upload_id": upload_id, "reason": "upload_sha256_missing_from_document", "sha256": digest})
+            continue
+        resolved_sources.append({
+            "source_type": "upload",
+            "upload_id": upload_id,
+            "filename": str(upload.get("filename") or ""),
+            "content_type": str(upload.get("content_type") or ""),
+            "size": int(upload.get("size") or 0),
+            "sha256": digest,
+            "extraction_status": str(upload.get("extraction_status") or ""),
+        })
     if errors:
         return {
             "status": "invalid",
@@ -13849,6 +13933,7 @@ async def publish_narrative(
         source_event_ids=linked_event_ids,
         source_diary_ids=linked_diary_ids,
         source_darkroom_ids=linked_darkroom_ids,
+        source_upload_ids=linked_upload_ids,
         title_aliases=title_aliases,
         primary_entities=primary_entities,
         supporting_entities=supporting_entities,

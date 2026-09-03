@@ -6,10 +6,11 @@
 
 ### 添加材料
 
-- 编辑器可按精确 ID 增加或移除已有 Event、Scene、Diary、Darkroom；
+- 编辑器可按精确 ID 增加或移除已有 Event、Scene、Diary、Darkroom，也可从本地上传一份文件并立即加入拟绑定材料；
 - 材料 proposal 与正文一起进入预览，明确显示完整目标 membership 以及 added / removed；
-- 删除只改变 Narrative membership，不删除或改写 canonical Event、Scene、Diary、Darkroom；
-- 本地文件上传仍未接入，UI 不伪装这项能力可用。
+- 删除只改变 Narrative membership，不删除或改写 canonical Event、Scene、Diary、Darkroom，也不删除已上传的原文件；
+- 本地文件以内容哈希生成稳定 `upload_id`，保留原始字节、文件名、MIME、大小与 SHA-256。UTF-8 文本、Markdown、CSV、JSON、YAML、日志及 DOCX 会尽量提取文字供 Writer 阅读；其他格式只作为有来源的附件记录，不推断内容；
+- 单个文件上限为 10 MB。上传完成本身只创建材料，不会改 Narrative；仍须经过预览并确认保存，才会绑定到当前卷。
 
 ### 保存正文
 
@@ -43,7 +44,7 @@
 
 ## 当前实现阶段
 
-当前实现已经包含 `edit` / `update` / `rewrite` 的只读预览封印。UI 可为 Event、Scene、Diary、Darkroom 提出精确增删；预览显式返回目标 IDs、delta 与材料 snapshot hash。保存会 fresh-read 全部目标材料、复算 preview fingerprint，并在同一 revision 中写正文与 membership。只改正文时目标 IDs 默认为当前绑定，因此不会意外清空或扩张材料。本地文件上传仍在后续阶段接入。
+当前实现已经包含 `edit` / `update` / `rewrite` 的只读预览封印。UI 可为 Event、Scene、Diary、Darkroom 和本地上传材料提出精确增删；预览显式返回目标 IDs、delta 与材料 snapshot hash。保存会 fresh-read 全部目标材料、复算 preview fingerprint，并在同一 revision 中写正文与 membership。只改正文时目标 IDs 默认为当前绑定，因此不会意外清空或扩张材料。旧版只提交四类材料的客户端会保留既有上传材料，不会在滚动发布期间误删。
 
 Writer 由 Serein 主机上的 Codex ephemeral 单次任务执行。`update` 与 `rewrite` 都使用 `gpt-5.6-sol`，reasoning effort 为 `medium`。Host 显式读取 `prototypes/serein-awake/codex_agents/narrative_writer/AGENTS.md` 并注入冻结 prompt；动态任务只携带 mode、标题、当前正文（仅 update）和后端冻结的当前绑定材料。任务以 read-only sandbox、空临时目录、`--ignore-rules` 和 `--ephemeral` 运行，不调用工具、不创建或归档持久 Codex thread；完成后删除临时输入输出文件。
 
