@@ -186,6 +186,42 @@ export async function deleteDiaryEntry(entry) {
   return payload;
 }
 
+export async function saveDiaryEntry(entry, draft) {
+  const liveId = String(entry?.id || "").match(/^diary-vps-(\d+)$/u)?.[1];
+  const response = await fetch(
+    liveId ? `/__serein/live/diaries/${liveId}` : "/__serein/live/diaries/entry",
+    {
+      method: liveId ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        date: draft.date,
+        title: draft.title,
+        content: draft.body,
+        ...(liveId ? {} : { author: entry?.role === "assistant" ? "ai" : "user" }),
+      }),
+    },
+  );
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.message || "这篇日记没有保存，请稍后再试。");
+  }
+  return payload;
+}
+
+export function forgetLocalDiaryEntry(entryId) {
+  if (!entryId || /^diary-vps-\d+$/u.test(entryId)) return;
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(diaryStorageKey));
+    if (!Array.isArray(saved)) return;
+    window.localStorage.setItem(
+      diaryStorageKey,
+      JSON.stringify(saved.filter((entry) => entry?.id !== entryId)),
+    );
+  } catch {
+    // A failed local cleanup must not undo a successful server save.
+  }
+}
+
 export function readDiaryEntries() {
   try {
     const saved = JSON.parse(window.localStorage.getItem(diaryStorageKey));

@@ -18,9 +18,11 @@ import {
 import { defaultDarkroom } from "../data/diary.js";
 import {
   deleteDiaryEntry,
+  forgetLocalDiaryEntry,
   loadDiarySnapshot,
   readDiaryEntries,
   readDiaryUserIdentity,
+  saveDiaryEntry,
   storeDiaryEntries,
 } from "../storage/diaryStore.js";
 import { MarkdownProjection } from "../components/MarkdownProjection.jsx";
@@ -95,6 +97,7 @@ export function DiaryPage() {
   const [darkroomLineCount, setDarkroomLineCount] = useState(0);
   const [commentDraft, setCommentDraft] = useState("");
   const [deletingEntryId, setDeletingEntryId] = useState(null);
+  const [savingDiary, setSavingDiary] = useState(false);
   const [draft, setDraft] = useState({
     date: new Date().toISOString().slice(0, 10),
     title: "",
@@ -268,56 +271,41 @@ export function DiaryPage() {
     setEditingEntryId(null);
   };
 
-  const saveDiary = (event) => {
+  const saveDiary = async (event) => {
     event.preventDefault();
     const title = draft.title.trim();
     const body = draft.body
       .split(/\n\s*\n/)
       .map((paragraph) => paragraph.trim())
       .filter(Boolean);
-    if (!title || !body.length || !draft.date) return;
+    if (!title || !body.length || !draft.date || savingDiary) return;
 
-    const now = new Date();
-    if (editingEntryId) {
-      setEntries((current) => sortEntries(current.map((entry) => (
-        entry.id === editingEntryId
-          ? {
-              ...entry,
-              date: draft.date,
-              title,
-              excerpt: body[0].slice(0, 64),
-              body,
-              revision: (entry.revision ?? 1) + 1,
-              updatedAt: now.toISOString(),
-            }
-          : entry
-      ))));
-      setSelectedEntryId(editingEntryId);
+    const editingEntry = entries.find((entry) => entry.id === editingEntryId) ?? null;
+    setSavingDiary(true);
+    try {
+      const result = await saveDiaryEntry(editingEntry ?? diaryUserIdentity, {
+        date: draft.date,
+        title,
+        body: body.join("\n\n"),
+      });
+      forgetLocalDiaryEntry(editingEntry?.id);
+      const snapshotEntries = await loadDiarySnapshot();
+      if (!snapshotEntries?.length) throw new Error("日记已经保存，但书页没有重新载入。");
+      const nextEntries = sortEntries(snapshotEntries);
+      const savedId = `diary-vps-${result.diary_id || result.id}`;
+      setEntries(nextEntries);
+      setSelectedEntryId(nextEntries.some((entry) => entry.id === savedId) ? savedId : nextEntries[0]?.id ?? null);
       setMonth(draft.date.slice(0, 7));
       setCalendarDate(draft.date);
       setQuery("");
+      setView("list");
+      setDraft({ date: new Date().toISOString().slice(0, 10), title: "", body: "" });
       closeComposer();
-      return;
+    } catch (error) {
+      window.alert(error?.message || "这篇日记没有保存，请稍后再试。");
+    } finally {
+      setSavingDiary(false);
     }
-
-    const entry = {
-      id: `diary-${Date.now()}`,
-      date: draft.date,
-      time: `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`,
-      ...diaryUserIdentity,
-      title,
-      excerpt: body[0].slice(0, 64),
-      body,
-      references: [],
-      comments: [],
-    };
-    setEntries((current) => sortEntries([entry, ...current]));
-    setSelectedEntryId(entry.id);
-    setMonth(entry.date.slice(0, 7));
-    setCalendarDate(entry.date);
-    setView("list");
-    setDraft({ date: new Date().toISOString().slice(0, 10), title: "", body: "" });
-    closeComposer();
   };
 
   const addComment = (event) => {
@@ -693,9 +681,9 @@ export function DiaryPage() {
               </label>
               <footer>
                 <button type="button" onClick={closeComposer}>取消</button>
-                <button className="is-primary" type="submit" disabled={!draft.title.trim() || !draft.body.trim()}>
+                <button className="is-primary" type="submit" disabled={savingDiary || !draft.title.trim() || !draft.body.trim()}>
                   <Check size={15} weight="light" aria-hidden="true" />
-                  {editingEntryId ? "保存修改" : "保存日记"}
+                  {savingDiary ? "保存中…" : editingEntryId ? "保存修改" : "保存日记"}
                 </button>
               </footer>
             </form>

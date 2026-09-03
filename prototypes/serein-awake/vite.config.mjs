@@ -1309,6 +1309,28 @@ function sereinMemoryBridge() {
         const route = new URL(request.url || "/", "http://serein.local");
         const diaryId = route.pathname.match(/^\/(\d+)\/?$/u)?.[1];
 
+        if (
+          (request.method === "POST" && /^\/entry\/?$/u.test(route.pathname))
+          || (request.method === "PUT" && diaryId)
+        ) {
+          try {
+            const body = await readJsonBody(request, 256_000);
+            const upstream = await callOmbreDashboard(
+              diaryId ? `/diaries/${diaryId}` : "/diaries",
+              { method: diaryId ? "PUT" : "POST", body },
+            );
+            response.statusCode = upstream.status;
+            response.end(JSON.stringify(upstream.payload));
+          } catch (error) {
+            response.statusCode = error?.name === "AbortError" ? 504 : 502;
+            response.end(JSON.stringify({
+              error: "diary_save_failed",
+              message: "这篇日记没有保存，请稍后再试。",
+            }));
+          }
+          return;
+        }
+
         if (request.method === "DELETE" && diaryId) {
           try {
             const upstream = await callOmbreDashboard(`/diaries/${diaryId}`, { method: "DELETE" });
