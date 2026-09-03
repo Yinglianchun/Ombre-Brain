@@ -1306,7 +1306,25 @@ function sereinMemoryBridge() {
 
       server.middlewares.use("/__serein/live/diaries", async (request, response) => {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
-        if (request.method !== "POST") {
+        const route = new URL(request.url || "/", "http://serein.local");
+        const diaryId = route.pathname.match(/^\/(\d+)\/?$/u)?.[1];
+
+        if (request.method === "DELETE" && diaryId) {
+          try {
+            const upstream = await callOmbreDashboard(`/diaries/${diaryId}`, { method: "DELETE" });
+            response.statusCode = upstream.status;
+            response.end(JSON.stringify(upstream.payload));
+          } catch (error) {
+            response.statusCode = error?.name === "AbortError" ? 504 : 502;
+            response.end(JSON.stringify({
+              error: "diary_delete_failed",
+              message: "这篇日记没有删掉，请稍后再试。",
+            }));
+          }
+          return;
+        }
+
+        if (request.method !== "POST" || !/^\/?$/u.test(route.pathname)) {
           response.statusCode = 405;
           response.end(JSON.stringify({ error: "method_not_allowed" }));
           return;

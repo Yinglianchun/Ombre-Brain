@@ -17,6 +17,7 @@ import {
 } from "@phosphor-icons/react";
 import { defaultDarkroom } from "../data/diary.js";
 import {
+  deleteDiaryEntry,
   loadDiarySnapshot,
   readDiaryEntries,
   readDiaryUserIdentity,
@@ -93,6 +94,7 @@ export function DiaryPage() {
   const [darkroomClock, setDarkroomClock] = useState(() => Date.now());
   const [darkroomLineCount, setDarkroomLineCount] = useState(0);
   const [commentDraft, setCommentDraft] = useState("");
+  const [deletingEntryId, setDeletingEntryId] = useState(null);
   const [draft, setDraft] = useState({
     date: new Date().toISOString().slice(0, 10),
     title: "",
@@ -348,6 +350,33 @@ export function DiaryPage() {
     }));
   };
 
+  const deleteDiary = async () => {
+    if (!selectedEntry || deletingEntryId) return;
+    const deletionDetail = selectedEntry.sourceKind === "ombre-diary-live-readonly"
+      ? "删除后，它会从日记和搜索里消失；系统会保留删除前的修订快照。"
+      : "这篇只保存在当前浏览器，删除后无法从这里恢复。";
+    const confirmed = window.confirm(
+      `删除「${selectedEntry.title}」？\n\n${deletionDetail}`,
+    );
+    if (!confirmed) return;
+
+    const entryId = selectedEntry.id;
+    setDeletingEntryId(entryId);
+    try {
+      await deleteDiaryEntry(selectedEntry);
+      const nextEntries = sortEntries(entries.filter((entry) => entry.id !== entryId));
+      const nextSelected = nextEntries.find((entry) => !entry.darkroom) ?? null;
+      setEntries(nextEntries);
+      setSelectedEntryId(nextSelected?.id ?? null);
+      setCalendarDate(nextSelected?.date ?? null);
+      if (nextSelected?.date) setMonth(nextSelected.date.slice(0, 7));
+    } catch (error) {
+      window.alert(error?.message || "这篇日记没有删掉，请稍后再试。");
+    } finally {
+      setDeletingEntryId(null);
+    }
+  };
+
   return (
     <div className="diary-layout">
       <header className="diary-toolbar">
@@ -496,10 +525,21 @@ export function DiaryPage() {
                   <time dateTime={selectedEntry.date}>
                     {formatDiaryDate(selectedEntry.date)} · {selectedEntry.time} · {selectedEntry.author}
                   </time>
-                  <button type="button" onClick={() => openEditComposer(selectedEntry)}>
-                    <PencilSimpleLine size={14} weight="light" aria-hidden="true" />
-                    编辑
-                  </button>
+                  <div className="diary-reader__actions">
+                    <button type="button" onClick={() => openEditComposer(selectedEntry)}>
+                      <PencilSimpleLine size={14} weight="light" aria-hidden="true" />
+                      编辑
+                    </button>
+                    <button
+                      className="diary-reader__delete"
+                      type="button"
+                      disabled={deletingEntryId === selectedEntry.id}
+                      onClick={deleteDiary}
+                    >
+                      <Trash size={14} weight="light" aria-hidden="true" />
+                      {deletingEntryId === selectedEntry.id ? "删除中…" : "删除"}
+                    </button>
+                  </div>
                 </div>
                 <h2>{selectedEntry.title}</h2>
                 {selectedEntry.references.length ? (

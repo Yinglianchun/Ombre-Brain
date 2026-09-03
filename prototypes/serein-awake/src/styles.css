@@ -4190,6 +4190,11 @@ label:has(input:focus-visible) {
   font-size: 12px;
   letter-spacing: 0.06em;
 }
+.diary-reader__actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
 .diary-reader__meta button {
   display: inline-flex;
   align-items: center;
@@ -4206,6 +4211,14 @@ label:has(input:focus-visible) {
 .diary-reader__meta button:hover {
   border-bottom-color: rgba(73, 91, 84, 0.28);
   color: #52625c;
+}
+.diary-reader__meta button:disabled {
+  cursor: wait;
+  opacity: 0.48;
+}
+.diary-reader__meta .diary-reader__delete:hover {
+  border-bottom-color: rgba(137, 79, 79, 0.28);
+  color: #805c5c;
 }
 .diary-reader__header h2 {
   max-width: 760px;

@@ -174,6 +174,18 @@ export async function loadDiarySnapshot() {
   }
 }
 
+export async function deleteDiaryEntry(entry) {
+  const liveId = String(entry?.id || "").match(/^diary-vps-(\d+)$/u)?.[1];
+  if (!liveId) return { status: "deleted", scope: "local" };
+
+  const response = await fetch(`/__serein/live/diaries/${liveId}`, { method: "DELETE" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.message || "这篇日记没有删掉，请稍后再试。");
+  }
+  return payload;
+}
+
 export function readDiaryEntries() {
   try {
     const saved = JSON.parse(window.localStorage.getItem(diaryStorageKey));
