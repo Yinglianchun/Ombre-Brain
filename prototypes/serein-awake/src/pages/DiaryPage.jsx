@@ -17,6 +17,8 @@ import {
 } from "@phosphor-icons/react";
 import { defaultDarkroom } from "../data/diary.js";
 import {
+  addDiaryComment,
+  deleteDiaryComment,
   deleteDiaryEntry,
   forgetLocalDiaryEntry,
   loadDiarySnapshot,
@@ -96,6 +98,8 @@ export function DiaryPage() {
   const [darkroomClock, setDarkroomClock] = useState(() => Date.now());
   const [darkroomLineCount, setDarkroomLineCount] = useState(0);
   const [commentDraft, setCommentDraft] = useState("");
+  const [commentBusy, setCommentBusy] = useState(false);
+  const [deletingCommentId, setDeletingCommentId] = useState(null);
   const [deletingEntryId, setDeletingEntryId] = useState(null);
   const [savingDiary, setSavingDiary] = useState(false);
   const [draft, setDraft] = useState({
@@ -308,34 +312,44 @@ export function DiaryPage() {
     }
   };
 
-  const addComment = (event) => {
+  const addComment = async (event) => {
     event.preventDefault();
-    if (!selectedEntry || !commentDraft.trim()) return;
-    const now = new Date();
-    updateEntry(selectedEntry.id, (entry) => ({
-      comments: [
-        ...entry.comments,
-        {
-          id: `diary-comment-${Date.now()}`,
-          ...diaryUserIdentity,
-          createdAt: now.toLocaleString("zh-CN", {
-            month: "2-digit",
-            day: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-          }),
-          content: commentDraft.trim(),
-        },
-      ],
-    }));
-    setCommentDraft("");
+    const content = commentDraft.trim();
+    if (!selectedEntry || !content || commentBusy) return;
+
+    setCommentBusy(true);
+    try {
+      await addDiaryComment(selectedEntry, content);
+      const snapshotEntries = await loadDiarySnapshot();
+      if (!snapshotEntries?.length) throw new Error("评论已经保存，但书页没有重新载入。");
+      setEntries(sortEntries(snapshotEntries));
+      setCommentDraft("");
+    } catch (error) {
+      window.alert(error?.message || "这条评论没有保存，请稍后再试。");
+    } finally {
+      setCommentBusy(false);
+    }
   };
 
-  const deleteComment = (commentId) => {
-    if (!selectedEntry) return;
-    updateEntry(selectedEntry.id, (entry) => ({
-      comments: entry.comments.filter((comment) => comment.id !== commentId),
-    }));
+  const deleteComment = async (commentId) => {
+    if (!selectedEntry || deletingCommentId) return;
+    setDeletingCommentId(commentId);
+    try {
+      const result = await deleteDiaryComment(selectedEntry, commentId);
+      if (result.scope === "local") {
+        updateEntry(selectedEntry.id, (entry) => ({
+          comments: entry.comments.filter((comment) => comment.id !== commentId),
+        }));
+      } else {
+        const snapshotEntries = await loadDiarySnapshot();
+        if (!snapshotEntries?.length) throw new Error("评论已经删除，但书页没有重新载入。");
+        setEntries(sortEntries(snapshotEntries));
+      }
+    } catch (error) {
+      window.alert(error?.message || "这条评论没有删掉，请稍后再试。");
+    } finally {
+      setDeletingCommentId(null);
+    }
   };
 
   const deleteDiary = async () => {
@@ -592,6 +606,7 @@ export function DiaryPage() {
                             type="button"
                             aria-label={`删除 ${comment.author} 的评论`}
                             onClick={() => deleteComment(comment.id)}
+                            disabled={deletingCommentId === comment.id}
                           >
                             <Trash size={14} weight="light" aria-hidden="true" />
                           </button>
@@ -616,9 +631,9 @@ export function DiaryPage() {
                   />
                   <footer>
                     <span>{diaryUserIdentity.author} · {diaryUserIdentity.role}</span>
-                    <button type="submit" disabled={!commentDraft.trim()}>
+                    <button type="submit" disabled={commentBusy || !commentDraft.trim()}>
                       <Plus size={14} weight="light" aria-hidden="true" />
-                      添加评论
+                      {commentBusy ? "保存中…" : "添加评论"}
                     </button>
                   </footer>
                 </form>

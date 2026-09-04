@@ -1308,6 +1308,33 @@ function sereinMemoryBridge() {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
         const route = new URL(request.url || "/", "http://serein.local");
         const diaryId = route.pathname.match(/^\/(\d+)\/?$/u)?.[1];
+        const commentRoute = route.pathname.match(/^\/(\d+)\/comments(?:\/(\d+))?\/?$/u);
+        const commentDiaryId = commentRoute?.[1];
+        const commentId = commentRoute?.[2];
+
+        if (
+          (request.method === "POST" && commentDiaryId && !commentId)
+          || (request.method === "DELETE" && commentDiaryId && commentId)
+        ) {
+          try {
+            const body = request.method === "POST" ? await readJsonBody(request) : undefined;
+            const upstream = await callOmbreDashboard(
+              `/diaries/${commentDiaryId}/comments${commentId ? `/${commentId}` : ""}`,
+              { method: request.method, body },
+            );
+            response.statusCode = upstream.status;
+            response.end(JSON.stringify(upstream.payload));
+          } catch (error) {
+            response.statusCode = error?.name === "AbortError" ? 504 : 502;
+            response.end(JSON.stringify({
+              error: request.method === "POST" ? "diary_comment_save_failed" : "diary_comment_delete_failed",
+              message: request.method === "POST"
+                ? "这条评论没有保存，请稍后再试。"
+                : "这条评论没有删掉，请稍后再试。",
+            }));
+          }
+          return;
+        }
 
         if (
           (request.method === "POST" && /^\/entry\/?$/u.test(route.pathname))

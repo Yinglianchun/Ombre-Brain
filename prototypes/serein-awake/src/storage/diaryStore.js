@@ -208,6 +208,39 @@ export async function saveDiaryEntry(entry, draft) {
   return payload;
 }
 
+export async function addDiaryComment(entry, content) {
+  const liveId = String(entry?.id || "").match(/^diary-vps-(\d+)$/u)?.[1];
+  if (!liveId) {
+    throw new Error("这篇日记还没有进入共同日记库，请先编辑并保存，再添加评论。");
+  }
+
+  const response = await fetch(`/__serein/live/diaries/${liveId}/comments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.message || "这条评论没有保存，请稍后再试。");
+  }
+  return payload;
+}
+
+export async function deleteDiaryComment(entry, commentId) {
+  const liveId = String(entry?.id || "").match(/^diary-vps-(\d+)$/u)?.[1];
+  const liveCommentId = String(commentId || "").match(/^diary-comment-vps-(\d+)$/u)?.[1];
+  if (!liveId || !liveCommentId) return { status: "deleted", scope: "local" };
+
+  const response = await fetch(`/__serein/live/diaries/${liveId}/comments/${liveCommentId}`, {
+    method: "DELETE",
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.message || "这条评论没有删掉，请稍后再试。");
+  }
+  return payload;
+}
+
 export function forgetLocalDiaryEntry(entryId) {
   if (!entryId || /^diary-vps-\d+$/u.test(entryId)) return;
   try {
