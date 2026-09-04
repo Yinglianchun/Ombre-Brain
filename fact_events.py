@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import unicodedata
 from contextlib import closing
 from datetime import datetime, timezone
@@ -57,6 +58,8 @@ class FactEventStore:
             )
         )
         self.db_path = os.path.join(state_dir, "fact_events.sqlite")
+        self._initialized = False
+        self._init_lock = threading.Lock()
         if create:
             self._init_db()
 
@@ -68,6 +71,15 @@ class FactEventStore:
         return conn
 
     def _init_db(self) -> None:
+        if self._initialized:
+            return
+        with self._init_lock:
+            if self._initialized:
+                return
+            self._initialize_db_once()
+            self._initialized = True
+
+    def _initialize_db_once(self) -> None:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         with closing(self._connect()) as conn:
             conn.executescript(

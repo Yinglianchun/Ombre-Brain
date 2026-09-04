@@ -61,12 +61,25 @@ def main() -> None:
             ]
         )
         old = store.read(written["items"][0]["item_id"], include_sources=True)
+        original_connect = store._connect
+        request_connections = 0
+
+        def counted_connect():
+            nonlocal request_connections
+            request_connections += 1
+            return original_connect()
+
+        store._connect = counted_connect
+        store._init_db()
+        assert request_connections == 0, "initialized stores must not rerun schema DDL"
         linked = store.link_arc_events(
             "project:serein-memory-system",
             [{"event_id": old["item_id"], "fingerprint": old["fingerprint"]}],
         )
         assert linked["status"] == "updated" and linked["body_unchanged"] is True, linked
+        assert request_connections == 1, "Arc linking should open only its write transaction"
         assert store.arc_event_links("project:serein-memory-system")[0]["event_id"] == old["item_id"]
+        assert request_connections == 2, "Arc reads should not rerun schema DDL"
         idempotent = store.link_arc_events(
             "project:serein-memory-system",
             [{"event_id": old["item_id"], "fingerprint": old["fingerprint"]}],
