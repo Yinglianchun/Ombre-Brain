@@ -37,6 +37,7 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 - Scene lifecycle views are `已沉底` (archived) and `可浮现` (recallable). Do not keep compatibility labels for `已沉淀` or `已确认`.
 - Hide the entire `被叙事卷引用` group when a Scene has no narrative-roll references.
 - Build `叙事卷` as a quiet row of front-facing paper volumes. Adapt only the restrained cover-and-page motion from `D:\APPs\CSS-Book-Effect`; do not copy its palette, iconography, or documentation-card styling.
+- Narrative Writer source order is strict: for bound Scene/Event use hash-verified bound conversation text when available, otherwise use the authored Scene/Event material; Diary, Darkroom, and uploaded text are direct sources. `update` reads the previous roll body plus newly added materials only, while `rewrite` reads all currently bound materials and no previous body. Material removal requires `rewrite`.
 - Use the five reviewed local Narrative Rolls and keep their data in a separate frontend data module so a real registry/API can replace the mock data later.
 - Keep the bookshelf architectural and paper-like: cool white surfaces, hairline rules, small differences in spine height and width, and no literal wooden furniture or heavy Three.js scene.
 - Preserve room for future growth with one quiet, dashed, unnamed spine. It represents a roll that has not formed yet and is not a creation button.

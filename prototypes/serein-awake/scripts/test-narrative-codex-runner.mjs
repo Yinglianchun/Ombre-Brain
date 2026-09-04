@@ -49,6 +49,7 @@ const updatePrompt = buildNarrativeTaskPrompt({
   roleRules: "只使用绑定材料。",
 });
 assert.match(updatePrompt, /"current_body":"旧正文"/);
+assert.match(updatePrompt, /"material_scope":"newly_added"/);
 assert.match(updatePrompt, /<narrative_writer_role_rules>\n只使用绑定材料。/);
 const rewritePrompt = buildNarrativeTaskPrompt({
   mode: "rewrite",
@@ -58,6 +59,7 @@ const rewritePrompt = buildNarrativeTaskPrompt({
   roleRules: "只使用绑定材料。",
 });
 assert.doesNotMatch(rewritePrompt, /current_body/);
+assert.match(rewritePrompt, /"material_scope":"all_bound"/);
 
 assert.equal(normalizeNarrativeWriterResult({
   evidence_sufficient: true,

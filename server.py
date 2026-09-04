@@ -192,6 +192,7 @@ from narrative_materials import (
     normalize_material_ids,
     render_material_snapshot,
 )
+from narrative_writer_sources import conversation_source_messages, writer_material_ids
 from reranker_engine import RerankerEngine
 from scene_linker import SceneLinker
 from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_bucket, is_self_anchor_metadata
@@ -8969,43 +8970,38 @@ async def _materialize_narrative_writer_sources(narrative: dict) -> dict:
         if str(event.get("item_type") or "") != "event" or str(event.get("status") or "") != "active":
             errors.append({"source_type": "event", "source_id": str(event_id), "reason": "not_active"})
             continue
-        source_messages = []
-        event_invalid = False
-        for ref in event.get("source_refs") or []:
-            content = str(ref.get("content") or "")
-            expected_hash = str(ref.get("content_sha256") or "").strip().lower()
-            actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            if not content or not expected_hash or actual_hash != expected_hash:
-                errors.append({
-                    "source_type": "event",
-                    "source_id": str(event_id),
-                    "message_id": ref.get("message_id"),
-                    "reason": "source_snapshot_mismatch",
-                })
-                event_invalid = True
-                break
-            source_messages.append({
-                "source_system": str(ref.get("source_system") or ""),
-                "session_id": ref.get("session_id"),
-                "message_id": ref.get("message_id"),
-                "role": str(ref.get("role") or ""),
-                "created_at": str(ref.get("created_at") or ""),
-                "content": content,
-                "content_sha256": expected_hash,
+        conversation = conversation_source_messages(event.get("source_refs") or [])
+        if conversation["status"] == "invalid":
+            errors.append({
+                "source_type": "event",
+                "source_id": str(event_id),
+                "message_id": conversation.get("message_id"),
+                "reason": "source_snapshot_mismatch",
             })
-        if event_invalid or not source_messages:
-            if not event_invalid:
-                errors.append({"source_type": "event", "source_id": str(event_id), "reason": "no_sources"})
             continue
-        events.append({
+        event_material = {
             "source_type": "event",
             "event_id": str(event_id),
             "title": str(event.get("title") or ""),
             "date": str(event.get("local_date") or ""),
-            "summary": str(event.get("body") or ""),
             "fingerprint": str(event.get("fingerprint") or ""),
-            "source_messages": source_messages,
-        })
+        }
+        if conversation["status"] == "ok":
+            event_material.update({
+                "source_mode": "conversation",
+                "source_messages": conversation["messages"],
+            })
+        else:
+            summary = str(event.get("body") or "").strip()
+            if not summary:
+                errors.append({"source_type": "event", "source_id": str(event_id), "reason": "empty_content"})
+                continue
+            event_material.update({
+                "source_mode": "material",
+                "summary": summary,
+                "content_sha256": hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+            })
+        events.append(event_material)
 
     for scene_id in narrative.get("linked_scene_ids") or []:
         scene = await bucket_mgr.get(str(scene_id))
@@ -9022,19 +9018,41 @@ async def _materialize_narrative_writer_sources(narrative: dict) -> dict:
         ):
             errors.append({"source_type": "scene", "source_id": str(scene_id), "reason": "not_active"})
             continue
-        content = strip_wikilinks(str(scene.get("content") or "")).strip()
-        if not content:
-            errors.append({"source_type": "scene", "source_id": str(scene_id), "reason": "empty_content"})
+        conversation = conversation_source_messages(scene_evidence_store.list_for_scene(str(scene_id)))
+        if conversation["status"] == "invalid":
+            errors.append({
+                "source_type": "scene",
+                "source_id": str(scene_id),
+                "message_id": conversation.get("message_id"),
+                "reason": "source_snapshot_mismatch",
+            })
             continue
-        scenes.append({
+        scene_material = {
             "source_type": "scene",
             "scene_id": str(scene_id),
             "title": str(meta.get("name") or scene_id),
             "date": str(meta.get("date") or meta.get("event_date") or meta.get("created") or ""),
             "status": "active",
-            "content": content,
-            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-        })
+        }
+        if conversation["status"] == "ok":
+            scene_material.update({
+                "source_mode": "conversation",
+                "source_messages": conversation["messages"],
+                "content_sha256": hashlib.sha256(
+                    "".join(message["content_sha256"] for message in conversation["messages"]).encode("utf-8")
+                ).hexdigest(),
+            })
+        else:
+            content = strip_wikilinks(str(scene.get("content") or "")).strip()
+            if not content:
+                errors.append({"source_type": "scene", "source_id": str(scene_id), "reason": "empty_content"})
+                continue
+            scene_material.update({
+                "source_mode": "material",
+                "content": content,
+                "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            })
+        scenes.append(scene_material)
 
     def read_diary_source(source_id: int, source_type: str) -> dict | None:
         result = diary_store.read(diary_id=int(source_id), limit=1, include_archived=True)
@@ -9058,6 +9076,7 @@ async def _materialize_narrative_writer_sources(narrative: dict) -> dict:
         comments = list(result.get("comments") or [])
         return {
             "source_type": source_type,
+            "source_mode": "direct",
             f"{source_type}_id": int(source_id),
             "title": str(result.get("title") or f"{source_type} {source_id}"),
             "date": str(result.get("date") or ""),
@@ -9095,6 +9114,7 @@ async def _materialize_narrative_writer_sources(narrative: dict) -> dict:
             continue
         uploads.append({
             "source_type": "upload",
+            "source_mode": "direct",
             "upload_id": str(item.get("upload_id") or ""),
             "title": str(item.get("filename") or upload_id),
             "filename": str(item.get("filename") or ""),
@@ -9245,9 +9265,26 @@ async def api_narrative_roll_preview_input(request):
         "linked_darkroom_ids": proposed_material_ids["darkroom_ids"],
         "linked_upload_ids": proposed_material_ids["upload_ids"],
     }
-    materials = await _materialize_narrative_writer_sources(proposed_narrative)
+    selection = writer_material_ids(mode, current_material_ids, proposed_material_ids)
+    if selection.get("status") != "ok":
+        return JSONResponse({**selection, "writes_performed": []}, status_code=409)
+    writer_ids = selection["material_ids"]
+    writer_narrative = {
+        **proposed_narrative,
+        "linked_event_ids": writer_ids["event_ids"],
+        "linked_scene_ids": writer_ids["scene_ids"],
+        "linked_diary_ids": writer_ids["diary_ids"],
+        "linked_darkroom_ids": writer_ids["darkroom_ids"],
+        "linked_upload_ids": writer_ids["upload_ids"],
+    }
+    materials = await _materialize_narrative_writer_sources(writer_narrative)
     if materials.get("status") != "ok":
         return JSONResponse({**materials, "writes_performed": []}, status_code=409)
+    sealed_materials = materials
+    if mode == "update":
+        sealed_materials = await _materialize_narrative_writer_sources(proposed_narrative)
+        if sealed_materials.get("status") != "ok":
+            return JSONResponse({**sealed_materials, "writes_performed": []}, status_code=409)
     return JSONResponse({
         "status": "ready",
         "narrative_id": narrative_id,
@@ -9255,13 +9292,14 @@ async def api_narrative_roll_preview_input(request):
         "title": str(narrative.get("title") or narrative_id),
         "current_body": str(narrative.get("body") or ""),
         "materials": materials,
+        "material_scope": selection["scope"],
         "base_revision": current_revision,
         "base_document_sha256": current_hash,
         "material_counts": materials.get("material_counts") or {},
         "current_material_ids": current_material_ids,
         "proposed_material_ids": proposed_material_ids,
-        "material_delta": material_delta(current_material_ids, proposed_material_ids),
-        "material_snapshot_sha256": material_snapshot_sha256(materials),
+        "material_delta": selection["delta"],
+        "material_snapshot_sha256": material_snapshot_sha256(sealed_materials),
         "writes_performed": [],
     })
 

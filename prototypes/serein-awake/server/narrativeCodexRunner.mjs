@@ -26,6 +26,7 @@ export function buildNarrativeTaskPrompt({ mode, title, currentBody, materials, 
   const task = {
     mode,
     title: String(title || "").trim(),
+    material_scope: mode === "update" ? "newly_added" : "all_bound",
     materials,
     ...(mode === "update" ? { current_body: String(currentBody || "") } : {}),
   };
