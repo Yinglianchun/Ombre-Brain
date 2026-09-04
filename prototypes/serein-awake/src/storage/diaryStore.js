@@ -67,16 +67,10 @@ function mergeSavedDiaryState(liveEntries, savedEntries) {
   const merged = liveEntries.map((entry) => {
     const local = savedById.get(entry.id);
     if (!local) return entry;
-    const localComments = Array.isArray(local.comments) ? local.comments : [];
-    const serverCommentIds = new Set(entry.comments.map((comment) => comment.id));
-    const comments = [
-      ...entry.comments,
-      ...localComments.filter((comment) => !serverCommentIds.has(comment.id) && !String(comment.id).startsWith("diary-comment-vps-")),
-    ];
     if (Number(local.revision || 0) > Number(entry.revision || 0)) {
-      return { ...entry, ...local, comments, sourceKind: entry.sourceKind };
+      return { ...entry, ...local, comments: entry.comments, sourceKind: entry.sourceKind };
     }
-    return { ...entry, comments };
+    return entry;
   });
   const liveIds = new Set(liveEntries.map((entry) => entry.id));
   return [
