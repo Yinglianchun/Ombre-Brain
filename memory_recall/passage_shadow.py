@@ -28,7 +28,7 @@ def _now() -> str:
 
 @dataclass(frozen=True)
 class PassageConfig:
-    min_owner_chars: int = 200
+    min_owner_chars: int = 290
     target_chars: int = 160
     max_chars: int = 240
     min_chars: int = 40
@@ -38,7 +38,7 @@ class PassageConfig:
     def from_config(cls, config: dict[str, Any]) -> "PassageConfig":
         raw = config.get("passage_shadow")
         raw = raw if isinstance(raw, dict) else {}
-        min_owner_chars = _bounded_int(raw.get("min_owner_chars"), 200, 0, 2000)
+        min_owner_chars = _bounded_int(raw.get("min_owner_chars"), 290, 0, 2000)
         target = _bounded_int(raw.get("target_chars"), 160, 80, 400)
         maximum = _bounded_int(raw.get("max_chars"), 240, target, 800)
         minimum = _bounded_int(raw.get("min_chars"), 40, 20, target)

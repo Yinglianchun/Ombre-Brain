@@ -21,7 +21,7 @@ this status.
   replace passage similarity, cannot add to the score, and cue-bound passage
   text is stripped from cue-only candidates.
 - Event passage text is derived only from Event body text. Event/Scene objects
-  with at most 200 body characters use only their existing whole embedding.
+  with at most 290 body characters use only their existing whole embedding.
   Longer objects enter the deterministic passage splitter, and still remain
   whole-only when the splitter yields at most one span. No duplicate one-passage
   vector is stored.

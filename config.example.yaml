@@ -168,7 +168,7 @@ embedding:
 # they never become canonical objects.
 passage_shadow:
   simulation_enabled: true       # build/search the rebuildable typed candidate sidecars
-  min_owner_chars: 200           # <= 200 chars stay whole-only; longer owners may split
+  min_owner_chars: 290           # <= 290 chars stay whole-only; longer owners may split
   target_chars: 160
   max_chars: 240
   min_chars: 40

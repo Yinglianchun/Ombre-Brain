@@ -46,6 +46,28 @@ class FailingEmbeddingEngine(FakeEmbeddingEngine):
 
 
 async def main() -> None:
+    from scripts.prune_short_passages import prune
+    with tempfile.TemporaryDirectory(prefix="passage-threshold-290-") as temp_dir:
+        base = {'state_dir':temp_dir,'buckets_dir':str(Path(temp_dir)/'buckets')}
+        engine = FakeEmbeddingEngine()
+        old = PassageShadowIndex({**base,'passage_shadow':{'min_owner_chars':200}},engine)
+        scenes = [{'id':'short','content':'甲'*290},{'id':'long','content':'乙'*294}]
+        await old.sync(scenes=scenes,events=[])
+        with closing(sqlite3.connect(old.db_path)) as conn:
+            before = conn.execute("SELECT ordinal,start_offset,end_offset,text,embedding FROM memory_passage_embeddings WHERE owner_id='long' ORDER BY ordinal").fetchall()
+        engine.documents.clear()
+        current = PassageShadowIndex(base,engine)
+        assert current.passage_config.min_owner_chars == PassageConfig().min_owner_chars == 290
+        result = prune(current,current._owners(scenes,[]),apply=True)
+        assert result['short_owners_with_passages'] == 1 and result['passages_to_remove'] > 0
+        assert Path(result['backup']).exists()
+        assert current.passages_for_owners([('scene','short')]).get(('scene','short'),[]) == []
+        with closing(sqlite3.connect(current.db_path)) as conn:
+            after = conn.execute("SELECT ordinal,start_offset,end_offset,text,embedding FROM memory_passage_embeddings WHERE owner_id='long' ORDER BY ordinal").fetchall()
+        assert before == after
+        synced = await current.sync(scenes=scenes,events=[])
+        assert synced['embedded'] == 0 and engine.documents == []
+        assert (await current.sync(scenes=[{'id':'edge','content':'字'*291}],events=[],dry_run=True))['passages'] > 1
     text = (
         "我们最开始聊到相遇时的样子。Haven说那时小雨还是一只小猫。"
         "后来小雨偶尔露出一点狐狸的狡黠，Haven才开始叫她小狐狸。"
