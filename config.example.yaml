@@ -174,7 +174,8 @@ passage_shadow:
   min_chars: 40
   overlap_sentences: 1
   embedding_concurrency: 6
-  auto_refresh_max_passages: 3    # mutation refresh only; startup warm is always plan-only
+  # Mutation refresh computes changed owners regardless of passage count.
+  # Startup warm remains plan-only; explicit backfill handles older backlog.
   backfill_embedding_concurrency: 2
   backfill_request_delay_ms: 150  # explicit atomic backfill only
 

@@ -25,6 +25,12 @@ this status.
   Longer objects enter the deterministic passage splitter, and still remain
   whole-only when the splitter yields at most one span. No duplicate one-passage
   vector is stored.
+- Scene/Event write notifications automatically refresh passage vectors for
+  the notified owner IDs, including writes that produce more than three spans.
+  Background embedding concurrency remains bounded. Unrelated pending owners
+  do not block this update and are not embedded or removed by it. A notified
+  owner that becomes short, archived, or deleted loses its previous passages.
+  Startup remains plan-only; old backlog uses explicit backfill.
 - Fact is not part of this new typed recall path. Existing Fact storage and
   compatibility APIs are unchanged, but the shadow pool contains only Event
   and Scene owners.

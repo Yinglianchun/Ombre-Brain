@@ -68,6 +68,37 @@ async def main() -> None:
         synced = await current.sync(scenes=scenes,events=[])
         assert synced['embedded'] == 0 and engine.documents == []
         assert (await current.sync(scenes=[{'id':'edge','content':'字'*291}],events=[],dry_run=True))['passages'] > 1
+
+    with tempfile.TemporaryDirectory(prefix="passage-changed-owner-") as temp_dir:
+        engine = FakeEmbeddingEngine()
+        index = PassageShadowIndex({'state_dir':temp_dir}, engine)
+        scenes = [{'id':'existing','content':'已保存正文。'*70}]
+        await index.sync(scenes=scenes, events=[])
+        with closing(sqlite3.connect(index.db_path)) as conn:
+            preserved = conn.execute("SELECT * FROM memory_passage_embeddings WHERE owner_id='existing'").fetchall()
+        # The unrelated backlog must neither block nor join the notified work.
+        scenes += [{'id':'backlog','content':'待补的旧正文。'*200}, {'id':'new','content':'新记忆的局部细节。'*100}]
+        events = [{'item_id':'event-new','title':'新事件','body':'事'*294}]
+        changed = {('scene','new'),('event','event-new')}
+        plan = await index.sync(scenes=scenes, events=events, dry_run=True, owner_keys=changed)
+        assert plan['to_embed'] > 3 and plan['owners'] == 2
+        engine.documents.clear()
+        result = await index.sync(scenes=scenes, events=events, owner_keys=changed)
+        assert result['embedded'] == plan['to_embed'] and result['removed_owners'] == 0
+        assert all('待补的旧正文' not in text for text in engine.documents)
+        with closing(sqlite3.connect(index.db_path)) as conn:
+            assert conn.execute("SELECT * FROM memory_passage_embeddings WHERE owner_id='existing'").fetchall() == preserved
+            assert conn.execute("SELECT count(*) FROM memory_passage_embeddings WHERE owner_id='backlog'").fetchone()[0] == 0
+        engine.documents.clear()
+        assert (await index.sync(scenes=scenes,events=events,owner_keys=changed))['embedded'] == 0
+        scenes[-1]['content'] = '短'*290
+        # An archived/deleted Event no longer appears among active owners.
+        cleared = await index.sync(scenes=scenes,events=[],owner_keys=changed)
+        assert cleared['embedded'] == 0 and cleared['removed_owners'] == 1
+        assert engine.documents == []
+        assert not any(index.passages_for_owners(list(changed)).values())
+        with closing(sqlite3.connect(index.db_path)) as conn:
+            assert conn.execute("SELECT * FROM memory_passage_embeddings WHERE owner_id='existing'").fetchall() == preserved
     text = (
         "我们最开始聊到相遇时的样子。Haven说那时小雨还是一只小猫。"
         "后来小雨偶尔露出一点狐狸的狡黠，Haven才开始叫她小狐狸。"

@@ -873,8 +873,8 @@ async def verify_mutation_refresh_queue() -> None:
     refresh_service.bucket_mgr = Buckets()
     calls = []
 
-    async def fake_sync(self, buckets, *, apply_passage_embeddings=False):
-        calls.append((buckets, apply_passage_embeddings))
+    async def fake_sync(self, buckets, *, apply_passage_embeddings=False, passage_owner_keys=None):
+        calls.append((buckets, apply_passage_embeddings, passage_owner_keys))
         await asyncio.sleep(0)
         return {"status": "ok", "decision_applied": False}
 
@@ -890,6 +890,7 @@ async def verify_mutation_refresh_queue() -> None:
     await refresh_service._passage_shadow_refresh_task
     assert len(calls) == 1
     assert calls[0][1] is True
+    assert calls[0][2] == {("scene", "scene-edited"), ("event", "event-new")}
     assert refresh_service._passage_candidate_shadow_sync["requested_scene_ids"] == [
         "scene-edited"
     ]
@@ -901,9 +902,8 @@ async def verify_mutation_refresh_queue() -> None:
     )
 
 
-async def verify_warm_plans_and_bounded_refresh_applies() -> None:
+async def verify_warm_plans_and_changed_owner_refresh_applies() -> None:
     warm_service = GatewayService.__new__(GatewayService)
-    warm_service.passage_shadow_auto_refresh_max_passages = 3
 
     class Store:
         def list(self, **_kwargs):
@@ -925,12 +925,13 @@ async def verify_warm_plans_and_bounded_refresh_applies() -> None:
             self.to_embed = 40
             self.calls = []
 
-        async def sync(self, *, scenes, events, dry_run=False):
+        async def sync(self, *, scenes, events, dry_run=False, owner_keys=None):
             self.calls.append(
                 {
                     "dry_run": dry_run,
                     "scenes": len(scenes),
                     "events": len(events),
+                    "owner_keys": owner_keys,
                 }
             )
             if dry_run:
@@ -1003,21 +1004,24 @@ async def verify_warm_plans_and_bounded_refresh_applies() -> None:
         }
     ]
     warm = await warm_service._sync_passage_candidate_shadow(buckets)
-    assert passage_index.calls == [{"dry_run": True, "scenes": 1, "events": 1}]
+    assert passage_index.calls == [{"dry_run": True, "scenes": 1, "events": 1, "owner_keys": None}]
     assert warm["passage"]["status"] == "stale", warm
     assert warm["passage"]["reason"] == "explicit_backfill_required", warm
     assert warm["passage"]["embeddings_applied"] is False, warm
     assert observed_index.calls == [{"dry_run": True, "owners": 2, "arcs": 0}]
 
-    passage_index.to_embed = 2
+    passage_index.to_embed = 8
     passage_index.calls.clear()
     refreshed = await warm_service._sync_passage_candidate_shadow(
         buckets,
         apply_passage_embeddings=True,
+        passage_owner_keys={("scene", "scene-warm")},
     )
     assert [call["dry_run"] for call in passage_index.calls] == [True, False]
     assert refreshed["passage"]["embeddings_applied"] is True, refreshed
-    assert refreshed["passage"]["apply_source"] == "bounded_mutation_refresh", refreshed
+    assert refreshed["passage"]["apply_source"] == "changed_owner_mutation_refresh", refreshed
+    assert refreshed["passage"]["embedded"] == 8, refreshed
+    assert all(call["owner_keys"] == {("scene", "scene-warm")} for call in passage_index.calls)
     assert observed_index.calls[-1] == {"dry_run": False, "owners": 2, "arcs": 0}
 
 
@@ -1026,6 +1030,6 @@ asyncio.run(verify_full_handler_uses_prefetched_query_vector())
 verify_pre_candidate_surface_gate()
 asyncio.run(verify_full_handler_uses_only_typed_pool())
 asyncio.run(verify_mutation_refresh_queue())
-asyncio.run(verify_warm_plans_and_bounded_refresh_applies())
+asyncio.run(verify_warm_plans_and_changed_owner_refresh_applies())
 
 print("PASSAGE_CANDIDATE_SIMULATION_SHADOW_OK")

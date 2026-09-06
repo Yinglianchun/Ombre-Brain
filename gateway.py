@@ -474,10 +474,6 @@ class GatewayService:
             passage_shadow_cfg.get("simulation_enabled"),
             True,
         )
-        self.passage_shadow_auto_refresh_max_passages = max(
-            0,
-            min(20, int(passage_shadow_cfg.get("auto_refresh_max_passages", 3))),
-        )
         typed_recall_cfg = config.get("typed_recall")
         typed_recall_cfg = typed_recall_cfg if isinstance(typed_recall_cfg, dict) else {}
         legacy_typed_live_enabled = self._bool_config_value(
@@ -14307,6 +14303,7 @@ class GatewayService:
         all_buckets: list[dict[str, Any]],
         *,
         apply_passage_embeddings: bool = False,
+        passage_owner_keys: set[tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
         scenes = [
             scene
@@ -14335,22 +14332,20 @@ class GatewayService:
             scenes=scenes,
             events=eligible_events,
             dry_run=True,
+            owner_keys=passage_owner_keys,
         )
         passage_delta = int(
             passage_plan.get("owners_to_refresh", passage_plan.get("to_embed")) or 0
         ) + int(
             passage_plan.get("stale_owners") or 0
         )
-        if (
-            apply_passage_embeddings
-            and int(passage_plan.get("to_embed") or 0)
-            <= getattr(self, "passage_shadow_auto_refresh_max_passages", 3)
-        ):
+        if apply_passage_embeddings:
             passage_sync = await self.passage_shadow_index.sync(
                 scenes=scenes,
                 events=eligible_events,
+                owner_keys=passage_owner_keys,
             )
-            passage_sync["apply_source"] = "bounded_mutation_refresh"
+            passage_sync["apply_source"] = "changed_owner_mutation_refresh"
             passage_sync["embeddings_applied"] = True
         else:
             passage_sync = {
@@ -14359,11 +14354,7 @@ class GatewayService:
                 "reason": (
                     "up_to_date"
                     if not passage_delta
-                    else (
-                        "auto_refresh_limit_exceeded"
-                        if apply_passage_embeddings
-                        else "explicit_backfill_required"
-                    )
+                    else "explicit_backfill_required"
                 ),
                 "embeddings_applied": False,
                 "decision_applied": False,
@@ -14576,6 +14567,10 @@ class GatewayService:
                 result = await self._sync_passage_candidate_shadow(
                     all_buckets,
                     apply_passage_embeddings=True,
+                    passage_owner_keys={
+                        *(("scene", owner_id) for owner_id in scene_ids),
+                        *(("event", owner_id) for owner_id in fact_event_ids),
+                    },
                 )
                 self._passage_candidate_shadow_sync = {
                     **result,

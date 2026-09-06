@@ -366,10 +366,13 @@ class PassageShadowIndex:
         refresh_all: bool = False,
         embedding_concurrency: int | None = None,
         request_delay_ms: int = 0,
+        owner_keys: set[tuple[str, str]] | None = None,
         _db_path: str | None = None,
     ) -> dict[str, Any]:
         target_db_path = _db_path or self.db_path
         owners = self._owners(scenes, events)
+        if owner_keys is not None:
+            owners = [row for row in owners if (row[0], row[1]) in owner_keys]
         existing: dict[tuple[str, str], list[sqlite3.Row]] = {}
         existing_state: dict[tuple[str, str], sqlite3.Row] = {}
         if os.path.exists(target_db_path):
@@ -389,7 +392,10 @@ class PassageShadowIndex:
                     }
 
         desired_keys = {(kind, owner_id) for kind, owner_id, _content, _title in owners}
-        stale_keys = sorted((set(existing) | set(existing_state)) - desired_keys)
+        indexed_keys = set(existing) | set(existing_state)
+        if owner_keys is not None:
+            indexed_keys &= owner_keys
+        stale_keys = sorted(indexed_keys - desired_keys)
         plans: list[tuple[str, str, str, str, str, list[dict[str, Any]], bool]] = []
         for kind, owner_id, content, title in owners:
             source_hash = self._source_hash(kind, owner_id, content, title)
