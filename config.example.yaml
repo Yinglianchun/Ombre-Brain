@@ -608,7 +608,7 @@ persona:
   # Optional pre-reply conflict scout. It is read-only and fail-soft: on a
   # confident conflict/withdrawal signal it injects one private anti-retreat
   # reminder, never a reply script or an action decision.
-  conflict_nudge_enabled: false
+  conflict_nudge_enabled: true
   conflict_nudge_context_turns: 3
   conflict_nudge_min_confidence: 0.55
   conflict_nudge_timeout_seconds: 4
